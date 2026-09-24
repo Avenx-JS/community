@@ -1,4 +1,9 @@
-import { Controller } from '@nestjs/common';
+import { Controller, Post, Body } from '@nestjs/common';
 
 @Controller('votes')
-export class VotesController {}
+export class VotesController {
+  @Post()
+  vote(@Body() body: any) {
+    return { message: 'Not implemented' };
+  }
+}
