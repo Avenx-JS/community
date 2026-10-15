@@ -25,6 +25,40 @@
 
 [Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
 
+## Auth API
+
+The API connects to MySQL using `MYSQL_HOST` (defaults to `127.0.0.1`),
+`MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DATABASE`. Create the
+schema in `apps/community.sql` before starting the API. It includes
+`auth_sessions`, which stores only SHA-256 hashes of opaque access tokens.
+
+`POST /auth/register` accepts `{ "username", "email", "password" }` and returns
+HTTP `201`. `POST /auth/login` accepts `{ "identifier", "password" }`, where
+`identifier` is a username or email, and returns HTTP `200`. Both return this
+response shape:
+
+```json
+{
+  "accessToken": "opaque-token",
+  "tokenType": "Bearer",
+  "expiresAt": "2026-10-15T20:00:00.000Z",
+  "user": {
+    "id": "user-id",
+    "username": "sample_user",
+    "email": "sample@example.com",
+    "createdAt": "2026-10-15T08:00:00.000Z"
+  }
+}
+```
+
+Access tokens expire after 12 hours. Send them as `Authorization: Bearer <token>`
+to authenticated endpoints. `POST /auth/logout` requires this header and returns
+HTTP `204`; it revokes that token immediately. Registration requires a 3-50
+character username containing only letters, numbers, or underscores, a valid
+email, and a 12-128 character password. Validation errors return `400`, duplicate
+username/email returns `409`, and invalid login or missing, expired, or revoked
+credentials return `401`.
+
 ## Project setup
 
 ```bash
