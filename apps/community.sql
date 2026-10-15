@@ -8,6 +8,16 @@ CREATE TABLE users (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE auth_sessions (
+    token_hash CHAR(64) PRIMARY KEY,
+    user_id VARCHAR(36) NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_auth_sessions_user_id (user_id),
+    INDEX idx_auth_sessions_expires_at (expires_at),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
 CREATE TABLE communities (
     id VARCHAR(36) PRIMARY KEY,
     name VARCHAR(50) NOT NULL UNIQUE,
