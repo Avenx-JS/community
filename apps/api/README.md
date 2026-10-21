@@ -59,6 +59,31 @@ email, and a 12-128 character password. Validation errors return `400`, duplicat
 username/email returns `409`, and invalid login or missing, expired, or revoked
 credentials return `401`.
 
+## Public user profiles
+
+`GET /users/:username` returns the public profile for the exact username with
+HTTP `200`:
+
+```json
+{
+  "id": "user-id",
+  "username": "sample_user",
+  "created_at": "2026-10-15T08:00:00.000Z"
+}
+```
+
+The response includes only `id`, `username`, and `created_at`; it does not expose
+the user's email, password, or password hash. If the username does not exist,
+the endpoint returns HTTP `404`:
+
+```json
+{
+  "statusCode": 404,
+  "message": "User not found",
+  "error": "Not Found"
+}
+```
+
 ## Project setup
 
 ```bash

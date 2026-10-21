@@ -1,9 +1,12 @@
 import { Controller, Get, Param } from '@nestjs/common';
+import { UsersService } from './users.service';
 
 @Controller('users')
 export class UsersController {
-    @Get(':username')
-    getUserProfile(@Param('username') username: string) {
-        return { message: 'Not implemented' };
-    }
+  constructor(private readonly usersService: UsersService) {}
+
+  @Get(':username')
+  getUserProfile(@Param('username') username: string) {
+    return this.usersService.getUserProfile(username);
+  }
 }
