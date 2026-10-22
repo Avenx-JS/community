@@ -126,6 +126,41 @@ operation is safe: subscribing twice leaves one subscription, and unsubscribing
 when no subscription exists still returns `204`. An unknown community returns
 `404`.
 
+## Posts
+
+`GET /posts` is public and returns `{ "items", "page", "limit", "total",
+"sort" }`. It accepts optional `community_id`, one-based `page` (default `1`),
+`limit` from `1` to `100` (default `20`), and `sort=new` (the only supported
+sort order). Posts are ordered by `created_at` descending, then `id` descending
+to keep pagination stable. An empty page is returned with HTTP `200`.
+
+`POST /posts` requires a bearer token and accepts `title` (1-300 characters),
+`type` (`text`, `link`, or `media`), non-empty `content` (up to 16,383
+characters), and an existing `community_id`. For `text`, content is the post
+body. For `link` and `media`, content must be an HTTP or HTTPS URL. The author
+is always taken from the authenticated user; body-supplied `author_id` is
+rejected. Successful creation returns HTTP `201` and the post DTO.
+
+`GET /posts/:id` is public and returns the post DTO, or `404` for an unknown ID.
+`DELETE /posts/:id` requires a bearer token and deletes only the authenticated
+author's post. It returns HTTP `204` with no body; a post owned by another user
+returns `403`, and an unknown post returns `404`. The database cascades deletion
+to the post's comments.
+
+Post responses use this DTO:
+
+```json
+{
+  "id": "post-id",
+  "title": "A post",
+  "content": "Post body",
+  "type": "text",
+  "author_id": "user-id",
+  "community_id": "community-id",
+  "created_at": "2026-10-22T08:00:00.000Z"
+}
+```
+
 ## Project setup
 
 ```bash

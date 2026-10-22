@@ -1,34 +1,58 @@
-import { Controller, Get, Post, Delete, Param, Query, Body } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
+import { AuthGuard, type AuthenticatedRequest } from '../auth/auth.guard';
+import { CreatePostDto } from './dto/create-post.dto';
+import { ListPostsDto } from './dto/list-posts.dto';
+import { PostsService } from './posts.service';
 
 @Controller('posts')
 export class PostsController {
-    @Get()
-    findAll(@Query() query: any) {
-        return { message: 'Not implemented' };
-    }
+  constructor(private readonly postsService: PostsService) {}
 
-    @Post()
-    create(@Body() body: any) {
-        return { message: 'Not implemented' };
-    }
+  @Get()
+  findAll(@Query() query: ListPostsDto) {
+    return this.postsService.findAll(query);
+  }
 
-    @Get(':id')
-    findOne(@Param('id') id: string) {
-        return { message: 'Not implemented' };
-    }
+  @Post()
+  @UseGuards(AuthGuard)
+  create(@Body() body: CreatePostDto, @Req() request: AuthenticatedRequest) {
+    return this.postsService.create(body, request.user.id);
+  }
 
-    @Delete(':id')
-    remove(@Param('id') id: string) {
-        return { message: 'Not implemented' };
-    }
+  @Get(':id')
+  findOne(@Param('id') id: string) {
+    return this.postsService.findOne(id);
+  }
 
-    @Get(':postId/comments')
-    getComments(@Param('postId') postId: string) {
-        return { message: 'Not implemented' };
-    }
+  @Delete(':id')
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  remove(
+    @Param('id') id: string,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<void> {
+    return this.postsService.remove(id, request.user.id);
+  }
 
-    @Post(':postId/comments')
-    addComment(@Param('postId') postId: string, @Body() body: any) {
-        return { message: 'Not implemented' };
-    }
+  @Get(':postId/comments')
+  getComments(@Param('postId') postId: string) {
+    return { message: 'Not implemented' };
+  }
+
+  @Post(':postId/comments')
+  addComment(@Param('postId') postId: string, @Body() body: any) {
+    return { message: 'Not implemented' };
+  }
 }
