@@ -11,7 +11,9 @@ describe('AuthController', () => {
   let loginResponse: AuthResponse;
   let registerCalls: unknown[];
   let loginCalls: unknown[];
+  let refreshCalls: string[];
   let logoutCalls: string[];
+  let logoutAllCalls: string[];
 
   const authService = {
     register: (input: Parameters<AuthService['register']>[0]) => {
@@ -22,17 +24,30 @@ describe('AuthController', () => {
       loginCalls.push(input);
       return Promise.resolve(loginResponse);
     },
+    refresh: (token: string) => {
+      refreshCalls.push(token);
+      return Promise.resolve(loginResponse);
+    },
     logout: (token: string) => {
       logoutCalls.push(token);
       return Promise.resolve();
     },
-  } satisfies Pick<AuthService, 'register' | 'login' | 'logout'>;
+    logoutAll: (userId: string) => {
+      logoutAllCalls.push(userId);
+      return Promise.resolve();
+    },
+  } satisfies Pick<
+    AuthService,
+    'register' | 'login' | 'refresh' | 'logout' | 'logoutAll'
+  >;
 
   beforeEach(async () => {
     registerResponse = {
       accessToken: 'registration-token',
       tokenType: 'Bearer',
       expiresAt: new Date().toISOString(),
+      refreshToken: 'registration-refresh-token',
+      refreshTokenExpiresAt: new Date().toISOString(),
       user: {
         id: 'user-id',
         username: 'sample',
@@ -43,7 +58,9 @@ describe('AuthController', () => {
     loginResponse = { ...registerResponse, accessToken: 'login-token' };
     registerCalls = [];
     loginCalls = [];
+    refreshCalls = [];
     logoutCalls = [];
+    logoutAllCalls = [];
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AuthController],
@@ -77,5 +94,20 @@ describe('AuthController', () => {
     await controller.logout(request);
 
     expect(logoutCalls).toEqual(['current-session-token']);
+  });
+
+  it('rotates refresh tokens and revokes all user sessions on request', async () => {
+    await expect(
+      controller.refresh({ refreshToken: 'current-refresh-token' }),
+    ).resolves.toEqual(loginResponse);
+
+    const request = {
+      accessToken: 'current-session-token',
+      user: { id: 'user-id' },
+    } as AuthenticatedRequest;
+    await controller.logoutAll(request);
+
+    expect(refreshCalls).toEqual(['current-refresh-token']);
+    expect(logoutAllCalls).toEqual(['user-id']);
   });
 });

@@ -29,8 +29,10 @@
 
 The API connects to MySQL using `MYSQL_HOST` (defaults to `127.0.0.1`),
 `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DATABASE`. Create the
-schema in `apps/community.sql` before starting the API. It includes
-`auth_sessions`, which stores only SHA-256 hashes of opaque access tokens.
+schema in `apps/community.sql` before starting a new installation. Existing
+installations must apply `apps/api/migrations/001_refresh_token_rotation.sql`
+before deploying the refresh-token API. Access and refresh tokens are opaque
+random credentials; the database stores only their SHA-256 hashes.
 
 `POST /auth/register` accepts `{ "username", "email", "password" }` and returns
 HTTP `201`. `POST /auth/login` accepts `{ "identifier", "password" }`, where
@@ -41,7 +43,9 @@ response shape:
 {
   "accessToken": "opaque-token",
   "tokenType": "Bearer",
-  "expiresAt": "2026-10-15T20:00:00.000Z",
+  "expiresAt": "2026-10-15T08:15:00.000Z",
+  "refreshToken": "opaque-refresh-token",
+  "refreshTokenExpiresAt": "2026-11-14T08:00:00.000Z",
   "user": {
     "id": "user-id",
     "username": "sample_user",
@@ -51,13 +55,29 @@ response shape:
 }
 ```
 
-Access tokens expire after 12 hours. Send them as `Authorization: Bearer <token>`
+Access tokens expire after 15 minutes. Send them as `Authorization: Bearer <token>`
 to authenticated endpoints. `POST /auth/logout` requires this header and returns
-HTTP `204`; it revokes that token immediately. Registration requires a 3-50
+HTTP `204`; it revokes that session and its refresh-token family. Registration
+requires a 3-50
 character username containing only letters, numbers, or underscores, a valid
 email, and a 12-128 character password. Validation errors return `400`, duplicate
 username/email returns `409`, and invalid login or missing, expired, or revoked
 credentials return `401`.
+
+`POST /auth/refresh` accepts `{ "refreshToken": "<refreshToken>" }` and returns
+HTTP `200` with the same response shape. Each refresh token can be used only
+once; a successful refresh invalidates the previous access and refresh tokens.
+Reusing a rotated refresh token revokes the entire session family. Refresh
+tokens expire 30 days after session creation; rotation does not extend that
+absolute lifetime. `POST /auth/logout` revokes the current session and its
+refresh-token family. `POST /auth/logout-all` requires a valid access token and
+revokes all sessions belonging to that user. Expired auth-session and
+refresh-token records can be purged with periodic database maintenance.
+
+Clients must protect both credentials, never place them in URLs or logs, and
+avoid persisting refresh tokens in browser local storage. Browser clients should
+keep credentials in memory until an appropriately protected cookie-based flow
+is available; native clients should use platform secure storage.
 
 ## Public user profiles
 

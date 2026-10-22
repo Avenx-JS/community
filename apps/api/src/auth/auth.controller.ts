@@ -12,6 +12,7 @@ import type { AuthenticatedRequest } from './auth.guard';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
+import { RefreshDto } from './dto/refresh.dto';
 
 @Controller('auth')
 export class AuthController {
@@ -28,10 +29,23 @@ export class AuthController {
     return this.authService.login(body);
   }
 
+  @Post('refresh')
+  @HttpCode(HttpStatus.OK)
+  refresh(@Body() body: RefreshDto) {
+    return this.authService.refresh(body.refreshToken);
+  }
+
   @Post('logout')
   @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(AuthGuard)
   async logout(@Req() request: AuthenticatedRequest): Promise<void> {
     await this.authService.logout(request.accessToken);
+  }
+
+  @Post('logout-all')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @UseGuards(AuthGuard)
+  async logoutAll(@Req() request: AuthenticatedRequest): Promise<void> {
+    await this.authService.logoutAll(request.user.id);
   }
 }
