@@ -183,6 +183,33 @@ returns `403`, and an unknown comment returns `404`. Deleting a comment also
 deletes all descendant replies because the comments table uses
 `ON DELETE CASCADE` for `parent_id`.
 
+## Votes
+
+`POST /votes` requires a bearer token and accepts `target_type` (`post` or
+`comment`), `target_id`, and `value` (`1` or `-1`). The voter ID always comes
+from the authenticated user. Invalid input returns `400`; an unknown target
+returns `404`.
+
+The endpoint creates the user's vote or updates its value when a vote already
+exists for that user and target. The database's `unique_user_target` constraint
+enforces one vote per user and target, including concurrent requests. The
+target is locked during the transaction so the response includes the stored
+vote and the score recalculated from all votes for that target.
+
+Success returns HTTP `201`:
+
+```json
+{
+  "id": "vote-id",
+  "user_id": "user-id",
+  "target_type": "post",
+  "target_id": "post-id",
+  "value": 1,
+  "created_at": "2026-10-22T08:00:00.000Z",
+  "score": 3
+}
+```
+
 ## Project setup
 
 ```bash
