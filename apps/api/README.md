@@ -79,6 +79,38 @@ avoid persisting refresh tokens in browser local storage. Browser clients should
 keep credentials in memory until an appropriately protected cookie-based flow
 is available; native clients should use platform secure storage.
 
+### Authentication rate limits
+
+Login, registration, and refresh requests use atomic fixed-window counters in
+the shared MySQL `auth_rate_limits` table. Default limits are 20 login attempts
+per IP and 10 per normalized account per 15 minutes; 5 registrations per IP
+and 3 per normalized username/email per hour; and 30 refresh attempts per IP
+and 10 per refresh token per hour. Exceeded limits return HTTP `429` with a
+`Retry-After` header. Login failures remain generic, and no account lockout is
+applied. The exported `AuthRateLimitService.enforceSignals()` method uses the
+same shared counters and can be reused for future API route throttles.
+
+Limits are configurable with `AUTH_LOGIN_IP_MAX`,
+`AUTH_LOGIN_IP_WINDOW_SECONDS`, `AUTH_LOGIN_ACCOUNT_MAX`,
+`AUTH_LOGIN_ACCOUNT_WINDOW_SECONDS`, `AUTH_REGISTER_IP_MAX`,
+`AUTH_REGISTER_IP_WINDOW_SECONDS`, `AUTH_REGISTER_ACCOUNT_MAX`,
+`AUTH_REGISTER_ACCOUNT_WINDOW_SECONDS`, `AUTH_REFRESH_IP_MAX`,
+`AUTH_REFRESH_IP_WINDOW_SECONDS`, `AUTH_REFRESH_TOKEN_MAX`, and
+`AUTH_REFRESH_TOKEN_WINDOW_SECONDS`. Values must be integers from 1 to 86400.
+The API does not trust proxy forwarding headers by default; `request.ip` uses
+the direct socket address. Deployments behind a reverse proxy must configure
+trusted proxy handling at the infrastructure/application boundary before
+changing this behavior.
+
+Rate-limit keys are HMAC-SHA-256 digests, not raw IPs, usernames, emails, or
+tokens. Set a high-entropy `RATE_LIMIT_HASH_SECRET` shared by all API instances
+in production; production startup fails if neither it nor `MYSQL_PASSWORD` is
+configured. `MYSQL_PASSWORD` is used only as a fallback HMAC key when the
+dedicated secret is absent. The local-development fallback is not suitable for
+production. Expired counter rows may be removed periodically by deleting rows
+whose `window_started_at` is older than the longest configured rate-limit
+window.
+
 ## Public user profiles
 
 `GET /users/:username` returns the public profile for the exact username with

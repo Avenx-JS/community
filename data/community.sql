@@ -34,6 +34,13 @@ CREATE TABLE auth_refresh_tokens (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE auth_rate_limits (
+    bucket_key CHAR(64) PRIMARY KEY,
+    window_started_at TIMESTAMP NOT NULL,
+    request_count INT UNSIGNED NOT NULL,
+    INDEX idx_auth_rate_limits_window_started_at (window_started_at)
+);
+
 CREATE TABLE communities (
     id VARCHAR(36) PRIMARY KEY,
     creator_id VARCHAR(36) NOT NULL,

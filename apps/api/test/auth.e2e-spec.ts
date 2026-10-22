@@ -31,11 +31,20 @@ interface TestRefreshToken {
   revoked_at: Date | null;
 }
 
+interface TestRateLimitBucket {
+  requestCount: number;
+  windowStartedAt: number;
+  windowSeconds: number;
+}
+
 describe('Auth endpoints (e2e)', () => {
   let app: INestApplication<App>;
   let users: TestUser[];
   let sessions: TestSession[];
   let refreshTokens: TestRefreshToken[];
+  let rateLimitBuckets: Map<string, TestRateLimitBucket>;
+  let previousLoginIpMax: string | undefined;
+  let previousLoginIpWindow: string | undefined;
   let pool: {
     execute: (sql: string, values: unknown[]) => Promise<[unknown, unknown]>;
     getConnection: () => Promise<{
@@ -48,9 +57,14 @@ describe('Auth endpoints (e2e)', () => {
   };
 
   beforeEach(async () => {
+    previousLoginIpMax = process.env.AUTH_LOGIN_IP_MAX;
+    previousLoginIpWindow = process.env.AUTH_LOGIN_IP_WINDOW_SECONDS;
+    process.env.AUTH_LOGIN_IP_MAX = '2';
+    process.env.AUTH_LOGIN_IP_WINDOW_SECONDS = '60';
     users = [];
     sessions = [];
     refreshTokens = [];
+    rateLimitBuckets = new Map();
     const execute = (
       sql: string,
       values: unknown[],
@@ -109,6 +123,45 @@ describe('Auth endpoints (e2e)', () => {
         );
         return Promise.resolve([
           session ? [{ session_id: session.session_id }] : [],
+          [],
+        ]);
+      }
+      if (sql.startsWith('INSERT INTO auth_rate_limits')) {
+        const [bucketKey] = values as [string];
+        const match = sql.match(/INTERVAL (\d+) SECOND/);
+        if (!match) {
+          return Promise.reject(new Error('Missing rate-limit window'));
+        }
+        const windowSeconds = Number(match[1]);
+        const now = Date.now();
+        const bucket = rateLimitBuckets.get(bucketKey);
+        if (!bucket || bucket.windowStartedAt <= now - windowSeconds * 1000) {
+          rateLimitBuckets.set(bucketKey, {
+            requestCount: 1,
+            windowStartedAt: now,
+            windowSeconds,
+          });
+        } else {
+          bucket.requestCount += 1;
+        }
+        return Promise.resolve([{ affectedRows: 1 }, []]);
+      }
+      if (sql.startsWith('SELECT request_count')) {
+        const [bucketKey] = values as [string];
+        const bucket = rateLimitBuckets.get(bucketKey);
+        if (!bucket) {
+          return Promise.resolve([[], []]);
+        }
+        const elapsedSeconds = Math.floor(
+          (Date.now() - bucket.windowStartedAt) / 1000,
+        );
+        return Promise.resolve([
+          [
+            {
+              request_count: bucket.requestCount,
+              retry_after: Math.max(1, bucket.windowSeconds - elapsedSeconds),
+            },
+          ],
           [],
         ]);
       }
@@ -259,6 +312,16 @@ describe('Auth endpoints (e2e)', () => {
 
   afterEach(async () => {
     await app.close();
+    if (previousLoginIpMax === undefined) {
+      delete process.env.AUTH_LOGIN_IP_MAX;
+    } else {
+      process.env.AUTH_LOGIN_IP_MAX = previousLoginIpMax;
+    }
+    if (previousLoginIpWindow === undefined) {
+      delete process.env.AUTH_LOGIN_IP_WINDOW_SECONDS;
+    } else {
+      process.env.AUTH_LOGIN_IP_WINDOW_SECONDS = previousLoginIpWindow;
+    }
   });
 
   it('registers a user and returns a bearer credential without password data', async () => {
@@ -490,5 +553,43 @@ describe('Auth endpoints (e2e)', () => {
     expect(refreshTokens.every((token) => token.revoked_at !== null)).toBe(
       true,
     );
+  });
+
+  it('returns 429 with Retry-After and ignores untrusted forwarded IP headers', async () => {
+    for (const forwardedIp of ['198.51.100.1', '198.51.100.2']) {
+      await request(app.getHttpServer())
+        .post('/auth/login')
+        .set('X-Forwarded-For', forwardedIp)
+        .send({
+          identifier: 'unknown@example.com',
+          password: 'incorrect-password',
+        })
+        .expect(401);
+    }
+
+    const limited = await request(app.getHttpServer())
+      .post('/auth/login')
+      .set('X-Forwarded-For', '198.51.100.3')
+      .send({
+        identifier: 'unknown@example.com',
+        password: 'incorrect-password',
+      })
+      .expect(429);
+
+    expect(Number(limited.headers['retry-after'])).toBeGreaterThan(0);
+    const responseBody = limited.body as { message: string };
+    expect(responseBody.message).toBe('Too many requests');
+
+    for (const bucket of rateLimitBuckets.values()) {
+      bucket.windowStartedAt = Date.now() - (bucket.windowSeconds + 1) * 1000;
+    }
+    await request(app.getHttpServer())
+      .post('/auth/login')
+      .set('X-Forwarded-For', '198.51.100.4')
+      .send({
+        identifier: 'unknown@example.com',
+        password: 'incorrect-password',
+      })
+      .expect(401);
   });
 });
