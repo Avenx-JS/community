@@ -1,9 +1,26 @@
-import { Controller, Delete, Param } from '@nestjs/common';
+import {
+  Controller,
+  Delete,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
+import { AuthGuard, type AuthenticatedRequest } from '../auth/auth.guard';
+import { CommentsService } from './comments.service';
 
 @Controller('comments')
 export class CommentsController {
+  constructor(private readonly commentsService: CommentsService) {}
+
   @Delete(':id')
-  remove(@Param('id') id: string) {
-    return { message: 'Not implemented' };
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  remove(
+    @Param('id') id: string,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<void> {
+    return this.commentsService.remove(id, request.user.id);
   }
 }

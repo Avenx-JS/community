@@ -12,13 +12,18 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { AuthGuard, type AuthenticatedRequest } from '../auth/auth.guard';
+import { CreateCommentDto } from '../comments/dto/create-comment.dto';
+import { CommentsService } from '../comments/comments.service';
 import { CreatePostDto } from './dto/create-post.dto';
 import { ListPostsDto } from './dto/list-posts.dto';
 import { PostsService } from './posts.service';
 
 @Controller('posts')
 export class PostsController {
-  constructor(private readonly postsService: PostsService) {}
+  constructor(
+    private readonly postsService: PostsService,
+    private readonly commentsService: CommentsService,
+  ) {}
 
   @Get()
   findAll(@Query() query: ListPostsDto) {
@@ -48,11 +53,16 @@ export class PostsController {
 
   @Get(':postId/comments')
   getComments(@Param('postId') postId: string) {
-    return { message: 'Not implemented' };
+    return this.commentsService.findThread(postId);
   }
 
   @Post(':postId/comments')
-  addComment(@Param('postId') postId: string, @Body() body: any) {
-    return { message: 'Not implemented' };
+  @UseGuards(AuthGuard)
+  addComment(
+    @Param('postId') postId: string,
+    @Body() body: CreateCommentDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.commentsService.create(postId, body, request.user.id);
   }
 }

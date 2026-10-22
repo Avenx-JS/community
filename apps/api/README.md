@@ -161,6 +161,28 @@ Post responses use this DTO:
 }
 ```
 
+## Comments
+
+`GET /posts/:postId/comments` is public and returns
+`{ "post_id", "comments" }`. Comments are nested recursively through `replies`;
+each comment contains its `id`, `post_id`, `author_id`, `parent_id`, `content`,
+`created_at`, and `replies`. Roots and sibling replies use chronological order
+(`created_at` ascending, then `id` ascending), making the thread order stable.
+An unknown post returns `404`.
+
+`POST /posts/:postId/comments` requires a bearer token and accepts non-empty
+`content` (1-16,383 characters) and an optional `parent_id`. The author is
+always taken from the authenticated user. The post must exist, and a supplied
+parent must belong to that same post; an unknown or cross-post parent returns
+`404`. A successful creation returns HTTP `201` and the created comment DTO
+with an empty `replies` array.
+
+`DELETE /comments/:id` requires authentication and deletes only the author's
+comment. Success returns HTTP `204` with no body; another user's comment
+returns `403`, and an unknown comment returns `404`. Deleting a comment also
+deletes all descendant replies because the comments table uses
+`ON DELETE CASCADE` for `parent_id`.
+
 ## Project setup
 
 ```bash

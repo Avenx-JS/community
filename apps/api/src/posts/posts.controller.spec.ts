@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { AuthService } from '../auth/auth.service';
+import { CommentsService } from '../comments/comments.service';
 import { PostsController } from './posts.controller';
 import { PostsService } from './posts.service';
 
@@ -11,6 +12,7 @@ describe('PostsController', () => {
       controllers: [PostsController],
       providers: [
         { provide: PostsService, useValue: {} },
+        { provide: CommentsService, useValue: {} },
         { provide: AuthService, useValue: {} },
       ],
     }).compile();
