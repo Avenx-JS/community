@@ -1,4 +1,8 @@
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  NotFoundException,
+  PayloadTooLargeException,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { CommentsService } from './comments.service';
@@ -74,6 +78,25 @@ describe('CommentsService', () => {
       parent_id: 'reply-a',
     });
     expect(queries[1].sql).toContain('ORDER BY created_at ASC, id ASC');
+    expect(queries[1].values).toEqual(['post-1', 501]);
+  });
+
+  it('rejects a thread that exceeds the bounded result size', async () => {
+    results = [
+      [{ id: 'post-1' }],
+      Array.from({ length: 501 }, (_, index) => ({
+        id: `comment-${index}`,
+        post_id: 'post-1',
+        author_id: 'user-1',
+        parent_id: null,
+        content: 'comment',
+        created_at: new Date('2026-10-22T08:00:00.000Z'),
+      })),
+    ];
+
+    await expect(service.findThread('post-1')).rejects.toBeInstanceOf(
+      PayloadTooLargeException,
+    );
   });
 
   it('rejects missing posts and parent comments not belonging to the post', async () => {

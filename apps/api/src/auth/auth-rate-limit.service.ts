@@ -27,6 +27,13 @@ interface AuthRateLimitConfig {
   registerAccount: RateLimitOptions;
   refreshIp: RateLimitOptions;
   refreshToken: RateLimitOptions;
+  apiRequestIp: RateLimitOptions;
+  apiReadIp: RateLimitOptions;
+  apiWriteIp: RateLimitOptions;
+  apiWriteAccount: RateLimitOptions;
+  contentCreateIp: RateLimitOptions;
+  contentCreateAccount: RateLimitOptions;
+  contentCreateCooldown: RateLimitOptions;
 }
 
 const localDevelopmentSecret = 'community-local-rate-limit-secret';
@@ -66,6 +73,13 @@ function readConfig(): AuthRateLimitConfig {
     registerAccount: readOptions('AUTH_REGISTER_ACCOUNT', 3, 3600),
     refreshIp: readOptions('AUTH_REFRESH_IP', 30, 3600),
     refreshToken: readOptions('AUTH_REFRESH_TOKEN', 10, 3600),
+    apiRequestIp: readOptions('API_REQUEST_IP', 300, 60),
+    apiReadIp: readOptions('API_READ_IP', 120, 60),
+    apiWriteIp: readOptions('API_WRITE_IP', 60, 60),
+    apiWriteAccount: readOptions('API_WRITE_ACCOUNT', 120, 60),
+    contentCreateIp: readOptions('API_CONTENT_CREATE_IP', 10, 600),
+    contentCreateAccount: readOptions('API_CONTENT_CREATE_ACCOUNT', 5, 600),
+    contentCreateCooldown: readOptions('API_CONTENT_COOLDOWN', 1, 30),
   };
 }
 
@@ -123,16 +137,66 @@ export class AuthRateLimitService {
     ]);
   }
 
-  async enforceSignals(signals: RateLimitSignal[]): Promise<number | null> {
-    let longestRetryAfter = 0;
+  async enforceApiRequest(
+    ip: string,
+    method: string,
+    path: string,
+    accountId?: string,
+  ): Promise<number | null> {
+    const isRead = method === 'GET' || method === 'HEAD';
+    const signals = [
+      this.signal('api:request:ip', ip, this.config.apiRequestIp),
+      this.signal(
+        isRead ? 'api:read:ip' : 'api:write:ip',
+        ip,
+        isRead ? this.config.apiReadIp : this.config.apiWriteIp,
+      ),
+    ];
 
-    for (const signal of signals) {
-      const retryAfter = await this.consume(signal);
-      if (retryAfter !== null) {
-        longestRetryAfter = Math.max(longestRetryAfter, retryAfter);
+    if (!isRead && accountId) {
+      signals.push(
+        this.signal(
+          'api:write:account',
+          accountId,
+          this.config.apiWriteAccount,
+        ),
+      );
+    }
+
+    if (
+      method === 'POST' &&
+      (path === '/posts' || /^\/posts\/[^/]+\/comments$/.test(path))
+    ) {
+      signals.push(
+        this.signal('api:content:create:ip', ip, this.config.contentCreateIp),
+      );
+      if (accountId) {
+        signals.push(
+          this.signal(
+            'api:content:create:account',
+            accountId,
+            this.config.contentCreateAccount,
+          ),
+          this.signal(
+            'api:content:create:cooldown',
+            accountId,
+            this.config.contentCreateCooldown,
+          ),
+        );
       }
     }
 
+    return this.enforceSignals(signals);
+  }
+
+  async enforceSignals(signals: RateLimitSignal[]): Promise<number | null> {
+    const retryAfters = await Promise.all(
+      signals.map((signal) => this.consume(signal)),
+    );
+    const longestRetryAfter = Math.max(
+      0,
+      ...retryAfters.map((value) => value ?? 0),
+    );
     return longestRetryAfter > 0 ? longestRetryAfter : null;
   }
 

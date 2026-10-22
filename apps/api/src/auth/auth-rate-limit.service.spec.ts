@@ -104,4 +104,49 @@ describe('AuthRateLimitService', () => {
     expect(calls[0].sql).toContain('INSERT INTO auth_rate_limits');
     expect(calls[0].sql).toContain('INTERVAL 120 SECOND');
   });
+
+  it('shares API counters across service instances through the database store', async () => {
+    const previousMax = process.env.API_READ_IP_MAX;
+    process.env.API_READ_IP_MAX = '1';
+    const sharedBuckets = new Map<string, number>();
+    const sharedPool = {
+      execute: (sql: string, values: unknown[]) => {
+        const bucketKey = values[0] as string;
+        if (sql.startsWith('INSERT INTO auth_rate_limits')) {
+          sharedBuckets.set(bucketKey, (sharedBuckets.get(bucketKey) ?? 0) + 1);
+          return Promise.resolve([{ affectedRows: 1 }, []] as [
+            unknown,
+            unknown,
+          ]);
+        }
+        return Promise.resolve([
+          [
+            {
+              request_count: sharedBuckets.get(bucketKey) ?? 0,
+              retry_after: 60,
+            },
+          ],
+          [],
+        ] as [unknown, unknown]);
+      },
+    } as unknown as Pool;
+
+    try {
+      const firstInstance = new AuthRateLimitService(sharedPool);
+      const secondInstance = new AuthRateLimitService(sharedPool);
+      await expect(
+        firstInstance.enforceApiRequest('192.0.2.10', 'GET', '/posts'),
+      ).resolves.toBeNull();
+      await expect(
+        secondInstance.enforceApiRequest('192.0.2.10', 'GET', '/posts'),
+      ).resolves.toBe(60);
+      expect([...sharedBuckets.values()]).toEqual([2, 2]);
+    } finally {
+      if (previousMax === undefined) {
+        delete process.env.API_READ_IP_MAX;
+      } else {
+        process.env.API_READ_IP_MAX = previousMax;
+      }
+    }
+  });
 });

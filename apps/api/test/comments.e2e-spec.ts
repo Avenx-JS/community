@@ -80,7 +80,7 @@ describe('Comment endpoints (e2e)', () => {
           sql.startsWith('SELECT id, post_id, author_id, parent_id') &&
           sql.includes('WHERE post_id = ?')
         ) {
-          const [postId] = values as [string];
+          const [postId, limit] = values as [string, number];
           return [
             comments
               .filter((comment) => comment.post_id === postId)
@@ -88,7 +88,8 @@ describe('Comment endpoints (e2e)', () => {
                 (left, right) =>
                   left.created_at.getTime() - right.created_at.getTime() ||
                   left.id.localeCompare(right.id),
-              ),
+              )
+              .slice(0, limit),
             [],
           ];
         }
@@ -216,6 +217,10 @@ describe('Comment endpoints (e2e)', () => {
       replies: [{ id: 'nested-reply', parent_id: 'reply-1' }],
     });
     expect(response.body.comments[1].replies).toEqual([]);
+    expect(
+      queryCalls.find((call) => call.sql.includes('ORDER BY created_at ASC'))
+        ?.values,
+    ).toEqual(['post-1', 501]);
 
     const missing = await request(app.getHttpServer())
       .get('/posts/unknown/comments')

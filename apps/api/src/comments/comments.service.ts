@@ -3,6 +3,7 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  PayloadTooLargeException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
@@ -17,6 +18,8 @@ interface CommentRow extends RowDataPacket {
   content: string;
   created_at: Date | string;
 }
+
+const MAX_COMMENTS_PER_THREAD = 500;
 
 export interface CommentDto {
   id: string;
@@ -40,9 +43,14 @@ export class CommentsService {
   async findThread(postId: string): Promise<CommentThreadDto> {
     await this.ensurePostExists(postId);
     const [rows] = await this.pool.execute<CommentRow[]>(
-      'SELECT id, post_id, author_id, parent_id, content, created_at FROM comments WHERE post_id = ? ORDER BY created_at ASC, id ASC',
-      [postId],
+      'SELECT id, post_id, author_id, parent_id, content, created_at FROM comments WHERE post_id = ? ORDER BY created_at ASC, id ASC LIMIT ?',
+      [postId, MAX_COMMENTS_PER_THREAD + 1],
     );
+    if (rows.length > MAX_COMMENTS_PER_THREAD) {
+      throw new PayloadTooLargeException(
+        `Comment threads are limited to ${MAX_COMMENTS_PER_THREAD} comments`,
+      );
+    }
 
     const nodes = new Map<string, CommentDto>();
     for (const row of rows) {

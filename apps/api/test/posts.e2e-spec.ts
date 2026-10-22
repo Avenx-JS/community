@@ -203,6 +203,8 @@ describe('Post endpoints (e2e)', () => {
     await request(app.getHttpServer())
       .get('/posts?unexpected=value')
       .expect(400);
+    await request(app.getHttpServer()).get('/posts?page=10001').expect(400);
+    await request(app.getHttpServer()).get('/posts?limit=101').expect(400);
   });
 
   it('creates supported post types for the authenticated author', async () => {

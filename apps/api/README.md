@@ -162,6 +162,50 @@ credentials. This validation prevents unsafe schemes and confusing URL forms;
 it does not fetch the URL server-side or assert that the destination is
 trustworthy. JSON responses are `application/json`.
 
+## API abuse controls and request bounds
+
+All non-health REST requests use fixed-window counters persisted in the shared
+MySQL `auth_rate_limits` table, with HMACed bucket identifiers. All requests
+share a default limit of 300 per IP per minute. Reads have an additional limit
+of 120 per IP per minute; non-read requests have an additional limit of 60 per
+IP per minute and, when authenticated, 120 per account per minute. Creating a
+post or comment is stricter: at most 10 per IP per 10 minutes, 5 per account
+per 10 minutes, and one creation per account every 30 seconds. Account keys
+come only from the authenticated bearer token, never from a request body or
+forwarded identity header. Authentication endpoints retain their separate
+limits documented above. Rejected requests return HTTP `429` and `Retry-After`.
+
+Thresholds and fixed windows can be overridden using positive-integer
+environment variables: `API_REQUEST_IP_MAX` and
+`API_REQUEST_IP_WINDOW_SECONDS`; `API_READ_IP_MAX` and
+`API_READ_IP_WINDOW_SECONDS`; `API_WRITE_IP_MAX` and
+`API_WRITE_IP_WINDOW_SECONDS`; `API_WRITE_ACCOUNT_MAX` and
+`API_WRITE_ACCOUNT_WINDOW_SECONDS`; `API_CONTENT_CREATE_IP_MAX` and
+`API_CONTENT_CREATE_IP_WINDOW_SECONDS`; `API_CONTENT_CREATE_ACCOUNT_MAX` and
+`API_CONTENT_CREATE_ACCOUNT_WINDOW_SECONDS`; and `API_CONTENT_COOLDOWN_MAX`
+and `API_CONTENT_COOLDOWN_WINDOW_SECONDS`. Configure the same values and
+`RATE_LIMIT_HASH_SECRET` on every API instance. The MySQL upsert counter is
+atomic and shared across instances; process-local memory is not used for
+limiting. Configure a trusted proxy hop count as described in the security
+headers section to use client IPs behind a proxy; forwarded IP headers are
+ignored by default.
+
+Post and community collection pagination is bounded to `page=1..10000` and
+`limit=1..100`; invalid values are rejected with HTTP `400`. A comment thread
+returns at most 500 comments. If more exist, the bounded query fetches one
+additional row and returns HTTP `413` rather than silently truncating a tree.
+JSON request bodies are limited to 64 KiB by default. Set
+`API_BODY_LIMIT_BYTES` to a value between 1,024 and 1,048,576 to adjust this
+limit; requests exceeding it receive HTTP `413`.
+
+Post and comment creation also has a server-enforced per-account cooldown, so
+switching a client-supplied user ID cannot evade it. The unauthenticated
+`GET /health` liveness endpoint is exempt from API rate limits and performs no
+database work; protect it from excessive traffic at the network/load-balancer
+layer. No other routes bypass the API limiter. Expired rows in
+`auth_rate_limits` should be periodically purged by database maintenance after
+their longest configured window has elapsed.
+
 ## Security headers and CORS
 
 The API uses Helmet to set `X-Content-Type-Options: nosniff`,

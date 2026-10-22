@@ -206,6 +206,12 @@ describe('Community endpoints (e2e)', () => {
       .get('/communities?page=1%20OR%201%3D1')
       .expect(400);
     await request(app.getHttpServer())
+      .get('/communities?page=10001')
+      .expect(400);
+    await request(app.getHttpServer())
+      .get('/communities?limit=101')
+      .expect(400);
+    await request(app.getHttpServer())
       .get('/communities?unexpected=value')
       .expect(400);
   });
