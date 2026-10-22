@@ -162,6 +162,42 @@ credentials. This validation prevents unsafe schemes and confusing URL forms;
 it does not fetch the URL server-side or assert that the destination is
 trustworthy. JSON responses are `application/json`.
 
+## Security headers and CORS
+
+The API uses Helmet to set `X-Content-Type-Options: nosniff`,
+`X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and a restrictive CSP
+(`default-src 'none'`, `base-uri 'none'`, and `frame-ancestors 'none'`). The CSP
+is defense-in-depth for API responses; it does not sanitize data or protect a
+separate client that renders API content. Clients must follow the plain-text
+rendering policy above.
+
+Set `CORS_ORIGINS` to a comma-separated list of exact origins, including scheme
+and port when present, with no paths or wildcard values. In development, the
+default is `http://localhost:4200,http://127.0.0.1:4200`; set the variable to
+override it or to an empty value to allow no browser origins. In production the
+default is empty, so configure the deployed web application's exact origin(s)
+explicitly. Requests without an `Origin` header remain usable for server-side
+clients; an unconfigured browser origin receives no CORS permission. CORS is
+not authentication or CSRF protection and does not block non-browser clients.
+
+Credentialed CORS is disabled because the API uses bearer tokens rather than
+cross-origin cookies. Preflight permits the configured API methods and the
+`Authorization` and `Content-Type` request headers, and is cached for ten
+minutes. Browser clients should send bearer tokens explicitly; do not enable
+credentialed CORS or wildcard origins without a separately reviewed cookie and
+CSRF design.
+
+HSTS is emitted only in production and only when the request is recognized as
+HTTPS. For direct TLS termination, HTTPS is detected from the connection. If
+TLS terminates at a reverse proxy, set `TRUST_PROXY_HOPS` to the exact number of
+trusted proxy hops between the client and API; it defaults to `0`, and the
+proxy must overwrite (not append untrusted client values to) forwarded protocol
+headers. The API accepts only a bounded numeric hop count and does not trust
+forwarded headers by default. HSTS is configured for one year with
+`includeSubDomains`; enable it only when all covered hosts are HTTPS-capable.
+The deployment must provide TLS at the trusted edge and restrict direct access
+to the API so clients cannot impersonate that proxy.
+
 ## Communities
 
 `GET /communities` returns a page of communities in a stable order
