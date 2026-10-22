@@ -48,9 +48,7 @@ response shape:
   "refreshTokenExpiresAt": "2026-11-14T08:00:00.000Z",
   "user": {
     "id": "user-id",
-    "username": "sample_user",
-    "email": "sample@example.com",
-    "createdAt": "2026-10-15T08:00:00.000Z"
+    "username": "sample_user"
   }
 }
 ```
@@ -134,20 +132,18 @@ window.
 
 ## Public user profiles
 
-`GET /users/:username` returns the public profile for the exact username with
-HTTP `200`:
+`GET /users/:username` returns only the public username for the exact account
+with HTTP `200`:
 
 ```json
 {
-  "id": "user-id",
-  "username": "sample_user",
-  "created_at": "2026-10-15T08:00:00.000Z"
+  "username": "sample_user"
 }
 ```
 
-The response includes only `id`, `username`, and `created_at`; it does not expose
-the user's email, password, or password hash. If the username does not exist,
-the endpoint returns HTTP `404`:
+The profile endpoint does not expose the account ID or creation timestamp, and
+never exposes email, password, or password hash. If the username does not
+exist, the endpoint returns HTTP `404`:
 
 ```json
 {
@@ -156,6 +152,40 @@ the endpoint returns HTTP `404`:
   "error": "Not Found"
 }
 ```
+
+## Data classification, errors, and logging
+
+- **Public:** username and user-authored post/comment content. Post and comment
+  DTOs expose their public content identifiers and author IDs for attribution;
+  those IDs are not credentials.
+- **Private account data:** email is accepted for registration and login but is
+  not returned by profile, auth, content, or list responses. The signed-in
+  auth-response user object contains only that account's ID and username; user
+  creation time is not exposed by the profile or auth response.
+- **Never returned or logged:** plaintext passwords, password hashes, salts,
+  bearer/refresh tokens, token hashes, and session identifiers. Encoded
+  password hashes remain database-only. Access and refresh credentials appear
+  only in the HTTPS authentication response to the requesting client and must
+  be stored securely by that client.
+
+Login failures use the same `401` response for unknown accounts, incorrect
+passwords, and malformed stored hashes. Duplicate-registration errors use the
+same generic `409` response for username and email conflicts; field-specific
+details are not returned. Unexpected server errors return a generic `500`.
+The global exception filter logs only the HTTP method, route template, and
+status for server errors; it does not log exception text, stack traces, actual
+path values, query strings, request bodies, or headers.
+
+The API does not install an HTTP access/request logger, and source verification
+confirms there are no `console` calls or application logger calls elsewhere
+that serialize request data. Deployments must apply the same redaction at
+reverse proxies, load balancers, APM, and log collectors: do not capture request
+bodies or `Authorization`/`Cookie` headers, and omit query strings. Restrict
+operational log access to authorized operations/security staff, audit access,
+and retain logs for no longer than 30 days unless an incident or legal hold
+requires a documented extension. HMAC rate-limit bucket keys are pseudonymous
+operational identifiers rather than anonymous data and should be purged after
+the longest configured counter window.
 
 ## REST input and content safety
 

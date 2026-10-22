@@ -100,8 +100,6 @@ export interface AuthResponse {
   user: {
     id: string;
     username: string;
-    email: string;
-    createdAt: string;
   };
 }
 
@@ -122,7 +120,7 @@ export class AuthService {
       );
     } catch (error) {
       if (this.isDuplicateEntry(error)) {
-        throw new ConflictException('Username or email already exists');
+        throw new ConflictException('Registration could not be completed');
       }
       throw error;
     }
@@ -417,8 +415,6 @@ export class AuthService {
       user: {
         id: user.id,
         username: user.username,
-        email: user.email,
-        createdAt: new Date(user.created_at).toISOString(),
       },
     };
   }

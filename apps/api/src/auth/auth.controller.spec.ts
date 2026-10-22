@@ -71,8 +71,6 @@ describe('AuthController', () => {
       user: {
         id: 'user-id',
         username: 'sample',
-        email: 'sample@example.com',
-        createdAt: new Date().toISOString(),
       },
     };
     loginResponse = { ...registerResponse, accessToken: 'login-token' };

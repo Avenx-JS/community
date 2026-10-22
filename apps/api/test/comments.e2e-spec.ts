@@ -217,6 +217,10 @@ describe('Comment endpoints (e2e)', () => {
       replies: [{ id: 'nested-reply', parent_id: 'reply-1' }],
     });
     expect(response.body.comments[1].replies).toEqual([]);
+    const rootComment = response.body.comments[0] as Record<string, unknown>;
+    expect(rootComment).not.toHaveProperty('email');
+    expect(rootComment).not.toHaveProperty('password_hash');
+    expect(rootComment).not.toHaveProperty('auth_sessions');
     expect(
       queryCalls.find((call) => call.sql.includes('ORDER BY created_at ASC'))
         ?.values,
@@ -241,6 +245,19 @@ describe('Comment endpoints (e2e)', () => {
       content: 'New root',
       replies: [],
     });
+    expect(Object.keys(topLevel.body).sort()).toEqual(
+      [
+        'author_id',
+        'content',
+        'created_at',
+        'id',
+        'parent_id',
+        'post_id',
+        'replies',
+      ].sort(),
+    );
+    expect(topLevel.body).not.toHaveProperty('email');
+    expect(topLevel.body).not.toHaveProperty('password_hash');
 
     const reply = await request(app.getHttpServer())
       .post('/posts/post-1/comments')

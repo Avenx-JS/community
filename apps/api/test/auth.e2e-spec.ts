@@ -366,9 +366,20 @@ describe('Auth endpoints (e2e)', () => {
       user: {
         id: expect.any(String),
         username: 'sample_user',
-        email: 'sample@example.com',
       },
     });
+    expect(Object.keys(body).sort()).toEqual(
+      [
+        'accessToken',
+        'expiresAt',
+        'refreshToken',
+        'refreshTokenExpiresAt',
+        'tokenType',
+        'user',
+      ].sort(),
+    );
+    expect(Object.keys(body.user).sort()).toEqual(['id', 'username']);
+    expect(body).not.toHaveProperty('email');
     expect(body.user).not.toHaveProperty('password');
     expect(body.user).not.toHaveProperty('password_hash');
     expect(users[0].password_hash).not.toBe('correct-horse-battery');
@@ -389,17 +400,21 @@ describe('Auth endpoints (e2e)', () => {
       .post('/auth/register')
       .send(registration)
       .expect(201);
-    await request(app.getHttpServer())
+    const duplicateUsername = await request(app.getHttpServer())
       .post('/auth/register')
       .send({ ...registration, username: 'another_user' })
       .expect(409);
-    await request(app.getHttpServer())
+    const duplicateEmail = await request(app.getHttpServer())
       .post('/auth/register')
       .send({ ...registration, email: 'another@example.com' })
       .expect(409);
+    expect(duplicateUsername.body).toEqual(duplicateEmail.body);
+    expect(JSON.stringify(duplicateUsername.body)).not.toContain(
+      'sample@example.com',
+    );
   });
 
-  it('logs in with username or email and rejects invalid credentials', async () => {
+  it('returns the same generic error for unknown accounts and incorrect passwords', async () => {
     await request(app.getHttpServer())
       .post('/auth/register')
       .send({
@@ -409,20 +424,30 @@ describe('Auth endpoints (e2e)', () => {
       })
       .expect(201);
 
-    const loginResponse = await request(app.getHttpServer())
-      .post('/auth/login')
-      .send({ identifier: 'sample_user', password: 'correct-horse-battery' })
-      .expect(200);
-    const loginBody = loginResponse.body as { accessToken: string };
-    expect(loginBody.accessToken).toEqual(expect.any(String));
-
-    await request(app.getHttpServer())
+    const wrongPassword = await request(app.getHttpServer())
       .post('/auth/login')
       .send({
         identifier: 'sample@example.com',
         password: 'incorrect-password',
       })
       .expect(401);
+    const unknownUser = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({
+        identifier: 'unknown@example.com',
+        password: 'incorrect-password',
+      })
+      .expect(401);
+    expect(unknownUser.body).toEqual(wrongPassword.body);
+    expect(JSON.stringify(wrongPassword.body)).not.toContain(
+      'incorrect-password',
+    );
+    expect(JSON.stringify(wrongPassword.body)).not.toContain(
+      'sample@example.com',
+    );
+    expect(JSON.stringify(unknownUser.body)).not.toContain(
+      'incorrect-password',
+    );
   });
 
   it('invalidates the current bearer credential on logout', async () => {
@@ -555,6 +580,9 @@ describe('Auth endpoints (e2e)', () => {
       })
       .expect(200);
     const loginBody = login.body as { accessToken: string };
+    expect(login.body).not.toHaveProperty('user.email');
+    expect(login.body).not.toHaveProperty('user.createdAt');
+    expect(login.body).not.toHaveProperty('user.password_hash');
 
     await request(app.getHttpServer())
       .post('/auth/logout-all')

@@ -37,13 +37,11 @@ describe('UsersService', () => {
 
   it('returns only public profile fields', async () => {
     await expect(service.getUserProfile('sample')).resolves.toEqual({
-      id: 'user-id',
       username: 'sample',
-      created_at: '2026-10-21T20:00:00.000Z',
     });
     expect(queryCalls).toEqual([
       {
-        sql: 'SELECT id, username, created_at FROM users WHERE username = ? LIMIT 1',
+        sql: 'SELECT username FROM users WHERE username = ? LIMIT 1',
         values: ['sample'],
       },
     ]);

@@ -189,6 +189,10 @@ describe('Post endpoints (e2e)', () => {
       sort: 'new',
       items: [{ id: 'post-2', title: 'Second' }],
     });
+    const listedPost = firstPage.body.items[0] as Record<string, unknown>;
+    expect(listedPost).not.toHaveProperty('email');
+    expect(listedPost).not.toHaveProperty('password_hash');
+    expect(listedPost).not.toHaveProperty('auth_sessions');
     const secondPage = await request(app.getHttpServer())
       .get('/posts?community_id=community-1&page=2&limit=1')
       .expect(200);
@@ -240,6 +244,18 @@ describe('Post endpoints (e2e)', () => {
         id: expect.any(String),
         created_at: expect.any(String),
       });
+      expect(Object.keys(response.body).sort()).toEqual(
+        [
+          'author_id',
+          'community_id',
+          'content',
+          'created_at',
+          'id',
+          'title',
+          'type',
+        ].sort(),
+      );
+      expect(response.body).not.toHaveProperty('email');
       expect(response.body).not.toHaveProperty('password_hash');
     }
     expect(

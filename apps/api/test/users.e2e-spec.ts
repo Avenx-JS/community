@@ -49,22 +49,21 @@ describe('User profile endpoint (e2e)', () => {
     await app.close();
   });
 
-  it('returns the public profile without email or password data', async () => {
+  it('returns only the public username and no account metadata', async () => {
     const response = await request(app.getHttpServer())
       .get('/users/sample_user')
       .expect(200);
 
-    expect(response.body).toEqual({
-      id: 'user-id',
-      username: 'sample_user',
-      created_at: '2026-10-21T20:00:00.000Z',
-    });
+    expect(response.body).toEqual({ username: 'sample_user' });
+    expect(Object.keys(response.body)).toEqual(['username']);
+    expect(response.body).not.toHaveProperty('id');
+    expect(response.body).not.toHaveProperty('created_at');
     expect(response.body).not.toHaveProperty('email');
     expect(response.body).not.toHaveProperty('password');
     expect(response.body).not.toHaveProperty('password_hash');
     expect(queryCalls).toEqual([
       {
-        sql: 'SELECT id, username, created_at FROM users WHERE username = ? LIMIT 1',
+        sql: 'SELECT username FROM users WHERE username = ? LIMIT 1',
         values: ['sample_user'],
       },
     ]);

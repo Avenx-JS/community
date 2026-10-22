@@ -3,15 +3,11 @@ import type { Pool, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 
 interface UserProfileRow extends RowDataPacket {
-  id: string;
   username: string;
-  created_at: Date | string;
 }
 
 export interface UserProfile {
-  id: string;
   username: string;
-  created_at: string;
 }
 
 @Injectable()
@@ -20,7 +16,7 @@ export class UsersService {
 
   async getUserProfile(username: string): Promise<UserProfile> {
     const [users] = await this.pool.execute<UserProfileRow[]>(
-      'SELECT id, username, created_at FROM users WHERE username = ? LIMIT 1',
+      'SELECT username FROM users WHERE username = ? LIMIT 1',
       [username],
     );
     const user = users[0];
@@ -29,10 +25,6 @@ export class UsersService {
       throw new NotFoundException('User not found');
     }
 
-    return {
-      id: user.id,
-      username: user.username,
-      created_at: new Date(user.created_at).toISOString(),
-    };
+    return { username: user.username };
   }
 }
