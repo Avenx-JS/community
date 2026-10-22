@@ -19,6 +19,7 @@ interface TestCommunity {
 describe('Community endpoints (e2e)', () => {
   let app: INestApplication<App>;
   let communities: TestCommunity[];
+  let subscriptions: Set<string>;
   let queryCalls: Array<{ sql: string; values: unknown[] }>;
 
   beforeEach(async () => {
@@ -48,6 +49,7 @@ describe('Community endpoints (e2e)', () => {
         created_at: new Date('2026-10-19T12:00:00.000Z'),
       },
     ];
+    subscriptions = new Set();
     queryCalls = [];
 
     const pool = {
@@ -75,6 +77,18 @@ describe('Community endpoints (e2e)', () => {
             rules,
             created_at: new Date('2026-10-22T08:00:00.000Z'),
           });
+          return [{ affectedRows: 1 }, []];
+        }
+
+        if (sql.startsWith('INSERT INTO community_subscriptions')) {
+          const [userId, communityId] = values as [string, string];
+          subscriptions.add(`${userId}:${communityId}`);
+          return [{ affectedRows: 1 }, []];
+        }
+
+        if (sql.startsWith('DELETE FROM community_subscriptions')) {
+          const [userId, communityId] = values as [string, string];
+          subscriptions.delete(`${userId}:${communityId}`);
           return [{ affectedRows: 1 }, []];
         }
 
@@ -264,5 +278,66 @@ describe('Community endpoints (e2e)', () => {
       message: 'Community not found',
       error: 'Not Found',
     });
+  });
+
+  it('subscribes idempotently and unsubscribes the authenticated user', async () => {
+    const endpoint = '/communities/gardening/subscribe';
+
+    await request(app.getHttpServer())
+      .post(endpoint)
+      .set('Authorization', 'Bearer valid-token')
+      .expect(204);
+    expect(subscriptions).toEqual(new Set(['authenticated-user:community-a']));
+
+    await request(app.getHttpServer())
+      .post(endpoint)
+      .set('Authorization', 'Bearer valid-token')
+      .expect(204);
+    expect(subscriptions).toEqual(new Set(['authenticated-user:community-a']));
+    expect(
+      queryCalls.filter((call) =>
+        call.sql.startsWith('INSERT INTO community_subscriptions'),
+      ),
+    ).toHaveLength(2);
+    expect(
+      queryCalls
+        .filter((call) =>
+          call.sql.startsWith('INSERT INTO community_subscriptions'),
+        )
+        .every((call) => call.sql.includes('ON DUPLICATE KEY UPDATE')),
+    ).toBe(true);
+
+    await request(app.getHttpServer())
+      .delete(endpoint)
+      .set('Authorization', 'Bearer valid-token')
+      .expect(204);
+    expect(subscriptions.size).toBe(0);
+
+    await request(app.getHttpServer())
+      .delete(endpoint)
+      .set('Authorization', 'Bearer valid-token')
+      .expect(204);
+    expect(subscriptions.size).toBe(0);
+  });
+
+  it('requires authentication and returns 404 for unknown subscription targets', async () => {
+    await request(app.getHttpServer())
+      .post('/communities/gardening/subscribe')
+      .expect(401);
+    await request(app.getHttpServer())
+      .delete('/communities/gardening/subscribe')
+      .expect(401);
+
+    const subscribe = await request(app.getHttpServer())
+      .post('/communities/unknown/subscribe')
+      .set('Authorization', 'Bearer valid-token')
+      .expect(404);
+    expect(subscribe.body.message).toBe('Community not found');
+
+    const unsubscribe = await request(app.getHttpServer())
+      .delete('/communities/unknown/subscribe')
+      .set('Authorization', 'Bearer valid-token')
+      .expect(404);
+    expect(unsubscribe.body.message).toBe('Community not found');
   });
 });

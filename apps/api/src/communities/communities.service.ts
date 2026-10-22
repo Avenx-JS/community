@@ -121,6 +121,35 @@ export class CommunitiesService {
     return this.toDto(community);
   }
 
+  async subscribe(name: string, userId: string): Promise<void> {
+    const communityId = await this.getCommunityId(name);
+    await this.pool.execute<ResultSetHeader>(
+      'INSERT INTO community_subscriptions (user_id, community_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE created_at = created_at',
+      [userId, communityId],
+    );
+  }
+
+  async unsubscribe(name: string, userId: string): Promise<void> {
+    const communityId = await this.getCommunityId(name);
+    await this.pool.execute<ResultSetHeader>(
+      'DELETE FROM community_subscriptions WHERE user_id = ? AND community_id = ?',
+      [userId, communityId],
+    );
+  }
+
+  private async getCommunityId(name: string): Promise<string> {
+    const [communities] = await this.pool.execute<
+      (RowDataPacket & { id: string })[]
+    >('SELECT id FROM communities WHERE name = ? LIMIT 1', [name]);
+    const community = communities[0];
+
+    if (!community) {
+      throw new NotFoundException('Community not found');
+    }
+
+    return community.id;
+  }
+
   private toDto(community: CommunityRow): CommunityDto {
     return {
       id: community.id,

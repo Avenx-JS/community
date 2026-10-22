@@ -3,6 +3,8 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   Post,
   Query,
@@ -38,12 +40,22 @@ export class CommunitiesController {
   }
 
   @Post(':name/subscribe')
-  subscribe(@Param('name') name: string) {
-    return { message: 'Not implemented' };
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  subscribe(
+    @Param('name') name: string,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<void> {
+    return this.communitiesService.subscribe(name, request.user.id);
   }
 
   @Delete(':name/subscribe')
-  unsubscribe(@Param('name') name: string) {
-    return { message: 'Not implemented' };
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  unsubscribe(
+    @Param('name') name: string,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<void> {
+    return this.communitiesService.unsubscribe(name, request.user.id);
   }
 }

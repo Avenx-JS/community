@@ -118,6 +118,14 @@ All community endpoints return the same community DTO:
 }
 ```
 
+`POST /communities/:name/subscribe` subscribes the authenticated user to the
+community. `DELETE /communities/:name/subscribe` removes that user's
+subscription. Both require a bearer token, resolve the community by its exact
+name, and return HTTP `204` with no response body on success. Repeating either
+operation is safe: subscribing twice leaves one subscription, and unsubscribing
+when no subscription exists still returns `204`. An unknown community returns
+`404`.
+
 ## Project setup
 
 ```bash
