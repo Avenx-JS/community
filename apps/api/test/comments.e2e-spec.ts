@@ -253,6 +253,23 @@ describe('Comment endpoints (e2e)', () => {
     ).toBe('user-1');
   });
 
+  it('returns HTML-looking comment content as plain JSON text', async () => {
+    const content = '<img src=x onerror=alert(1)>';
+    const response = await request(app.getHttpServer())
+      .post('/posts/post-1/comments')
+      .set('Authorization', 'Bearer valid-token')
+      .send({ content })
+      .expect(201);
+
+    expect(response.headers['content-type']).toMatch(/application\/json/);
+    const responseBody = response.body as { content: string };
+    expect(responseBody.content).toBe(content);
+    expect(
+      queryCalls.find((call) => call.sql.startsWith('INSERT INTO comments'))
+        ?.values[4],
+    ).toBe(content);
+  });
+
   it('validates content, authentication, post existence, and same-post parents', async () => {
     const endpoint = '/posts/post-1/comments';
     await request(app.getHttpServer())
@@ -263,6 +280,11 @@ describe('Comment endpoints (e2e)', () => {
       .post(endpoint)
       .set('Authorization', 'Bearer valid-token')
       .send({ content: '  ' })
+      .expect(400);
+    await request(app.getHttpServer())
+      .post(endpoint)
+      .set('Authorization', 'Bearer valid-token')
+      .send({ content: 'invalid\u0000comment' })
       .expect(400);
     await request(app.getHttpServer())
       .post(endpoint)
@@ -284,6 +306,11 @@ describe('Comment endpoints (e2e)', () => {
       .set('Authorization', 'Bearer valid-token')
       .send({ content: 'Comment', parent_id: 'other-post-comment' })
       .expect(404);
+    await request(app.getHttpServer())
+      .post('/posts/post-1%27%20OR%201%3D1/comments')
+      .set('Authorization', 'Bearer valid-token')
+      .send({ content: 'Comment' })
+      .expect(400);
   });
 
   it('deletes only the author’s comments and cascades deletion to descendants', async () => {

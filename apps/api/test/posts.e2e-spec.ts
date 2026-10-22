@@ -193,6 +193,16 @@ describe('Post endpoints (e2e)', () => {
       .get('/posts?community_id=community-1&page=2&limit=1')
       .expect(200);
     expect(secondPage.body.items).toMatchObject([{ id: 'post-1' }]);
+
+    await request(app.getHttpServer())
+      .get('/posts?community_id=community-1%27%20OR%201%3D1')
+      .expect(400);
+    await request(app.getHttpServer())
+      .get('/posts?sort=created_at%20DESC')
+      .expect(400);
+    await request(app.getHttpServer())
+      .get('/posts?unexpected=value')
+      .expect(400);
   });
 
   it('creates supported post types for the authenticated author', async () => {
@@ -235,6 +245,45 @@ describe('Post endpoints (e2e)', () => {
     ).toHaveLength(3);
   });
 
+  it('stores HTML-looking post content as inert plain text', async () => {
+    const content = '<script>alert("stored-xss")</script>';
+    const response = await request(app.getHttpServer())
+      .post('/posts')
+      .set('Authorization', 'Bearer valid-token')
+      .send({
+        title: 'Literal markup example',
+        type: 'text',
+        content,
+        community_id: 'community-1',
+      })
+      .expect(201);
+
+    expect(response.headers['content-type']).toMatch(/application\/json/);
+    const responseBody = response.body as { content: string };
+    expect(responseBody.content).toBe(content);
+
+    await request(app.getHttpServer())
+      .post('/posts')
+      .set('Authorization', 'Bearer valid-token')
+      .send({
+        title: 'Control character',
+        type: 'text',
+        content: 'valid\u0000<script>alert(1)</script>',
+        community_id: 'community-1',
+      })
+      .expect(400);
+    await request(app.getHttpServer())
+      .post('/posts')
+      .set('Authorization', 'Bearer valid-token')
+      .send({
+        title: 'SQL-shaped community ID',
+        type: 'text',
+        content: 'valid text',
+        community_id: "community-1' OR 1=1 --",
+      })
+      .expect(400);
+  });
+
   it('rejects missing authentication, invalid data, and unknown communities', async () => {
     const endpoint = request(app.getHttpServer()).post('/posts');
     const post = {
@@ -273,6 +322,24 @@ describe('Post endpoints (e2e)', () => {
     await request(app.getHttpServer())
       .post('/posts')
       .set('Authorization', 'Bearer valid-token')
+      .send({
+        ...post,
+        type: 'link',
+        content: 'https://user:password@example.com/private',
+      })
+      .expect(400);
+    await request(app.getHttpServer())
+      .post('/posts')
+      .set('Authorization', 'Bearer valid-token')
+      .send({
+        ...post,
+        type: 'link',
+        content: 'https://example.com/\njavascript:alert(1)',
+      })
+      .expect(400);
+    await request(app.getHttpServer())
+      .post('/posts')
+      .set('Authorization', 'Bearer valid-token')
       .send({ ...post, community_id: 'missing-community' })
       .expect(404);
     await request(app.getHttpServer())
@@ -298,6 +365,10 @@ describe('Post endpoints (e2e)', () => {
       .get('/posts/unknown')
       .expect(404);
     expect(missing.body.message).toBe('Post not found');
+
+    await request(app.getHttpServer())
+      .get('/posts/post-1%27%20OR%201%3D1')
+      .expect(400);
   });
 
   it('allows authors and community-scoped moderators to delete posts', async () => {

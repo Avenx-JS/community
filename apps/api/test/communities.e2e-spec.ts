@@ -192,6 +192,22 @@ describe('Community endpoints (e2e)', () => {
       items: [],
       total: 0,
     });
+
+    const injectionSearch = "' OR 1=1 --";
+    await request(app.getHttpServer())
+      .get(`/communities?search=${encodeURIComponent(injectionSearch)}`)
+      .expect(200);
+    expect(
+      queryCalls.some((call) =>
+        call.values.includes(`%${injectionSearch.replace(/[=%_]/g, '=$&')}%`),
+      ),
+    ).toBe(true);
+    await request(app.getHttpServer())
+      .get('/communities?page=1%20OR%201%3D1')
+      .expect(400);
+    await request(app.getHttpServer())
+      .get('/communities?unexpected=value')
+      .expect(400);
   });
 
   it('creates a community for the authenticated user and rejects duplicate names', async () => {
@@ -250,6 +266,11 @@ describe('Community endpoints (e2e)', () => {
       .set('Authorization', authorization)
       .send({ name: 'attempt', creator_id: 'attacker' })
       .expect(400);
+    await request(app.getHttpServer())
+      .post('/communities')
+      .set('Authorization', authorization)
+      .send({ name: "board' OR 1=1 --" })
+      .expect(400);
   });
 
   it('requires authentication to create and returns 404 for unknown names', async () => {
@@ -273,6 +294,9 @@ describe('Community endpoints (e2e)', () => {
     const response = await request(app.getHttpServer())
       .get('/communities/unknown')
       .expect(404);
+    await request(app.getHttpServer())
+      .get('/communities/board%27%20OR%201%3D1')
+      .expect(400);
     expect(response.body).toMatchObject({
       statusCode: 404,
       message: 'Community not found',

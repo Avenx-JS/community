@@ -81,4 +81,15 @@ describe('User profile endpoint (e2e)', () => {
       error: 'Not Found',
     });
   });
+
+  it('rejects SQL-shaped and overlong usernames before querying the database', async () => {
+    const before = queryCalls.length;
+    await request(app.getHttpServer())
+      .get('/users/sample_user%27%20OR%201%3D1')
+      .expect(400);
+    await request(app.getHttpServer())
+      .get(`/users/${'a'.repeat(51)}`)
+      .expect(400);
+    expect(queryCalls).toHaveLength(before);
+  });
 });

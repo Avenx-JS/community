@@ -1,4 +1,4 @@
-import { IsIn, IsString, Length } from 'class-validator';
+import { IsIn, IsString, Length, Matches } from 'class-validator';
 
 export class CreateVoteDto {
   @IsIn(['post', 'comment'])
@@ -6,6 +6,7 @@ export class CreateVoteDto {
 
   @IsString()
   @Length(1, 36)
+  @Matches(/^[A-Za-z0-9_-]+$/)
   target_id!: string;
 
   @IsIn([-1, 1])

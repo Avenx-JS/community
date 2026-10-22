@@ -1,5 +1,12 @@
 import { Transform } from 'class-transformer';
-import { IsOptional, IsString, Length } from 'class-validator';
+import {
+  IsOptional,
+  IsString,
+  Length,
+  Matches,
+  Validate,
+} from 'class-validator';
+import { PlainTextConstraint } from '../../common/safe-text.constraint';
 
 export class CreateCommentDto {
   @Transform(({ value }: { value: unknown }) =>
@@ -7,10 +14,12 @@ export class CreateCommentDto {
   )
   @IsString()
   @Length(1, 16383)
+  @Validate(PlainTextConstraint)
   content!: string;
 
   @IsOptional()
   @IsString()
   @Length(1, 36)
+  @Matches(/^[A-Za-z0-9_-]+$/)
   parent_id?: string;
 }

@@ -17,6 +17,7 @@ import { CommentsService } from '../comments/comments.service';
 import { CreatePostDto } from './dto/create-post.dto';
 import { ListPostsDto } from './dto/list-posts.dto';
 import { PostsService } from './posts.service';
+import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
 
 @Controller('posts')
 export class PostsController {
@@ -37,7 +38,7 @@ export class PostsController {
   }
 
   @Get(':id')
-  findOne(@Param('id') id: string) {
+  findOne(@Param('id', new SafeRouteParamPipe('id')) id: string) {
     return this.postsService.findOne(id);
   }
 
@@ -45,21 +46,21 @@ export class PostsController {
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
   remove(
-    @Param('id') id: string,
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
     @Req() request: AuthenticatedRequest,
   ): Promise<void> {
     return this.postsService.remove(id, request.user.id);
   }
 
   @Get(':postId/comments')
-  getComments(@Param('postId') postId: string) {
+  getComments(@Param('postId', new SafeRouteParamPipe('id')) postId: string) {
     return this.commentsService.findThread(postId);
   }
 
   @Post(':postId/comments')
   @UseGuards(AuthGuard)
   addComment(
-    @Param('postId') postId: string,
+    @Param('postId', new SafeRouteParamPipe('id')) postId: string,
     @Body() body: CreateCommentDto,
     @Req() request: AuthenticatedRequest,
   ) {

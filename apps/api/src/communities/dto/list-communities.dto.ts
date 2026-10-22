@@ -6,12 +6,15 @@ import {
   Max,
   MaxLength,
   Min,
+  Validate,
 } from 'class-validator';
+import { PlainTextConstraint } from '../../common/safe-text.constraint';
 
 export class ListCommunitiesDto {
   @IsOptional()
   @IsString()
   @MaxLength(100)
+  @Validate(PlainTextConstraint)
   search?: string;
 
   @IsOptional()

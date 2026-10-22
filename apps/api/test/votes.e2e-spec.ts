@@ -211,6 +211,7 @@ describe('Vote endpoint (e2e)', () => {
       { ...vote, value: 2 },
       { ...vote, value: '1' },
       { ...vote, target_id: '' },
+      { ...vote, target_id: "post-1' OR 1=1 --" },
     ]) {
       await request(app.getHttpServer())
         .post('/votes')

@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { AuthGuard, type AuthenticatedRequest } from '../auth/auth.guard';
 import { CommentsService } from './comments.service';
+import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
 
 @Controller('comments')
 export class CommentsController {
@@ -18,7 +19,7 @@ export class CommentsController {
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
   remove(
-    @Param('id') id: string,
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
     @Req() request: AuthenticatedRequest,
   ): Promise<void> {
     return this.commentsService.remove(id, request.user.id);

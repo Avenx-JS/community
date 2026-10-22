@@ -1,8 +1,10 @@
-import { IsString, Length } from 'class-validator';
+import { IsString, Length, Validate } from 'class-validator';
+import { SafeIdentifierConstraint } from '../../common/safe-text.constraint';
 
 export class LoginDto {
   @IsString()
   @Length(1, 255)
+  @Validate(SafeIdentifierConstraint)
   identifier!: string;
 
   @IsString()

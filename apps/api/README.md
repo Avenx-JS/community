@@ -136,6 +136,32 @@ the endpoint returns HTTP `404`:
 }
 ```
 
+## REST input and content safety
+
+All request bodies and query DTOs pass through the global NestJS validation
+pipe, which transforms declared fields, rejects unknown fields, and returns
+`400` for invalid values. Route parameters for usernames, community names, and
+resource IDs are separately constrained to their documented length and
+allowlisted characters before a service or database query is called.
+Pagination and search values have explicit bounds. User-controlled query
+values are passed as MySQL parameters; the vote target table is selected only
+from the fixed `post`/`comment` allowlist, never from arbitrary input.
+
+Post titles, post bodies, community descriptions/rules, and comments are
+plain-text data. The API does not interpret user text as HTML and returns it in
+JSON as text; it is intentionally not HTML-escaped or stripped on input, so
+clients must encode it at the output context. In the web client, render content
+using Angular interpolation or DOM `textContent`; never use `[innerHTML]`,
+`innerHTML`, or a bypass/trust-HTML API for user content. Any future rich-text
+feature requires a separately reviewed, narrowly allowlisted sanitizer and
+safe rendering pipeline.
+
+Link and media posts accept only absolute HTTP(S) URLs with a hostname, no
+control characters or backslashes, and no embedded username/password
+credentials. This validation prevents unsafe schemes and confusing URL forms;
+it does not fetch the URL server-side or assert that the destination is
+trustworthy. JSON responses are `application/json`.
+
 ## Communities
 
 `GET /communities` returns a page of communities in a stable order
@@ -150,8 +176,9 @@ The response contains `items`, `page`, `limit`, and the matching `total`. An
 empty result is returned as HTTP `200` with an empty `items` array.
 
 `POST /communities` requires a bearer token and accepts a `name` (1-50
-characters), plus optional `description` and `rules` (up to 16,383 characters
-each, keeping values within MySQL's `TEXT` limit with UTF-8 storage). The creator
+characters containing only letters, numbers, underscores, or hyphens), plus
+optional `description` and `rules` (up to 16,383 characters each, keeping values
+within MySQL's `TEXT` limit with UTF-8 storage). The creator
 is taken from the authenticated user, never from the request
 body. A duplicate name returns `409`; invalid input returns `400`.
 `GET /communities/:name` retrieves a community by its exact name and returns

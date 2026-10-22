@@ -16,6 +16,7 @@ import { CommunitiesService } from './communities.service';
 import { CreateCommunityDto } from './dto/create-community.dto';
 import { ListCommunitiesDto } from './dto/list-communities.dto';
 import { ManageModeratorDto } from './dto/manage-moderator.dto';
+import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
 
 @Controller('communities')
 export class CommunitiesController {
@@ -36,7 +37,9 @@ export class CommunitiesController {
   }
 
   @Get(':name')
-  findOne(@Param('name') name: string) {
+  findOne(
+    @Param('name', new SafeRouteParamPipe('communityName')) name: string,
+  ) {
     return this.communitiesService.findOne(name);
   }
 
@@ -44,7 +47,7 @@ export class CommunitiesController {
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
   subscribe(
-    @Param('name') name: string,
+    @Param('name', new SafeRouteParamPipe('communityName')) name: string,
     @Req() request: AuthenticatedRequest,
   ): Promise<void> {
     return this.communitiesService.subscribe(name, request.user.id);
@@ -54,7 +57,7 @@ export class CommunitiesController {
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
   unsubscribe(
-    @Param('name') name: string,
+    @Param('name', new SafeRouteParamPipe('communityName')) name: string,
     @Req() request: AuthenticatedRequest,
   ): Promise<void> {
     return this.communitiesService.unsubscribe(name, request.user.id);
@@ -64,7 +67,7 @@ export class CommunitiesController {
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
   addModerator(
-    @Param('name') name: string,
+    @Param('name', new SafeRouteParamPipe('communityName')) name: string,
     @Body() body: ManageModeratorDto,
     @Req() request: AuthenticatedRequest,
   ): Promise<void> {
@@ -79,7 +82,7 @@ export class CommunitiesController {
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
   removeModerator(
-    @Param('name') name: string,
+    @Param('name', new SafeRouteParamPipe('communityName')) name: string,
     @Body() body: ManageModeratorDto,
     @Req() request: AuthenticatedRequest,
   ): Promise<void> {

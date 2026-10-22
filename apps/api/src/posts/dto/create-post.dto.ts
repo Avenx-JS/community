@@ -4,12 +4,17 @@ import {
   IsNotEmpty,
   IsString,
   Length,
+  Matches,
   MaxLength,
   Validate,
   ValidationArguments,
   ValidatorConstraint,
   ValidatorConstraintInterface,
 } from 'class-validator';
+import {
+  hasControlCharacters,
+  PlainTextConstraint,
+} from '../../common/safe-text.constraint';
 
 @ValidatorConstraint({ name: 'postContentType', async: false })
 class PostContentTypeConstraint implements ValidatorConstraintInterface {
@@ -23,10 +28,19 @@ class PostContentTypeConstraint implements ValidatorConstraintInterface {
     }
 
     try {
+      if (
+        hasControlCharacters(content, false) ||
+        content.includes('\\') ||
+        content !== content.trim()
+      ) {
+        return false;
+      }
       const url = new URL(content);
       return (
         (url.protocol === 'http:' || url.protocol === 'https:') &&
-        url.hostname.length > 0
+        url.hostname.length > 0 &&
+        !url.username &&
+        !url.password
       );
     } catch {
       return false;
@@ -44,6 +58,7 @@ export class CreatePostDto {
   )
   @IsString()
   @Length(1, 300)
+  @Validate(PlainTextConstraint)
   title!: string;
 
   @IsIn(['text', 'link', 'media'])
@@ -55,10 +70,12 @@ export class CreatePostDto {
   @IsString()
   @IsNotEmpty()
   @MaxLength(16383)
+  @Validate(PlainTextConstraint)
   @Validate(PostContentTypeConstraint)
   content!: string;
 
   @IsString()
   @Length(1, 36)
+  @Matches(/^[A-Za-z0-9_-]+$/)
   community_id!: string;
 }
