@@ -6,7 +6,7 @@ import { CommentsService } from './comments.service';
 describe('CommentsService', () => {
   let service: CommentsService;
   let queries: Array<{ sql: string; values: unknown[] }>;
-  let results: unknown[][];
+  let results: unknown[];
 
   beforeEach(async () => {
     queries = [];
@@ -131,24 +131,34 @@ describe('CommentsService', () => {
   });
 
   it('only deletes comments belonging to the authenticated author', async () => {
-    results = [[{ author_id: 'other-user' }]];
+    results = [{ affectedRows: 0 }, [{ id: 'comment-1' }]];
     await expect(service.remove('comment-1', 'user-1')).rejects.toBeInstanceOf(
       ForbiddenException,
     );
-    expect(queries).toHaveLength(1);
 
-    results = [[{ author_id: 'user-1' }], [{ affectedRows: 1 }]];
+    results = [{ affectedRows: 1 }];
     await expect(
       service.remove('comment-1', 'user-1'),
     ).resolves.toBeUndefined();
-    expect(queries[2]).toEqual({
-      sql: 'DELETE FROM comments WHERE id = ? AND author_id = ?',
-      values: ['comment-1', 'user-1'],
-    });
 
-    results = [[]];
+    results = [{ affectedRows: 0 }, []];
     await expect(service.remove('missing', 'user-1')).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+
+  it('allows moderators to delete comments in their community', async () => {
+    results = [{ affectedRows: 1 }];
+
+    await expect(
+      service.remove('comment-1', 'community-moderator'),
+    ).resolves.toBeUndefined();
+    expect(queries[0].sql).toContain('community_moderators');
+    expect(queries[0].values).toEqual([
+      'comment-1',
+      'community-moderator',
+      'community-moderator',
+      'community-moderator',
+    ]);
   });
 });

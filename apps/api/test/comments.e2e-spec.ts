@@ -21,6 +21,8 @@ describe('Comment endpoints (e2e)', () => {
   let comments: TestComment[];
   let queryCalls: Array<{ sql: string; values: unknown[] }>;
   const postIds = ['post-1', 'post-2'];
+  const communityCreators = new Map([['community-1', 'creator-1']]);
+  const moderatorAssignments = new Set(['community-1:user-mod']);
 
   beforeEach(async () => {
     comments = [
@@ -125,21 +127,29 @@ describe('Comment endpoints (e2e)', () => {
           const [id] = values as [string];
           return [comments.filter((comment) => comment.id === id), []];
         }
-        if (sql.startsWith('SELECT author_id FROM comments')) {
+        if (sql.startsWith('SELECT id FROM comments')) {
           const [id] = values as [string];
-          const comment = comments.find((entry) => entry.id === id);
-          return [comment ? [{ author_id: comment.author_id }] : [], []];
+          return [
+            comments.some((comment) => comment.id === id) ? [{ id }] : [],
+            [],
+          ];
         }
-        if (sql.startsWith('DELETE FROM comments')) {
-          const [id, authorId] = values as [string, string];
-          const root = comments.find(
-            (comment) => comment.id === id && comment.author_id === authorId,
-          );
-          if (!root) {
+        if (sql.startsWith('DELETE comments FROM comments')) {
+          const [id] = values as [string];
+          const [commentId, authorId, creatorId, moderatorId] =
+            values as string[];
+          const root = comments.find((comment) => comment.id === commentId);
+          const communityId =
+            root?.post_id === 'post-1' ? 'community-1' : 'community-2';
+          const authorized =
+            root !== undefined &&
+            (root.author_id === authorId ||
+              communityCreators.get(communityId) === creatorId ||
+              moderatorAssignments.has(`${communityId}:${moderatorId}`));
+          if (!authorized || !root) {
             return [{ affectedRows: 0 }, []];
           }
-
-          const deletedIds = new Set([id]);
+          const deletedIds = new Set([commentId]);
           let hasNewDescendants = true;
           while (hasNewDescendants) {
             hasNewDescendants = false;
@@ -168,7 +178,11 @@ describe('Comment endpoints (e2e)', () => {
       .overrideProvider(AuthService)
       .useValue({
         validateAccessToken: async (token: string) =>
-          token === 'valid-token' ? 'user-1' : null,
+          token === 'valid-token'
+            ? 'user-1'
+            : token === 'moderator-token'
+              ? 'user-mod'
+              : null,
       })
       .compile();
 
@@ -300,5 +314,21 @@ describe('Comment endpoints (e2e)', () => {
       ),
     ).toBe(false);
     expect(comments.some((comment) => comment.id === 'root-2')).toBe(true);
+  });
+
+  it('allows a moderator to delete comments only in their community', async () => {
+    await request(app.getHttpServer())
+      .delete('/comments/reply-1')
+      .set('Authorization', 'Bearer moderator-token')
+      .expect(204);
+    expect(comments.some((comment) => comment.id === 'reply-1')).toBe(false);
+
+    await request(app.getHttpServer())
+      .delete('/comments/other-post-comment')
+      .set('Authorization', 'Bearer moderator-token')
+      .expect(403);
+    expect(
+      comments.some((comment) => comment.id === 'other-post-comment'),
+    ).toBe(true);
   });
 });

@@ -15,6 +15,7 @@ import { AuthGuard, type AuthenticatedRequest } from '../auth/auth.guard';
 import { CommunitiesService } from './communities.service';
 import { CreateCommunityDto } from './dto/create-community.dto';
 import { ListCommunitiesDto } from './dto/list-communities.dto';
+import { ManageModeratorDto } from './dto/manage-moderator.dto';
 
 @Controller('communities')
 export class CommunitiesController {
@@ -57,5 +58,35 @@ export class CommunitiesController {
     @Req() request: AuthenticatedRequest,
   ): Promise<void> {
     return this.communitiesService.unsubscribe(name, request.user.id);
+  }
+
+  @Post(':name/moderators')
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  addModerator(
+    @Param('name') name: string,
+    @Body() body: ManageModeratorDto,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<void> {
+    return this.communitiesService.addModerator(
+      name,
+      body.username,
+      request.user.id,
+    );
+  }
+
+  @Delete(':name/moderators')
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  removeModerator(
+    @Param('name') name: string,
+    @Body() body: ManageModeratorDto,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<void> {
+    return this.communitiesService.removeModerator(
+      name,
+      body.username,
+      request.user.id,
+    );
   }
 }

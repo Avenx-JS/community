@@ -117,25 +117,33 @@ export class PostsService {
   }
 
   async remove(id: string, authorId: string): Promise<void> {
-    const [posts] = await this.pool.execute<
-      (RowDataPacket & { author_id: string })[]
-    >('SELECT author_id FROM posts WHERE id = ? LIMIT 1', [id]);
-    const post = posts[0];
-
-    if (!post) {
-      throw new NotFoundException('Post not found');
-    }
-    if (post.author_id !== authorId) {
-      throw new ForbiddenException('You can only delete your own posts');
-    }
-
     const [result] = await this.pool.execute<ResultSetHeader>(
-      'DELETE FROM posts WHERE id = ? AND author_id = ?',
-      [id, authorId],
+      `DELETE FROM posts
+       WHERE id = ? AND (
+         author_id = ? OR EXISTS (
+           SELECT 1 FROM communities
+           WHERE communities.id = posts.community_id
+             AND (
+               communities.creator_id = ? OR EXISTS (
+                 SELECT 1 FROM community_moderators
+                 WHERE community_id = communities.id AND user_id = ?
+               )
+             )
+         )
+       )`,
+      [id, authorId, authorId, authorId],
     );
 
     if (result.affectedRows === 0) {
-      throw new NotFoundException('Post not found');
+      const [posts] = await this.pool.execute<
+        (RowDataPacket & { id: string })[]
+      >('SELECT id FROM posts WHERE id = ? LIMIT 1', [id]);
+      if (!posts[0]) {
+        throw new NotFoundException('Post not found');
+      }
+      throw new ForbiddenException(
+        'You can only delete your own posts or moderate this community',
+      );
     }
   }
 

@@ -1,4 +1,8 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { CommunitiesService } from './communities.service';
@@ -119,5 +123,42 @@ describe('CommunitiesService', () => {
     await expect(service.findOne('missing')).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+
+  it('lets only the community creator assign and remove moderators', async () => {
+    results = [
+      [{ id: 'community-1', creator_id: 'creator' }],
+      [{ id: 'mod' }],
+      [{ user_id: 'mod' }],
+      [],
+    ];
+    await service.addModerator('gardening', 'moderator', 'creator');
+    expect(queries[3].sql).toContain('INSERT INTO community_moderators');
+    expect(queries[3].values).toEqual(['community-1', 'mod', 'creator']);
+
+    results = [[{ id: 'community-1', creator_id: 'creator' }], []];
+    await service.removeModerator('gardening', 'moderator', 'creator');
+    expect(queries[5].sql).toContain('DELETE FROM community_moderators');
+
+    results = [[{ id: 'community-1', creator_id: 'creator' }]];
+    await expect(
+      service.addModerator('gardening', 'moderator', 'ordinary-member'),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('does not appoint a non-member as moderator', async () => {
+    results = [
+      [{ id: 'community-1', creator_id: 'creator' }],
+      [{ id: 'user-2' }],
+      [],
+    ];
+    await expect(
+      service.addModerator('gardening', 'non_member', 'creator'),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(
+      queries.some((query) =>
+        query.sql.includes('INSERT INTO community_moderators'),
+      ),
+    ).toBe(false);
   });
 });

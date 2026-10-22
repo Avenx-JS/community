@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Inject,
   Injectable,
   NotFoundException,
@@ -135,6 +136,71 @@ export class CommunitiesService {
       'DELETE FROM community_subscriptions WHERE user_id = ? AND community_id = ?',
       [userId, communityId],
     );
+  }
+
+  async addModerator(
+    name: string,
+    username: string,
+    actorId: string,
+  ): Promise<void> {
+    const community = await this.getCommunityForRoleChange(name, actorId);
+    const [users] = await this.pool.execute<(RowDataPacket & { id: string })[]>(
+      'SELECT id FROM users WHERE username = ? LIMIT 1',
+      [username],
+    );
+    const user = users[0];
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    if (user.id !== community.creator_id) {
+      const [memberships] = await this.pool.execute<
+        (RowDataPacket & { user_id: string })[]
+      >(
+        'SELECT user_id FROM community_subscriptions WHERE community_id = ? AND user_id = ? LIMIT 1',
+        [community.id, user.id],
+      );
+      if (!memberships[0]) {
+        throw new ForbiddenException(
+          'Only a subscribed community member can be appointed moderator',
+        );
+      }
+    }
+
+    await this.pool.execute<ResultSetHeader>(
+      'INSERT INTO community_moderators (community_id, user_id, assigned_by) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE user_id = user_id',
+      [community.id, user.id, actorId],
+    );
+  }
+
+  async removeModerator(
+    name: string,
+    username: string,
+    actorId: string,
+  ): Promise<void> {
+    const community = await this.getCommunityForRoleChange(name, actorId);
+    await this.pool.execute<ResultSetHeader>(
+      'DELETE FROM community_moderators WHERE community_id = ? AND user_id = (SELECT id FROM users WHERE username = ? LIMIT 1)',
+      [community.id, username],
+    );
+  }
+
+  private async getCommunityForRoleChange(
+    name: string,
+    actorId: string,
+  ): Promise<{ id: string; creator_id: string }> {
+    const [communities] = await this.pool.execute<
+      (RowDataPacket & { id: string; creator_id: string })[]
+    >('SELECT id, creator_id FROM communities WHERE name = ? LIMIT 1', [name]);
+    const community = communities[0];
+    if (!community) {
+      throw new NotFoundException('Community not found');
+    }
+    if (community.creator_id !== actorId) {
+      throw new ForbiddenException(
+        'Only the community creator can manage moderators',
+      );
+    }
+    return community;
   }
 
   private async getCommunityId(name: string): Promise<string> {

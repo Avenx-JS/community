@@ -22,6 +22,8 @@ describe('Post endpoints (e2e)', () => {
   let posts: TestPost[];
   let queryCalls: Array<{ sql: string; values: unknown[] }>;
   const communities = ['community-1', 'community-2'];
+  const communityCreators = new Map([['community-1', 'creator-1']]);
+  const moderatorAssignments = new Set(['community-1:user-mod']);
 
   beforeEach(async () => {
     posts = [
@@ -100,23 +102,39 @@ describe('Post endpoints (e2e)', () => {
           const [id] = values as [string];
           return [posts.filter((post) => post.id === id), []];
         }
-        if (sql.startsWith('SELECT author_id FROM posts')) {
+        if (sql.startsWith('SELECT id FROM posts')) {
           const [id] = values as [string];
-          const post = posts.find((entry) => entry.id === id);
-          return [post ? [{ author_id: post.author_id }] : [], []];
+          return [posts.some((post) => post.id === id) ? [{ id }] : [], []];
         }
         if (sql.startsWith('DELETE FROM posts')) {
-          const [id, authorId] = values as [string, string];
-          const index = posts.findIndex(
-            (post) => post.id === id && post.author_id === authorId,
-          );
-          if (index === -1) {
+          const [id, authorId, creatorId, moderatorId] = values as string[];
+          const post = posts.find((entry) => entry.id === id);
+          const authorized =
+            post !== undefined &&
+            (post.author_id === authorId ||
+              communityCreators.get(post.community_id) === creatorId ||
+              moderatorAssignments.has(`${post.community_id}:${moderatorId}`));
+          if (!authorized) {
             return [{ affectedRows: 0 }, []];
           }
-          posts.splice(index, 1);
+          posts.splice(posts.indexOf(post), 1);
           return [{ affectedRows: 1 }, []];
         }
-
+        if (sql.startsWith('SELECT author_id, community_id FROM posts')) {
+          const [id] = values as [string];
+          const post = posts.find((entry) => entry.id === id);
+          return [
+            post
+              ? [
+                  {
+                    author_id: post.author_id,
+                    community_id: post.community_id,
+                  },
+                ]
+              : [],
+            [],
+          ];
+        }
         throw new Error(`Unexpected SQL query: ${sql}`);
       },
     };
@@ -128,7 +146,11 @@ describe('Post endpoints (e2e)', () => {
       .overrideProvider(AuthService)
       .useValue({
         validateAccessToken: async (token: string) =>
-          token === 'valid-token' ? 'user-1' : null,
+          token === 'valid-token'
+            ? 'user-1'
+            : token === 'moderator-token'
+              ? 'user-mod'
+              : null,
       })
       .compile();
 
@@ -278,12 +300,24 @@ describe('Post endpoints (e2e)', () => {
     expect(missing.body.message).toBe('Post not found');
   });
 
-  it('allows only the author to delete a post and returns 404 for unknown posts', async () => {
+  it('allows authors and community-scoped moderators to delete posts', async () => {
     await request(app.getHttpServer())
       .delete('/posts/post-2')
       .set('Authorization', 'Bearer valid-token')
       .expect(403);
     expect(posts.some((post) => post.id === 'post-2')).toBe(true);
+
+    await request(app.getHttpServer())
+      .delete('/posts/post-2')
+      .set('Authorization', 'Bearer moderator-token')
+      .expect(204);
+    expect(posts.some((post) => post.id === 'post-2')).toBe(false);
+
+    await request(app.getHttpServer())
+      .delete('/posts/post-3')
+      .set('Authorization', 'Bearer moderator-token')
+      .expect(403);
+    expect(posts.some((post) => post.id === 'post-3')).toBe(true);
 
     await request(app.getHttpServer())
       .delete('/posts/post-1')
@@ -293,8 +327,8 @@ describe('Post endpoints (e2e)', () => {
     expect(
       queryCalls.some(
         (call) =>
-          call.sql === 'DELETE FROM posts WHERE id = ? AND author_id = ?' &&
-          call.values[1] === 'user-1',
+          call.sql.startsWith('DELETE FROM posts') &&
+          call.values[0] === 'post-1',
       ),
     ).toBe(true);
 

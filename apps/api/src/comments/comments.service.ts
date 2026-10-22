@@ -128,23 +128,33 @@ export class CommentsService {
   }
 
   async remove(id: string, authorId: string): Promise<void> {
-    const [comments] = await this.pool.execute<
-      (RowDataPacket & { author_id: string })[]
-    >('SELECT author_id FROM comments WHERE id = ? LIMIT 1', [id]);
-    const comment = comments[0];
-    if (!comment) {
-      throw new NotFoundException('Comment not found');
-    }
-    if (comment.author_id !== authorId) {
-      throw new ForbiddenException('You can only delete your own comments');
-    }
-
     const [result] = await this.pool.execute<ResultSetHeader>(
-      'DELETE FROM comments WHERE id = ? AND author_id = ?',
-      [id, authorId],
+      `DELETE comments FROM comments
+       INNER JOIN posts ON posts.id = comments.post_id
+       WHERE comments.id = ? AND (
+         comments.author_id = ? OR EXISTS (
+           SELECT 1 FROM communities
+           WHERE communities.id = posts.community_id
+             AND (
+               communities.creator_id = ? OR EXISTS (
+                 SELECT 1 FROM community_moderators
+                 WHERE community_id = communities.id AND user_id = ?
+               )
+             )
+         )
+       )`,
+      [id, authorId, authorId, authorId],
     );
     if (result.affectedRows === 0) {
-      throw new NotFoundException('Comment not found');
+      const [comments] = await this.pool.execute<
+        (RowDataPacket & { id: string })[]
+      >('SELECT id FROM comments WHERE id = ? LIMIT 1', [id]);
+      if (!comments[0]) {
+        throw new NotFoundException('Comment not found');
+      }
+      throw new ForbiddenException(
+        'You can only delete your own comments or moderate this community',
+      );
     }
   }
 

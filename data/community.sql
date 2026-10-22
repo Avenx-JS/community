@@ -61,6 +61,18 @@ CREATE TABLE community_subscriptions (
     FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE
 );
 
+CREATE TABLE community_moderators (
+    community_id VARCHAR(36) NOT NULL,
+    user_id VARCHAR(36) NOT NULL,
+    assigned_by VARCHAR(36) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (community_id, user_id),
+    INDEX idx_community_moderators_user_id (user_id),
+    FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (assigned_by) REFERENCES users(id) ON DELETE CASCADE
+);
+
 CREATE TABLE posts (
     id VARCHAR(36) PRIMARY KEY,
     title VARCHAR(300) NOT NULL,

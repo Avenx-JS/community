@@ -178,6 +178,31 @@ operation is safe: subscribing twice leaves one subscription, and unsubscribing
 when no subscription exists still returns `204`. An unknown community returns
 `404`.
 
+### Community roles and moderation
+
+Community membership is represented by `community_subscriptions`. The
+community creator (`communities.creator_id`) is the sole administrator and is
+an implicit member. A moderator must first be a subscribed member; moderator
+assignments are stored separately in `community_moderators`, scoped by both
+community and user. Moderator authorization is always checked against the
+specific community. There is no global administrator role.
+
+Only the community creator can appoint or remove moderators using
+`POST /communities/:name/moderators` and
+`DELETE /communities/:name/moderators`, each with
+`{ "username": "member_name" }` and a bearer token. These operations return
+`204`, unknown communities/users return `404`, and non-creator attempts return
+`403`. The actor identity comes only from the validated bearer token; request
+data cannot set a role or actor ID. The creator cannot delegate moderator
+management, and moderators cannot appoint other moderators.
+
+Post and comment authors retain their existing ability to delete their own
+content. A moderator or creator can additionally delete content only within
+their own community. Other users receive `403`; missing content returns `404`.
+No edit, lock, ban, or other moderator-only operations are exposed by this API
+yet; future such routes must enforce the same server-side, community-scoped
+checks.
+
 ## Posts
 
 `GET /posts` is public and returns `{ "items", "page", "limit", "total",
@@ -194,8 +219,9 @@ is always taken from the authenticated user; body-supplied `author_id` is
 rejected. Successful creation returns HTTP `201` and the post DTO.
 
 `GET /posts/:id` is public and returns the post DTO, or `404` for an unknown ID.
-`DELETE /posts/:id` requires a bearer token and deletes only the authenticated
-author's post. It returns HTTP `204` with no body; a post owned by another user
+`DELETE /posts/:id` requires a bearer token and allows the authenticated author
+to delete their post, or a moderator/creator of that post's community to
+moderate it. It returns HTTP `204` with no body; a user without permission
 returns `403`, and an unknown post returns `404`. The database cascades deletion
 to the post's comments.
 
@@ -229,11 +255,12 @@ parent must belong to that same post; an unknown or cross-post parent returns
 `404`. A successful creation returns HTTP `201` and the created comment DTO
 with an empty `replies` array.
 
-`DELETE /comments/:id` requires authentication and deletes only the author's
-comment. Success returns HTTP `204` with no body; another user's comment
-returns `403`, and an unknown comment returns `404`. Deleting a comment also
-deletes all descendant replies because the comments table uses
-`ON DELETE CASCADE` for `parent_id`.
+`DELETE /comments/:id` requires authentication and allows the authenticated
+author to delete their comment, or a moderator/creator of the comment's
+community to moderate it. Success returns HTTP `204` with no body; a user
+without permission returns `403`, and an unknown comment returns `404`.
+Deleting a comment also deletes all descendant replies because the comments
+table uses `ON DELETE CASCADE` for `parent_id`.
 
 ## Votes
 

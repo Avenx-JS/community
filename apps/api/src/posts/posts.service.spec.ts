@@ -6,7 +6,7 @@ import { PostsService } from './posts.service';
 describe('PostsService', () => {
   let service: PostsService;
   let queries: Array<{ sql: string; values: unknown[] }>;
-  let results: unknown[][];
+  let results: unknown[];
 
   beforeEach(async () => {
     queries = [];
@@ -120,22 +120,32 @@ describe('PostsService', () => {
   });
 
   it('deletes only the author’s post and returns not found for missing posts', async () => {
-    results = [[{ author_id: 'other-user' }]];
+    results = [{ affectedRows: 0 }, [{ id: 'post-1' }]];
     await expect(service.remove('post-1', 'user-1')).rejects.toBeInstanceOf(
       ForbiddenException,
     );
-    expect(queries).toHaveLength(1);
 
-    results = [[{ author_id: 'user-1' }], [{ affectedRows: 1 }]];
+    results = [{ affectedRows: 1 }];
     await expect(service.remove('post-1', 'user-1')).resolves.toBeUndefined();
-    expect(queries[2]).toEqual({
-      sql: 'DELETE FROM posts WHERE id = ? AND author_id = ?',
-      values: ['post-1', 'user-1'],
-    });
 
-    results = [[]];
+    results = [{ affectedRows: 0 }, []];
     await expect(service.remove('missing', 'user-1')).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+
+  it('allows moderators to delete only content in their community', async () => {
+    results = [{ affectedRows: 1 }];
+
+    await expect(
+      service.remove('post-1', 'community-moderator'),
+    ).resolves.toBeUndefined();
+    expect(queries[0].sql).toContain('community_moderators');
+    expect(queries[0].values).toEqual([
+      'post-1',
+      'community-moderator',
+      'community-moderator',
+      'community-moderator',
+    ]);
   });
 });
