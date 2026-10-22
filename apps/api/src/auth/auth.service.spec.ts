@@ -1,6 +1,7 @@
 import { ConflictException, UnauthorizedException } from '@nestjs/common';
 import { beforeEach, describe, expect, it } from '@jest/globals';
-import { createHash } from 'node:crypto';
+import { argon2id, hash as argon2Hash, verify as argon2Verify } from 'argon2';
+import { createHash, randomBytes, scrypt as scryptCallback } from 'node:crypto';
 import type { Pool } from 'mysql2/promise';
 import { AuthService } from './auth.service';
 
@@ -9,6 +10,27 @@ type ExecuteFunction = (
   sql: string,
   values: unknown[],
 ) => Promise<[unknown, unknown]>;
+
+function createLegacyScryptHash(password: string): Promise<string> {
+  const salt = randomBytes(16);
+  return new Promise((resolve, reject) => {
+    scryptCallback(
+      password,
+      salt,
+      64,
+      { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 },
+      (error, key) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(
+          `scrypt$16384$8$1$${salt.toString('base64url')}$${key.toString('base64url')}`,
+        );
+      },
+    );
+  });
+}
 
 describe('AuthService', () => {
   let service: AuthService;
@@ -65,7 +87,13 @@ describe('AuthService', () => {
     const insertedAccessHash = calls[1].values[0] as string;
     const insertedRefreshHash = calls[2].values[0] as string;
     expect(insertedPasswordHash).not.toBe('correct-horse-battery');
-    expect(insertedPasswordHash).toMatch(/^scrypt\$16384\$8\$1\$/);
+    expect(insertedPasswordHash).toMatch(
+      /^\$argon2id\$v=19\$m=19456,p=1,t=2\$/,
+    );
+    await expect(
+      argon2Verify(insertedPasswordHash, 'correct-horse-battery'),
+    ).resolves.toBe(true);
+    expect(JSON.stringify(calls)).not.toContain('correct-horse-battery');
     expect(insertedAccessHash).toMatch(/^[a-f0-9]{64}$/);
     expect(insertedRefreshHash).toMatch(/^[a-f0-9]{64}$/);
     expect(insertedAccessHash).not.toBe(response.accessToken);
@@ -77,6 +105,80 @@ describe('AuthService', () => {
     expect(response.refreshTokenExpiresAt).toEqual(expect.any(String));
     expect(response.user).not.toHaveProperty('password_hash');
     expect(transactions.commits).toBe(1);
+  });
+
+  it('rehashes a valid legacy scrypt password after successful login', async () => {
+    const password = 'legacy-correct-password';
+    const legacyHash = await createLegacyScryptHash(password);
+    const user = {
+      id: 'user-legacy',
+      username: 'legacy_user',
+      email: 'legacy@example.com',
+      password_hash: legacyHash,
+      created_at: new Date('2026-10-22T08:00:00.000Z'),
+    };
+    results.push(
+      [[user], []],
+      [{ affectedRows: 1 }, []],
+      [{ affectedRows: 1 }, []],
+      [{ affectedRows: 1 }, []],
+    );
+
+    const response = await service.login({
+      identifier: 'legacy@example.com',
+      password,
+    });
+
+    const rehashCall = calls.find((call) =>
+      call.sql.startsWith('UPDATE users SET password_hash'),
+    );
+    expect(rehashCall?.values[1]).toBe('user-legacy');
+    expect(rehashCall?.values[2]).toBe(legacyHash);
+    const upgradedHash = rehashCall?.values[0] as string;
+    expect(upgradedHash).toMatch(/^\$argon2id\$v=19\$m=19456,p=1,t=2\$/);
+    await expect(argon2Verify(upgradedHash, password)).resolves.toBe(true);
+    expect(response.user).not.toHaveProperty('password_hash');
+    expect(JSON.stringify(response)).not.toContain(legacyHash);
+    expect(transactions.commits).toBe(1);
+  });
+
+  it('rejects incorrect passwords and malformed stored hash formats generically', async () => {
+    const argonHash = await argon2Hash('correct-password', {
+      type: argon2id,
+      version: 0x13,
+      memoryCost: 19 * 1024,
+      timeCost: 2,
+      parallelism: 1,
+      hashLength: 32,
+    });
+    const user = {
+      id: 'user-1',
+      username: 'sample_user',
+      email: 'sample@example.com',
+      password_hash: argonHash,
+      created_at: new Date(),
+    };
+    results.push([[user], []]);
+    await expect(
+      service.login({ identifier: 'sample_user', password: 'wrong-password' }),
+    ).rejects.toMatchObject({
+      status: 401,
+      message: 'Invalid credentials',
+    });
+    expect(calls).toHaveLength(1);
+
+    results.push([
+      [{ ...user, password_hash: 'argon2id$invalid$untrusted-parameters' }],
+      [],
+    ]);
+    await expect(
+      service.login({ identifier: 'sample_user', password: 'password' }),
+    ).rejects.toMatchObject({
+      status: 401,
+      message: 'Invalid credentials',
+    });
+    expect(calls).toHaveLength(2);
+    expect(transactions.commits).toBe(0);
   });
 
   it('maps unique username or email conflicts to 409', async () => {

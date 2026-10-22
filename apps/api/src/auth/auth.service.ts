@@ -4,6 +4,8 @@ import {
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
+import { argon2id, hash as argon2Hash, verify as argon2Verify } from 'argon2';
+import type { HashOptions } from 'argon2';
 import {
   createHash,
   randomBytes,
@@ -18,6 +20,23 @@ export const MYSQL_POOL = Symbol('MYSQL_POOL');
 const accessTokenLifetimeMs = 15 * 60 * 1000;
 const refreshTokenLifetimeMs = 30 * 24 * 60 * 60 * 1000;
 const scryptParameters = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+const passwordHashParameters: HashOptions = {
+  type: argon2id,
+  version: 0x13,
+  memoryCost: 19 * 1024,
+  timeCost: 2,
+  parallelism: 1,
+  hashLength: 32,
+};
+const argon2HashPattern =
+  /^\$argon2id\$v=19\$m=19456,p=1,t=2\$[A-Za-z0-9+/]{20,24}\$[A-Za-z0-9+/]{40,44}$/;
+const legacyScryptHashPattern =
+  /^scrypt\$16384\$8\$1\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{86}$/;
+
+interface PasswordVerification {
+  valid: boolean;
+  needsRehash: boolean;
+}
 
 function deriveKey(
   password: string,
@@ -127,11 +146,25 @@ export class AuthService {
     );
     const user = users[0];
 
-    if (
-      !user ||
-      !(await this.verifyPassword(input.password, user.password_hash))
-    ) {
+    if (!user) {
       throw new UnauthorizedException('Invalid credentials');
+    }
+
+    const verification = await this.verifyPassword(
+      input.password,
+      user.password_hash,
+    );
+    if (!verification.valid) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    if (verification.needsRehash) {
+      const passwordHash = await this.hashPassword(input.password);
+      await this.pool.execute<ResultSetHeader>(
+        'UPDATE users SET password_hash = ? WHERE id = ? AND password_hash = ?',
+        [passwordHash, user.id, user.password_hash],
+      );
+      user.password_hash = passwordHash;
     }
 
     return this.createSession(user);
@@ -391,39 +424,52 @@ export class AuthService {
   }
 
   private async hashPassword(password: string): Promise<string> {
-    const salt = randomBytes(16);
-    const hash = await deriveKey(password, salt, 64);
-    return `scrypt$16384$8$1$${salt.toString('base64url')}$${hash.toString('base64url')}`;
+    return argon2Hash(password, passwordHashParameters);
   }
 
   private async verifyPassword(
     password: string,
     storedHash: string,
-  ): Promise<boolean> {
-    const [algorithm, cost, blockSize, parallelization, saltValue, hashValue] =
-      storedHash.split('$');
-    if (
-      algorithm !== 'scrypt' ||
-      cost !== '16384' ||
-      blockSize !== '8' ||
-      parallelization !== '1' ||
-      !saltValue ||
-      !hashValue
-    ) {
-      return false;
+  ): Promise<PasswordVerification> {
+    if (argon2HashPattern.test(storedHash)) {
+      try {
+        return {
+          valid: await argon2Verify(storedHash, password),
+          needsRehash: false,
+        };
+      } catch {
+        return { valid: false, needsRehash: false };
+      }
     }
 
-    const expectedHash = Buffer.from(hashValue, 'base64url');
-    const actualHash = await deriveKey(
-      password,
-      Buffer.from(saltValue, 'base64url'),
-      expectedHash.length,
-    );
+    if (!legacyScryptHashPattern.test(storedHash)) {
+      return { valid: false, needsRehash: false };
+    }
 
-    return (
-      expectedHash.length === actualHash.length &&
-      timingSafeEqual(expectedHash, actualHash)
-    );
+    const [, , , , saltValue, hashValue] = storedHash.split('$');
+    if (!saltValue || !hashValue) {
+      return { valid: false, needsRehash: false };
+    }
+
+    try {
+      const expectedHash = Buffer.from(hashValue, 'base64url');
+      const salt = Buffer.from(saltValue, 'base64url');
+      if (
+        expectedHash.length !== 64 ||
+        salt.length !== 16 ||
+        expectedHash.toString('base64url') !== hashValue ||
+        salt.toString('base64url') !== saltValue
+      ) {
+        return { valid: false, needsRehash: false };
+      }
+      const actualHash = await deriveKey(password, salt, expectedHash.length);
+      return {
+        valid: timingSafeEqual(expectedHash, actualHash),
+        needsRehash: true,
+      };
+    } catch {
+      return { valid: false, needsRehash: false };
+    }
   }
 
   private hashToken(token: string): string {

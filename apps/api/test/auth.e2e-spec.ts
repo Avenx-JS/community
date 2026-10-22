@@ -107,6 +107,21 @@ describe('Auth endpoints (e2e)', () => {
           [],
         ]);
       }
+      if (sql.startsWith('UPDATE users SET password_hash')) {
+        const [passwordHash, userId, oldPasswordHash] = values as [
+          string,
+          string,
+          string,
+        ];
+        const user = users.find(
+          (entry) =>
+            entry.id === userId && entry.password_hash === oldPasswordHash,
+        );
+        if (user) {
+          user.password_hash = passwordHash;
+        }
+        return Promise.resolve([{ affectedRows: user ? 1 : 0 }, []]);
+      }
       if (sql.startsWith('SELECT user_id AS id FROM auth_sessions')) {
         const [tokenHash] = values as [string];
         const session = sessions.find(

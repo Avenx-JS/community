@@ -64,6 +64,27 @@ email, and a 12-128 character password. Validation errors return `400`, duplicat
 username/email returns `409`, and invalid login or missing, expired, or revoked
 credentials return `401`.
 
+Passwords are stored as Argon2id PHC hashes using version 19, 19 MiB memory,
+two iterations, parallelism 1, and a 32-byte digest. These parameters meet the
+OWASP Argon2id baseline. An isolated local five-hash benchmark on the
+development runtime recorded 29-39 ms per hash (median 31 ms). Production
+operators should benchmark under their actual CPU and concurrent-login load
+before deployment, while retaining at least the documented memory and time
+costs. Argon2id uses a fresh random salt per password through the maintained
+`argon2` implementation.
+
+Existing `scrypt$16384$8$1$...` hashes continue to verify. On the next
+successful login, the API replaces the legacy hash with the current Argon2id
+hash using a conditional update, so concurrent logins cannot overwrite a
+changed password hash. This is an opportunistic migration; it does not require
+password resets or a schema change. Accounts that never log in retain their
+legacy hash until they do. Unsupported or malformed stored encodings are
+treated as invalid credentials without exposing hash details to clients.
+Passwords, salts, and encoded hashes are never returned by auth responses or
+logged by this code. Hashing and verification remain server-side work; apply
+the documented login rate limits and capacity-plan for the Argon2 memory cost
+before scaling worker concurrency.
+
 `POST /auth/refresh` accepts `{ "refreshToken": "<refreshToken>" }` and returns
 HTTP `200` with the same response shape. Each refresh token can be used only
 once; a successful refresh invalidates the previous access and refresh tokens.
