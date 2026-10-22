@@ -1,3 +1,4 @@
+CREATE DATABASE IF NOT EXISTS community;
 USE community;
 
 CREATE TABLE users (

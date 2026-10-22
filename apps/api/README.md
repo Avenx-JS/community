@@ -28,11 +28,11 @@
 ## Auth API
 
 The API connects to MySQL using `MYSQL_HOST` (defaults to `127.0.0.1`),
-`MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DATABASE`. Create the
-schema in `apps/community.sql` before starting a new installation. Existing
-installations must apply `apps/api/migrations/001_refresh_token_rotation.sql`
-before deploying the refresh-token API. Access and refresh tokens are opaque
-random credentials; the database stores only their SHA-256 hashes.
+`MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DATABASE`. For a new
+installation, run `data/community.sql` from the repository root to create the
+database and all tables. It is a fresh-install schema and is not a migration for
+an existing database. Access and refresh tokens are opaque random credentials;
+the database stores only their SHA-256 hashes.
 
 `POST /auth/register` accepts `{ "username", "email", "password" }` and returns
 HTTP `201`. `POST /auth/login` accepts `{ "identifier", "password" }`, where
