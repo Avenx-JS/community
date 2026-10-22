@@ -20,10 +20,13 @@ CREATE TABLE auth_sessions (
 
 CREATE TABLE communities (
     id VARCHAR(36) PRIMARY KEY,
+    creator_id VARCHAR(36) NOT NULL,
     name VARCHAR(50) NOT NULL UNIQUE,
     description TEXT,
     rules TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_communities_creator_id (creator_id),
+    FOREIGN KEY (creator_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
 CREATE TABLE community_subscriptions (

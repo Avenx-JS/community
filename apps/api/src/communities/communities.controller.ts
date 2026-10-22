@@ -1,29 +1,49 @@
-import { Controller, Get, Post, Delete, Param, Query, Body } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
+import { AuthGuard, type AuthenticatedRequest } from '../auth/auth.guard';
+import { CommunitiesService } from './communities.service';
+import { CreateCommunityDto } from './dto/create-community.dto';
+import { ListCommunitiesDto } from './dto/list-communities.dto';
 
 @Controller('communities')
 export class CommunitiesController {
-    @Get()
-    findAll(@Query() query: any) {
-        return { message: 'Not implemented' };
-    }
+  constructor(private readonly communitiesService: CommunitiesService) {}
 
-    @Post()
-    create(@Body() body: any) {
-        return { message: 'Not implemented' };
-    }
+  @Get()
+  findAll(@Query() query: ListCommunitiesDto) {
+    return this.communitiesService.findAll(query);
+  }
 
-    @Get(':name')
-    findOne(@Param('name') name: string) {
-        return { message: 'Not implemented' };
-    }
+  @Post()
+  @UseGuards(AuthGuard)
+  create(
+    @Body() body: CreateCommunityDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.communitiesService.create(body, request.user.id);
+  }
 
-    @Post(':name/subscribe')
-    subscribe(@Param('name') name: string) {
-        return { message: 'Not implemented' };
-    }
+  @Get(':name')
+  findOne(@Param('name') name: string) {
+    return this.communitiesService.findOne(name);
+  }
 
-    @Delete(':name/subscribe')
-    unsubscribe(@Param('name') name: string) {
-        return { message: 'Not implemented' };
-    }
+  @Post(':name/subscribe')
+  subscribe(@Param('name') name: string) {
+    return { message: 'Not implemented' };
+  }
+
+  @Delete(':name/subscribe')
+  unsubscribe(@Param('name') name: string) {
+    return { message: 'Not implemented' };
+  }
 }

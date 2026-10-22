@@ -84,6 +84,40 @@ the endpoint returns HTTP `404`:
 }
 ```
 
+## Communities
+
+`GET /communities` returns a page of communities in a stable order
+(`created_at` descending, then `id` descending). It accepts:
+
+- `search`: optional, up to 100 characters; case-insensitive substring match
+  against the community name and description.
+- `page`: optional, one-based page number (default `1`).
+- `limit`: optional page size from `1` to `100` (default `20`).
+
+The response contains `items`, `page`, `limit`, and the matching `total`. An
+empty result is returned as HTTP `200` with an empty `items` array.
+
+`POST /communities` requires a bearer token and accepts a `name` (1-50
+characters), plus optional `description` and `rules` (up to 16,383 characters
+each, keeping values within MySQL's `TEXT` limit with UTF-8 storage). The creator
+is taken from the authenticated user, never from the request
+body. A duplicate name returns `409`; invalid input returns `400`.
+`GET /communities/:name` retrieves a community by its exact name and returns
+`404` if it does not exist.
+
+All community endpoints return the same community DTO:
+
+```json
+{
+  "id": "community-id",
+  "creator_id": "user-id",
+  "name": "sample",
+  "description": null,
+  "rules": null,
+  "created_at": "2026-10-22T08:00:00.000Z"
+}
+```
+
 ## Project setup
 
 ```bash
