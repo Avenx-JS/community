@@ -85,6 +85,28 @@ statement `UPDATE users SET role = 'admin' WHERE username = ?` with the target
 username bound as its parameter. Do not expose role on public profiles or auth
 responses; it is read from the database for server-side authorization only.
 
+### Administration API conventions
+
+Administrative endpoints use the `/admin` namespace and explicitly apply
+`@UseGuards(AuthGuard, AdminGuard)` in that order. Missing, malformed, invalid,
+or expired bearer credentials return `401`; a valid account without the role
+required by the route returns `403`. The guard defaults to `admin`.
+`@RequiresRole(...)` is the single extension point for a future platform
+moderator policy; until then, moderator accounts are denied.
+
+Within an authorized admin request, unknown resources and resources that do not
+belong to the requested parent return `404`. Errors use the existing
+`SafeApiExceptionFilter` response shape; unexpected failures return a generic
+`500` and log only the method, route template, and status. Admin collections
+follow `{ items, page, limit, total }`, with `page` bounded to 1–10000 and
+`limit` to 1–100. Use stable ordering with a tiebreaker such as `id` alongside
+`created_at DESC`. Offset pagination matches existing API collections.
+
+Admin routes remain subject to the global API rate limits; do not exempt the
+namespace. If expected dashboard usage exceeds the existing read bucket,
+introduce an explicit documented rate-limit override rather than bypassing
+limits.
+
 `POST /auth/register` accepts `{ "username", "email", "password" }` and returns
 HTTP `201`. `POST /auth/login` accepts `{ "identifier", "password" }`, where
 `identifier` is a username or email, and returns HTTP `200`. Both return this

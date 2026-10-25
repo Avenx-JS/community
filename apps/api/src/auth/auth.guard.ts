@@ -5,11 +5,16 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import type { Request } from 'express';
+import type { PlatformRole } from '../users/users.service';
 import { AuthService } from './auth.service';
 
 export interface AuthenticatedRequest extends Request {
-  user: { id: string };
+  user: { id: string; role?: PlatformRole };
   accessToken: string;
+}
+
+export interface AdminAuthenticatedRequest extends AuthenticatedRequest {
+  user: { id: string; role: PlatformRole };
 }
 
 @Injectable()

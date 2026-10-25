@@ -4,11 +4,13 @@ import { AuthController } from './auth.controller';
 import { AuthGuard } from './auth.guard';
 import { AuthRateLimitService } from './auth-rate-limit.service';
 import { DatabaseModule } from '../database/database.module';
+import { UsersModule } from '../users/users.module';
+import { AdminGuard } from './admin.guard';
 
 @Module({
-  imports: [DatabaseModule],
-  providers: [AuthService, AuthGuard, AuthRateLimitService],
+  imports: [DatabaseModule, UsersModule],
+  providers: [AuthService, AuthGuard, AdminGuard, AuthRateLimitService],
   controllers: [AuthController],
-  exports: [AuthGuard, AuthService, AuthRateLimitService],
+  exports: [AuthGuard, AdminGuard, AuthService, AuthRateLimitService],
 })
 export class AuthModule {}
