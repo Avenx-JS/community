@@ -107,6 +107,104 @@ namespace. If expected dashboard usage exceeds the existing read bucket,
 introduce an explicit documented rate-limit override rather than bypassing
 limits.
 
+### Admin report queue
+
+Both report-reading routes require a bearer token and the `admin` platform
+role. They are read-only; neither endpoint changes report status or acts on an
+account.
+
+`GET /admin/reports` lists reports in the `{ items, page, limit, total, filters }`
+envelope. Optional query parameters:
+
+| Parameter           | Accepted values                                                                              |
+| ------------------- | -------------------------------------------------------------------------------------------- |
+| `status`            | `open`, `under_review`, `resolved`, `rejected`                                               |
+| `reason`            | `spam`, `harassment`, `hate_speech`, `sexual_content`, `self_harm`, `impersonation`, `other` |
+| `reported_username` | Exact username, 3–50 letters, digits, or underscores                                         |
+| `reporter_username` | Exact username, 3–50 letters, digits, or underscores                                         |
+| `from` / `to`       | ISO 8601 timestamps; UTC half-open range `created_at >= from AND created_at < to`            |
+| `page`              | Integer 1–10000; defaults to `1`                                                             |
+| `limit`             | Integer 1–100; defaults to `20`                                                              |
+| `sort`              | `new` (default) or `oldest`; ties use the report ID                                          |
+
+When both dates are supplied, `from` is inclusive and `to` is exclusive. A
+report exactly at `to` is not included. This half-open UTC convention should
+also be used for report metrics and other date-range analytics.
+
+List items include report and queue fields, `has_context`, timestamps, and the
+reporter/reported usernames. A deleted reporter is shown as `null`; the
+reported username is present because reports against deleted accounts are
+cascaded away. Free-text descriptions are returned only by the detail route.
+An empty page returns `200` with an empty `items` array.
+
+```json
+{
+  "items": [
+    {
+      "id": "report-id",
+      "reporter_username": null,
+      "reported_username": "target_user",
+      "reason": "spam",
+      "status": "open",
+      "resolution": null,
+      "has_context": true,
+      "created_at": "2026-10-25T10:00:00.000Z",
+      "reviewed_at": null
+    }
+  ],
+  "page": 1,
+  "limit": 20,
+  "total": 1,
+  "filters": {
+    "status": null,
+    "reason": null,
+    "reported_username": null,
+    "reporter_username": null,
+    "from": null,
+    "to": null,
+    "sort": "new"
+  }
+}
+```
+
+`GET /admin/reports/:id` returns one report's detail, including description,
+resolution note, reviewer username, context, and triage aggregates:
+`open_reports_against_user`, `total_reports_against_user`, and
+`prior_resolutions_against_user` grouped by resolution. `context` is `null`
+when no context was filed; a deleted referenced post/comment returns
+`exists: false` and null detail fields. Deleted reporter and reviewer usernames
+are also `null`. Unknown report IDs return `404`; malformed IDs return `400`.
+
+```json
+{
+  "id": "report-id",
+  "reporter_username": null,
+  "reported_username": "target_user",
+  "reason": "spam",
+  "status": "open",
+  "resolution": null,
+  "has_context": true,
+  "created_at": "2026-10-25T10:00:00.000Z",
+  "reviewed_at": null,
+  "description": "Repeated spam posts",
+  "resolution_note": null,
+  "reviewed_by_username": null,
+  "context": {
+    "type": "post",
+    "id": "post-id",
+    "exists": true,
+    "title": "Post title",
+    "content_excerpt": "Post content excerpt",
+    "author_username": "target_user"
+  },
+  "open_reports_against_user": 2,
+  "total_reports_against_user": 4,
+  "prior_resolutions_against_user": [
+    { "resolution": "content_removed", "total": 2 }
+  ]
+}
+```
+
 ### User reports
 
 The `user_reports` table stores account reports and moderation lifecycle data.

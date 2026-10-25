@@ -8,7 +8,15 @@ export const REPORT_REASONS = [
   'other',
 ] as const;
 
+export const REPORT_STATUSES = [
+  'open',
+  'under_review',
+  'resolved',
+  'rejected',
+] as const;
+
 export type ReportReason = (typeof REPORT_REASONS)[number];
+export type ReportStatus = (typeof REPORT_STATUSES)[number];
 export type ReportContextType = 'post' | 'comment';
 
 export function isReportReason(value: unknown): value is ReportReason {
