@@ -362,6 +362,52 @@ layer. No other routes bypass the API limiter. Expired rows in
 `auth_rate_limits` should be periodically purged by database maintenance after
 their longest configured window has elapsed.
 
+## Reports
+
+`POST /reports` requires a bearer token and creates a report about another
+account. The reporter is always derived from the token. The JSON body accepts:
+
+- `username`: target username (3–50 letters, digits, or underscores).
+- `reason`: one of `spam`, `harassment`, `hate_speech`, `sexual_content`,
+  `self_harm`, `impersonation`, or `other`.
+- `description`: optional plain text, trimmed and limited to 2,000 characters.
+- `context_type` and `context_id`: optional pair. The type is `post` or
+  `comment`; the identifier is 1–36 letters, digits, underscores, or hyphens.
+  The referenced content must exist and have been authored by the reported
+  account.
+
+Unknown accounts or missing context return `404`. Reporting yourself or
+pointing to content by another account returns `400`. An active duplicate
+report by the same reporter for the same account and context returns `409`;
+after the earlier report is resolved or rejected, another report may be filed.
+No action is taken against the reported account by submitting a report.
+Reports against suspended or banned accounts are accepted.
+
+Success returns `201` with only the report receipt:
+
+```json
+{
+  "id": "report-id",
+  "reported_username": "target_user",
+  "reason": "spam",
+  "status": "open",
+  "created_at": "2026-10-25T10:00:00.000Z"
+}
+```
+
+The response does not disclose the target's internal ID, email, report history,
+or moderation outcome. `reporter_id`, status, resolution fields, and all other
+undeclared body fields are rejected with `400`. Descriptions are stored as
+plain text and must be encoded by clients when rendered.
+
+Report creation has additional fixed-window limits of 20 per IP per hour and
+10 per authenticated account per hour, in addition to the generic write
+limits. Override them with positive-integer `API_REPORT_CREATE_IP_MAX`,
+`API_REPORT_CREATE_IP_WINDOW_SECONDS`, `API_REPORT_CREATE_ACCOUNT_MAX`, and
+`API_REPORT_CREATE_ACCOUNT_WINDOW_SECONDS`. Account counters use only the
+validated bearer-token user ID. Exceeding a limit returns `429` and
+`Retry-After`.
+
 ## Security headers and CORS
 
 The API uses Helmet to set `X-Content-Type-Options: nosniff`,

@@ -105,6 +105,99 @@ describe('AuthRateLimitService', () => {
     expect(calls[0].sql).toContain('INTERVAL 120 SECOND');
   });
 
+  it('adds report-specific IP and token-account signals with configurable defaults', async () => {
+    await service.enforceApiRequest(
+      '192.0.2.10',
+      'POST',
+      '/reports',
+      'token-user-id',
+    );
+
+    expect(calls).toHaveLength(10);
+    const hmac = (scope: string, value: string) =>
+      createHmac(
+        'sha256',
+        process.env.RATE_LIMIT_HASH_SECRET ??
+          process.env.MYSQL_PASSWORD ??
+          'community-local-rate-limit-secret',
+      )
+        .update(scope)
+        .update('\0')
+        .update(value)
+        .digest('hex');
+    const reportSignals = calls.filter(
+      (call) =>
+        call.sql.startsWith('INSERT INTO auth_rate_limits') &&
+        call.sql.includes('INTERVAL 3600 SECOND'),
+    );
+    expect(reportSignals.map((call) => call.values[0])).toEqual(
+      expect.arrayContaining([
+        hmac('report:create:ip', '192.0.2.10'),
+        hmac('report:create:account', 'token-user-id'),
+      ]),
+    );
+    expect(JSON.stringify(calls)).not.toContain('token-user-id');
+  });
+
+  it('honours report rate-limit environment overrides', async () => {
+    const previousValues = {
+      ipMax: process.env.API_REPORT_CREATE_IP_MAX,
+      ipWindow: process.env.API_REPORT_CREATE_IP_WINDOW_SECONDS,
+      accountMax: process.env.API_REPORT_CREATE_ACCOUNT_MAX,
+      accountWindow: process.env.API_REPORT_CREATE_ACCOUNT_WINDOW_SECONDS,
+    };
+    process.env.API_REPORT_CREATE_IP_MAX = '4';
+    process.env.API_REPORT_CREATE_IP_WINDOW_SECONDS = '120';
+    process.env.API_REPORT_CREATE_ACCOUNT_MAX = '2';
+    process.env.API_REPORT_CREATE_ACCOUNT_WINDOW_SECONDS = '180';
+    try {
+      const overridden = new AuthRateLimitService({
+        execute: (sql: string, values: unknown[]) => {
+          calls.push({ sql, values });
+          return Promise.resolve([
+            [{ request_count: 3, retry_after: 127 }],
+            [],
+          ]);
+        },
+      } as unknown as Pool);
+
+      await expect(
+        overridden.enforceApiRequest(
+          '192.0.2.10',
+          'POST',
+          '/reports',
+          'token-user-id',
+        ),
+      ).resolves.toBe(127);
+      const reportWindows = calls
+        .filter(
+          (call) =>
+            call.sql.startsWith('INSERT INTO auth_rate_limits') &&
+            (call.sql.includes('INTERVAL 120 SECOND') ||
+              call.sql.includes('INTERVAL 180 SECOND')),
+        )
+        .map((call) => call.sql);
+      expect(reportWindows).toHaveLength(2);
+    } finally {
+      const envValues = [
+        ['API_REPORT_CREATE_IP_MAX', previousValues.ipMax],
+        ['API_REPORT_CREATE_IP_WINDOW_SECONDS', previousValues.ipWindow],
+        ['API_REPORT_CREATE_ACCOUNT_MAX', previousValues.accountMax],
+        [
+          'API_REPORT_CREATE_ACCOUNT_WINDOW_SECONDS',
+          previousValues.accountWindow,
+        ],
+      ] as const;
+      for (const [name, value] of envValues) {
+        if (value === undefined) {
+          delete process.env[name];
+        } else {
+          process.env[name] = value;
+        }
+      }
+    }
+  });
+
   it('shares API counters across service instances through the database store', async () => {
     const previousMax = process.env.API_READ_IP_MAX;
     process.env.API_READ_IP_MAX = '1';

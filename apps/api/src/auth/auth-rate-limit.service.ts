@@ -34,6 +34,8 @@ interface AuthRateLimitConfig {
   contentCreateIp: RateLimitOptions;
   contentCreateAccount: RateLimitOptions;
   contentCreateCooldown: RateLimitOptions;
+  reportCreateIp: RateLimitOptions;
+  reportCreateAccount: RateLimitOptions;
 }
 
 const localDevelopmentSecret = 'community-local-rate-limit-secret';
@@ -80,6 +82,8 @@ function readConfig(): AuthRateLimitConfig {
     contentCreateIp: readOptions('API_CONTENT_CREATE_IP', 10, 600),
     contentCreateAccount: readOptions('API_CONTENT_CREATE_ACCOUNT', 5, 600),
     contentCreateCooldown: readOptions('API_CONTENT_COOLDOWN', 1, 30),
+    reportCreateIp: readOptions('API_REPORT_CREATE_IP', 20, 3600),
+    reportCreateAccount: readOptions('API_REPORT_CREATE_ACCOUNT', 10, 3600),
   };
 }
 
@@ -181,6 +185,21 @@ export class AuthRateLimitService {
             'api:content:create:cooldown',
             accountId,
             this.config.contentCreateCooldown,
+          ),
+        );
+      }
+    }
+
+    if (method === 'POST' && path === '/reports') {
+      signals.push(
+        this.signal('report:create:ip', ip, this.config.reportCreateIp),
+      );
+      if (accountId) {
+        signals.push(
+          this.signal(
+            'report:create:account',
+            accountId,
+            this.config.reportCreateAccount,
           ),
         );
       }

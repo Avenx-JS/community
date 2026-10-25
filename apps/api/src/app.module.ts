@@ -8,6 +8,7 @@ import { PostsModule } from './posts/posts.module';
 import { CommentsModule } from './comments/comments.module';
 import { VotesModule } from './votes/votes.module';
 import { AdminModule } from './admin/admin.module';
+import { ReportsModule } from './reports/reports.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { AdminModule } from './admin/admin.module';
     CommentsModule,
     VotesModule,
     AdminModule,
+    ReportsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
