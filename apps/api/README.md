@@ -64,6 +64,27 @@ running migrations, not the API runtime database user. Migration credentials
 are read from the environment and are never printed; do not place passwords in
 the command line or migration files.
 
+### Platform roles
+
+`users.role` is an `ENUM` with the values `user`, `moderator`, and `admin`,
+defaulting to `user`. An enum matches the existing schema style (`posts.type`
+and `votes.target_type`); adding a future role requires a schema migration.
+
+- `user` is the default and grants the capabilities available today, including
+  community creator and moderator powers. Those powers remain independent of
+  the platform role.
+- `admin` grants platform-wide administration for the `/admin` surface planned
+  by the backlog.
+- `moderator` currently grants nothing beyond `user`. Whether it will grant
+  platform-wide report triage without role changes or permanent bans remains
+  an open product-policy decision.
+
+No API endpoint can assign or change a platform role. An operator provisions
+the first administrator directly in the database by executing the prepared
+statement `UPDATE users SET role = 'admin' WHERE username = ?` with the target
+username bound as its parameter. Do not expose role on public profiles or auth
+responses; it is read from the database for server-side authorization only.
+
 `POST /auth/register` accepts `{ "username", "email", "password" }` and returns
 HTTP `201`. `POST /auth/login` accepts `{ "identifier", "password" }`, where
 `identifier` is a username or email, and returns HTTP `200`. Both return this

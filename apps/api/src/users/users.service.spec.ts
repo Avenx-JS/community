@@ -2,7 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { beforeEach, describe, expect, it } from '@jest/globals';
 import { NotFoundException } from '@nestjs/common';
 import { MYSQL_POOL } from '../auth/auth.service';
-import { UsersService } from './users.service';
+import { PlatformRole, UsersService } from './users.service';
 
 describe('UsersService', () => {
   let service: UsersService;
@@ -12,9 +12,13 @@ describe('UsersService', () => {
     username: string;
     created_at: Date | string;
   }>;
+  let platformRoleRows: Array<{ role: PlatformRole }>;
   const pool = {
     execute: (sql: string, values: unknown[]) => {
       queryCalls.push({ sql, values });
+      if (sql.startsWith('SELECT role FROM users')) {
+        return Promise.resolve([platformRoleRows, []]);
+      }
       return Promise.resolve([userRows, []]);
     },
   };
@@ -28,6 +32,7 @@ describe('UsersService', () => {
         created_at: new Date('2026-10-21T20:00:00.000Z'),
       },
     ];
+    platformRoleRows = [{ role: 'admin' }];
     const module: TestingModule = await Test.createTestingModule({
       providers: [UsersService, { provide: MYSQL_POOL, useValue: pool }],
     }).compile();
@@ -53,5 +58,21 @@ describe('UsersService', () => {
     await expect(service.getUserProfile('missing')).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+
+  it('returns a platform role using a bound user id', async () => {
+    await expect(service.getPlatformRole('user-id')).resolves.toBe('admin');
+    expect(queryCalls).toEqual([
+      {
+        sql: 'SELECT role FROM users WHERE id = ? LIMIT 1',
+        values: ['user-id'],
+      },
+    ]);
+  });
+
+  it('returns null when the platform role user does not exist', async () => {
+    platformRoleRows = [];
+
+    await expect(service.getPlatformRole('missing-id')).resolves.toBeNull();
   });
 });

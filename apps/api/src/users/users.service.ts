@@ -6,6 +6,12 @@ interface UserProfileRow extends RowDataPacket {
   username: string;
 }
 
+interface UserPlatformRoleRow extends RowDataPacket {
+  role: PlatformRole;
+}
+
+export type PlatformRole = 'user' | 'moderator' | 'admin';
+
 export interface UserProfile {
   username: string;
 }
@@ -26,5 +32,13 @@ export class UsersService {
     }
 
     return { username: user.username };
+  }
+
+  async getPlatformRole(userId: string): Promise<PlatformRole | null> {
+    const [users] = await this.pool.execute<UserPlatformRoleRow[]>(
+      'SELECT role FROM users WHERE id = ? LIMIT 1',
+      [userId],
+    );
+    return users[0]?.role ?? null;
   }
 }

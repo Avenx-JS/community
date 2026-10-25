@@ -87,6 +87,10 @@ describe('AuthService', () => {
     const insertedAccessHash = calls[1].values[0] as string;
     const insertedRefreshHash = calls[2].values[0] as string;
     expect(insertedPasswordHash).not.toBe('correct-horse-battery');
+    expect(calls[0].sql).toBe(
+      'INSERT INTO users (id, username, email, password_hash) VALUES (?, ?, ?, ?)',
+    );
+    expect(calls[0].sql).not.toContain('role');
     expect(insertedPasswordHash).toMatch(
       /^\$argon2id\$v=19\$m=19456,p=1,t=2\$/,
     );

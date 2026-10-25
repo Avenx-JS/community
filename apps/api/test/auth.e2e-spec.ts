@@ -40,6 +40,7 @@ interface TestRateLimitBucket {
 describe('Auth endpoints (e2e)', () => {
   let app: INestApplication<App>;
   let users: TestUser[];
+  let userInsertCount: number;
   let sessions: TestSession[];
   let refreshTokens: TestRefreshToken[];
   let rateLimitBuckets: Map<string, TestRateLimitBucket>;
@@ -62,6 +63,7 @@ describe('Auth endpoints (e2e)', () => {
     process.env.AUTH_LOGIN_IP_MAX = '2';
     process.env.AUTH_LOGIN_IP_WINDOW_SECONDS = '60';
     users = [];
+    userInsertCount = 0;
     sessions = [];
     refreshTokens = [];
     rateLimitBuckets = new Map();
@@ -70,6 +72,7 @@ describe('Auth endpoints (e2e)', () => {
       values: unknown[],
     ): Promise<[unknown, unknown]> => {
       if (sql.startsWith('INSERT INTO users')) {
+        userInsertCount += 1;
         const [id, username, email, passwordHash] = values as [
           string,
           string,
@@ -368,6 +371,7 @@ describe('Auth endpoints (e2e)', () => {
         username: 'sample_user',
       },
     });
+
     expect(Object.keys(body).sort()).toEqual(
       [
         'accessToken',
@@ -383,6 +387,34 @@ describe('Auth endpoints (e2e)', () => {
     expect(body.user).not.toHaveProperty('password');
     expect(body.user).not.toHaveProperty('password_hash');
     expect(users[0].password_hash).not.toBe('correct-horse-battery');
+  });
+
+  it('rejects a role supplied during registration before inserting a user', async () => {
+    await request(app.getHttpServer())
+      .post('/auth/register')
+      .send({
+        username: 'privileged_user',
+        email: 'privileged@example.com',
+        password: 'correct-horse-battery',
+        role: 'admin',
+      })
+      .expect(400);
+
+    expect(userInsertCount).toBe(0);
+    expect(users).toHaveLength(0);
+  });
+
+  it('rejects a role supplied during login', async () => {
+    await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({
+        identifier: 'sample_user',
+        password: 'correct-horse-battery',
+        role: 'admin',
+      })
+      .expect(400);
+
+    expect(userInsertCount).toBe(0);
   });
 
   it('rejects invalid input and duplicate username or email', async () => {

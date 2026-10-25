@@ -6,8 +6,11 @@ CREATE TABLE users (
     username VARCHAR(50) NOT NULL UNIQUE,
     email VARCHAR(255) NOT NULL UNIQUE,
     password_hash VARCHAR(255) NOT NULL,
+    role ENUM('user', 'moderator', 'admin') NOT NULL DEFAULT 'user',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE INDEX idx_users_role ON users (role);
 
 CREATE TABLE auth_sessions (
     token_hash CHAR(64) PRIMARY KEY,
@@ -107,3 +110,12 @@ CREATE TABLE votes (
     UNIQUE KEY unique_user_target (user_id, target_type, target_id),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+CREATE TABLE schema_migrations (
+    version VARCHAR(64) PRIMARY KEY,
+    applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO schema_migrations (version) VALUES
+    ('000_baseline'),
+    ('001_add_user_platform_role');
