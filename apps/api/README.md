@@ -30,9 +30,39 @@
 The API connects to MySQL using `MYSQL_HOST` (defaults to `127.0.0.1`),
 `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DATABASE`. For a new
 installation, run `data/community.sql` from the repository root to create the
-database and all tables. It is a fresh-install schema and is not a migration for
-an existing database. Access and refresh tokens are opaque random credentials;
-the database stores only their SHA-256 hashes.
+database and all tables. The file is the maintained full-install snapshot; it
+is not itself a migration for an existing database. Access and refresh tokens
+are opaque random credentials; the database stores only their SHA-256 hashes.
+
+### Database schema and migrations
+
+After configuring the `MYSQL_*` variables, apply pending schema migrations from
+`apps/api` with:
+
+```sh
+npm run migrate
+```
+
+For a fresh installation, run `data/community.sql` first, then run the command
+above. Existing installations created from that snapshot can run the migration
+command directly. The runner creates `schema_migrations` and records
+`000_baseline` for the existing schema before applying later migrations.
+`data/community.sql` remains the maintained full-install snapshot and must be
+updated in the same change as each migration, keeping new and upgraded
+installations aligned.
+
+Migration files live in `data/migrations/` and use the
+`NNN_snake_case_description.sql` naming rule. They run in ascending numeric
+order. Once released, a migration is append-only: correct mistakes with a new
+migration rather than changing an existing file. Since MySQL DDL is not
+transactional, each migration should contain one logical change and its header
+must state whether it is safe to re-run after partial application.
+
+The migration command needs DDL privileges such as `CREATE`, `ALTER`, and
+`INDEX`. Prefer separate credentials: grant these privileges to the operator
+running migrations, not the API runtime database user. Migration credentials
+are read from the environment and are never printed; do not place passwords in
+the command line or migration files.
 
 `POST /auth/register` accepts `{ "username", "email", "password" }` and returns
 HTTP `201`. `POST /auth/login` accepts `{ "identifier", "password" }`, where
