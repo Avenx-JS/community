@@ -107,6 +107,38 @@ namespace. If expected dashboard usage exceeds the existing read bucket,
 introduce an explicit documented rate-limit override rather than bypassing
 limits.
 
+### User reports
+
+The `user_reports` table stores account reports and moderation lifecycle data.
+`reason` is one of `spam`, `harassment`, `hate_speech`, `sexual_content`,
+`self_harm`, `impersonation`, or `other`. `status` describes queue state
+(`open`, `under_review`, `resolved`, or `rejected`) and defaults to `open`;
+`resolution` separately records an outcome (`no_action`, `content_removed`,
+`user_warned`, `user_suspended`, or `user_banned`) and is nullable. A resolved
+report with `no_action` is distinct from a rejected report.
+
+Reports use deliberate account-deletion behavior: deleting a reporter or
+reviewer preserves the report and sets the corresponding reference to `NULL`;
+deleting the reported account deletes its reports (`ON DELETE CASCADE`). This
+chooses full erasure of reports about a deleted account over retaining
+identifiable moderation history. `context_id` has no foreign key because it can
+refer to either a post or comment; that content may have been deleted when a
+report is reviewed, and consumers must handle missing context as `null`.
+
+The schema enforces that reporter and reported user differ and that context
+type and ID are either both present or both absent with `CHECK` constraints.
+MySQL enforces `CHECK` constraints starting in 8.0.16; the deployment must use
+at least that minor version, and report creation must also validate these rules
+in the service layer. Queue, reported-user, reporter history, reporter abuse
+checks, and reviewer lookups have dedicated indexes.
+
+Duplicate prevention belongs in the report-creation service transaction, not
+in a unique key: a unique constraint would block later reports after resolution,
+and MySQL treats `NULL` values as distinct, leaving user-level reports
+unconstrained. A generated open-status column would have the same `NULL`
+context-key issue unless context were normalized to a sentinel, which is not
+used here.
+
 `POST /auth/register` accepts `{ "username", "email", "password" }` and returns
 HTTP `201`. `POST /auth/login` accepts `{ "identifier", "password" }`, where
 `identifier` is a username or email, and returns HTTP `200`. Both return this
