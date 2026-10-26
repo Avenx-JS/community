@@ -7,10 +7,12 @@ CREATE TABLE users (
     email VARCHAR(255) NOT NULL UNIQUE,
     password_hash VARCHAR(255) NOT NULL,
     role ENUM('user', 'moderator', 'admin') NOT NULL DEFAULT 'user',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TIMESTAMP NULL DEFAULT NULL
 );
 
 CREATE INDEX idx_users_role ON users (role);
+CREATE INDEX idx_users_last_seen_at ON users (last_seen_at);
 
 CREATE TABLE auth_sessions (
     token_hash CHAR(64) PRIMARY KEY,
@@ -202,4 +204,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('001_add_user_platform_role'),
     ('002_create_user_reports'),
     ('003_create_user_restrictions'),
-    ('004_create_admin_actions');
+    ('004_create_admin_actions'),
+    ('005_add_user_last_seen_at');
