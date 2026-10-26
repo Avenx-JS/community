@@ -8,6 +8,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { escapeLikeSearch } from '../common/like-search';
 import { CreateCommunityDto } from './dto/create-community.dto';
 import { ListCommunitiesDto } from './dto/list-communities.dto';
 
@@ -49,7 +50,7 @@ export class CommunitiesService {
     let values: (string | number)[] = [];
 
     if (search) {
-      const term = `%${search.replace(/[=%_]/g, '=$&')}%`;
+      const term = `%${escapeLikeSearch(search)}%`;
       where =
         " WHERE LOWER(name) LIKE LOWER(?) ESCAPE '=' OR LOWER(description) LIKE LOWER(?) ESCAPE '='";
       values = [term, term];

@@ -62,6 +62,19 @@ describe('CommunitiesService', () => {
     expect(queries[1].values).toEqual(['%garden%', '%garden%']);
   });
 
+  it('escapes LIKE wildcards in community search through the shared helper', async () => {
+    results = [[], [{ total: 0 }]];
+
+    await service.findAll({ search: '100%_safe=' });
+
+    expect(queries[0].values).toEqual([
+      '%100=%=_safe==%',
+      '%100=%=_safe==%',
+      20,
+      0,
+    ]);
+  });
+
   it('persists the authenticated creator and returns the created community', async () => {
     results = [
       [],

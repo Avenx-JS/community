@@ -4,10 +4,12 @@ import { DatabaseModule } from '../database/database.module';
 import { UsersModule } from '../users/users.module';
 import { AdminReportsController } from './admin-reports.controller';
 import { AdminReportsService } from './admin-reports.service';
+import { AdminUsersController } from './admin-users.controller';
+import { AdminUsersService } from './admin-users.service';
 
 @Module({
   imports: [AuthModule, DatabaseModule, UsersModule],
-  controllers: [AdminReportsController],
-  providers: [AdminReportsService],
+  controllers: [AdminReportsController, AdminUsersController],
+  providers: [AdminReportsService, AdminUsersService],
 })
 export class AdminModule {}

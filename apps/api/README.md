@@ -107,6 +107,100 @@ namespace. If expected dashboard usage exceeds the existing read bucket,
 introduce an explicit documented rate-limit override rather than bypassing
 limits.
 
+### Admin user directory
+
+`GET /admin/users` and `GET /admin/users/:id` require a bearer token and the
+`admin` platform role. Both routes are read-only. The list returns
+`{ items, page, limit, total, filters }`; supported query parameters are:
+
+| Parameter     | Accepted values                                                                               |
+| ------------- | --------------------------------------------------------------------------------------------- |
+| `search`      | Case-insensitive username substring, up to 100 characters; `%`, `_`, and `=` match literally  |
+| `role`        | `user`, `moderator`, or `admin`                                                               |
+| `from` / `to` | ISO 8601 timestamps; UTC half-open range over `created_at` (`from` inclusive, `to` exclusive) |
+| `page`        | Integer 1–10000; defaults to `1`                                                              |
+| `limit`       | Integer 1–100; defaults to `20`                                                               |
+| `sort`        | `new` (default), `oldest`, or `username`; ties are ordered by account ID                      |
+
+The list item contains the account ID, username, platform role, registration
+time, `status`, `restriction_expires_at`, and `open_reports_against`.
+`GET /admin/users/:id` adds `last_seen_at`, activity counts
+(`posts_count`, `comments_count`, `votes_count`, `communities_created`,
+`subscriptions_count`, and `moderated_communities_count`), `reports_against`
+counts by queue status, and `reports_filed_count`. Unknown IDs return `404`;
+malformed IDs return `400`.
+
+Restriction-derived behavior is deferred until the `user_restrictions` schema
+is introduced: the current schema has no restriction records, so accounts are
+reported as `status: "active"` with `restriction_expires_at: null`. There is
+not yet a `status` filter or a restriction summary in the detail response.
+Likewise, `last_seen_at` is `null` until that column is introduced. These fields
+can be wired to their schema when those changes land; no restriction history
+or session view is exposed here.
+
+Email is intentionally excluded from both admin responses. This preserves the
+data-classification guarantee that email is not returned by profile, auth,
+content, or list responses. Neither route returns password hashes, credentials,
+tokens, session identifiers, or auth-rate-limit keys. The public
+`GET /users/:username` contract is unchanged and still returns only
+`{ "username": "..." }`.
+
+Example list response:
+
+```json
+{
+  "items": [
+    {
+      "id": "user-id",
+      "username": "sample_user",
+      "role": "user",
+      "created_at": "2026-10-25T10:00:00.000Z",
+      "status": "active",
+      "restriction_expires_at": null,
+      "open_reports_against": 2
+    }
+  ],
+  "page": 1,
+  "limit": 20,
+  "total": 1,
+  "filters": {
+    "search": null,
+    "role": null,
+    "from": null,
+    "to": null,
+    "sort": "new"
+  }
+}
+```
+
+Example detail response:
+
+```json
+{
+  "id": "user-id",
+  "username": "sample_user",
+  "role": "user",
+  "created_at": "2026-10-25T10:00:00.000Z",
+  "status": "active",
+  "restriction_expires_at": null,
+  "open_reports_against": 2,
+  "last_seen_at": null,
+  "posts_count": 3,
+  "comments_count": 4,
+  "votes_count": 5,
+  "communities_created": 1,
+  "subscriptions_count": 2,
+  "moderated_communities_count": 1,
+  "reports_against": {
+    "open": 1,
+    "under_review": 1,
+    "resolved": 0,
+    "rejected": 0
+  },
+  "reports_filed_count": 2
+}
+```
+
 ### Admin report queue
 
 Both report-reading routes require a bearer token and the `admin` platform
