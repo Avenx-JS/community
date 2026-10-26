@@ -22,6 +22,7 @@ interface ReportFixture {
   context_id: string | null;
   created_at: string;
   reviewed_at: string | null;
+  resolution_note: string | null;
 }
 
 interface AdminListResponse {
@@ -48,6 +49,22 @@ describe('Admin reports API (e2e)', () => {
   let roles: Map<string, PlatformRole>;
   let poolCalls: Array<{ sql: string; values: unknown[] }>;
   let detailHasContext: boolean;
+  let auditRows: unknown[][];
+  let transactionCounts: {
+    commits: number;
+    rollbacks: number;
+    releases: number;
+  };
+  let failAuditInsert: boolean;
+  let previousReportState:
+    | {
+        report: ReportFixture;
+        status: string;
+        resolution: string | null;
+        note: string | null;
+        reviewedAt: string | null;
+      }
+    | undefined;
 
   beforeEach(async () => {
     reports = Array.from({ length: 25 }, (_, index) => ({
@@ -61,6 +78,7 @@ describe('Admin reports API (e2e)', () => {
       context_id: index === 0 ? 'deleted-post' : null,
       created_at: new Date(Date.UTC(2026, 0, index + 1)).toISOString(),
       reviewed_at: null,
+      resolution_note: null,
     }));
     roles = new Map([
       ['admin-id', 'admin'],
@@ -68,6 +86,10 @@ describe('Admin reports API (e2e)', () => {
     ]);
     poolCalls = [];
     detailHasContext = false;
+    auditRows = [];
+    transactionCounts = { commits: 0, rollbacks: 0, releases: 0 };
+    failAuditInsert = false;
+    previousReportState = undefined;
 
     const matchingReports = (sql: string, values: unknown[]) => {
       const where = sql.includes(' WHERE ')
@@ -163,8 +185,8 @@ describe('Admin reports API (e2e)', () => {
                   reporter_id: report.reporter_username ? 'reporter-id' : null,
                   reported_user_id: 'target-id',
                   description: 'Accusation detail',
-                  resolution_note: null,
-                  reviewed_by_username: null,
+                  resolution_note: report.resolution_note,
+                  reviewed_by_username: report.reviewed_at ? 'admin' : null,
                 },
               ]
             : [],
@@ -199,21 +221,104 @@ describe('Admin reports API (e2e)', () => {
       }
       return Promise.reject(new Error(`Unexpected SQL query: ${sql}`));
     };
+    const connection = {
+      beginTransaction: () => Promise.resolve(),
+      commit: () => {
+        transactionCounts.commits += 1;
+        return Promise.resolve();
+      },
+      rollback: () => {
+        transactionCounts.rollbacks += 1;
+        if (previousReportState) {
+          previousReportState.report.status = previousReportState.status;
+          previousReportState.report.resolution =
+            previousReportState.resolution;
+          previousReportState.report.resolution_note = previousReportState.note;
+          previousReportState.report.reviewed_at =
+            previousReportState.reviewedAt;
+        }
+        return Promise.resolve();
+      },
+      release: () => {
+        transactionCounts.releases += 1;
+      },
+      execute: (sql: string, values: unknown[]) => {
+        poolCalls.push({ sql, values });
+        if (sql.startsWith('SELECT id, reporter_id, reported_user_id')) {
+          const report = reports.find((row) => row.id === values[0]);
+          return Promise.resolve([
+            report
+              ? [
+                  {
+                    id: report.id,
+                    reporter_id: report.reporter_username
+                      ? 'reporter-id'
+                      : null,
+                    reported_user_id: 'target-id',
+                    status: report.status,
+                  },
+                ]
+              : [],
+            [],
+          ]);
+        }
+        if (sql.startsWith('UPDATE user_reports')) {
+          const report = reports.find((row) => row.id === values[4]);
+          if (!report) {
+            return Promise.resolve([{ affectedRows: 0 }, []]);
+          }
+          previousReportState = {
+            report,
+            status: report.status,
+            resolution: report.resolution,
+            note: report.resolution_note,
+            reviewedAt: report.reviewed_at,
+          };
+          report.status = String(values[0]);
+          report.resolution = typeof values[1] === 'string' ? values[1] : null;
+          report.resolution_note =
+            typeof values[2] === 'string' ? values[2] : null;
+          report.reviewed_at = '2026-10-26T12:00:00.000Z';
+          return Promise.resolve([{ affectedRows: 1 }, []]);
+        }
+        if (sql === 'SELECT username FROM users WHERE id = ? LIMIT 1') {
+          return Promise.resolve([
+            values[0] === 'admin-id' || values[0] === 'target-id'
+              ? [{ username: 'admin' }]
+              : [],
+            [],
+          ]);
+        }
+        if (sql.startsWith('INSERT INTO admin_actions')) {
+          if (failAuditInsert) {
+            return Promise.reject(new Error('Audit insert failed'));
+          }
+          auditRows.push(values);
+          return Promise.resolve([{ affectedRows: 1 }, []]);
+        }
+        return Promise.reject(new Error(`Unexpected transaction SQL: ${sql}`));
+      },
+    };
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     })
       .overrideProvider(MYSQL_POOL)
-      .useValue({ execute })
+      .useValue({
+        execute,
+        getConnection: () => Promise.resolve(connection),
+      })
       .overrideProvider(AuthService)
       .useValue({
         validateAccessToken: (token: string) =>
           Promise.resolve(
             token === 'admin-token'
               ? 'admin-id'
-              : token === 'user-token'
-                ? 'user-id'
-                : null,
+              : token === 'target-token'
+                ? 'target-id'
+                : token === 'user-token'
+                  ? 'user-id'
+                  : null,
           ),
       })
       .overrideProvider(UsersService)
@@ -244,11 +349,25 @@ describe('Admin reports API (e2e)', () => {
       .get(path)
       .set('Authorization', 'Bearer admin-token');
 
+  const adminPatch = (path: string) =>
+    request(app.getHttpServer())
+      .patch(path)
+      .set('Authorization', 'Bearer admin-token');
+
   it('enforces authentication and admin authorization', async () => {
     await request(app.getHttpServer()).get('/admin/reports').expect(401);
     await request(app.getHttpServer())
+      .patch('/admin/reports/report-01')
+      .send({ status: 'under_review' })
+      .expect(401);
+    await request(app.getHttpServer())
       .get('/admin/reports')
       .set('Authorization', 'Bearer user-token')
+      .expect(403);
+    await request(app.getHttpServer())
+      .patch('/admin/reports/report-01')
+      .set('Authorization', 'Bearer user-token')
+      .send({ status: 'under_review' })
       .expect(403);
     await adminRequest('/admin/reports').expect(200);
   });
@@ -361,5 +480,96 @@ describe('Admin reports API (e2e)', () => {
     expect(JSON.stringify(body)).not.toContain('password_hash');
     await adminRequest('/admin/reports/missing-id').expect(404);
     await adminRequest('/admin/reports/bad.id').expect(400);
+  });
+
+  it('transitions report status and writes an audit record transactionally', async () => {
+    const response = await adminPatch('/admin/reports/report-01')
+      .send({
+        status: 'resolved',
+        resolution: 'user_suspended',
+        resolution_note: '  reviewed  ',
+      })
+      .expect(200);
+
+    expect(response.body).toMatchObject({
+      id: 'report-01',
+      status: 'resolved',
+      resolution: 'user_suspended',
+      resolution_note: 'reviewed',
+      reviewed_by_username: 'admin',
+    });
+    expect(transactionCounts).toEqual({
+      commits: 1,
+      rollbacks: 0,
+      releases: 1,
+    });
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0]).toEqual([
+      expect.any(String),
+      'admin-id',
+      'admin',
+      'report_status_changed',
+      'report',
+      'report-01',
+      JSON.stringify({
+        from_status: 'open',
+        to_status: 'resolved',
+        resolution: 'user_suspended',
+      }),
+    ]);
+    expect(poolCalls.some((call) => call.sql.includes('UPDATE users'))).toBe(
+      false,
+    );
+    expect(
+      poolCalls.some((call) => call.sql.includes('user_restrictions')),
+    ).toBe(false);
+  });
+
+  it('rejects invalid transitions, repeats, conflicts of interest, and unknown body fields', async () => {
+    await adminPatch('/admin/reports/report-01')
+      .send({ status: 'rejected', resolution: 'no_action' })
+      .expect(400);
+    await adminPatch('/admin/reports/report-01')
+      .send({
+        status: 'resolved',
+        resolution: 'no_action',
+        reviewed_by: 'admin-id',
+      })
+      .expect(400);
+    await adminPatch('/admin/reports/report-01')
+      .send({ status: 'resolved' })
+      .expect(400);
+
+    const alreadyResolved = reports[12];
+    await adminPatch(`/admin/reports/${alreadyResolved.id}`)
+      .send({ status: 'rejected' })
+      .expect(409);
+
+    await request(app.getHttpServer())
+      .patch('/admin/reports/report-01')
+      .set('Authorization', 'Bearer target-token')
+      .send({ status: 'under_review' })
+      .expect(403);
+    await adminPatch('/admin/reports/missing-id')
+      .send({ status: 'under_review' })
+      .expect(404);
+    await adminPatch('/admin/reports/bad.id')
+      .send({ status: 'under_review' })
+      .expect(400);
+    expect(auditRows).toHaveLength(0);
+  });
+
+  it('fails the report transition and rolls back if audit insertion fails', async () => {
+    failAuditInsert = true;
+    await adminPatch('/admin/reports/report-01')
+      .send({ status: 'under_review' })
+      .expect(500);
+
+    expect(reports[0].status).toBe('open');
+    expect(transactionCounts).toEqual({
+      commits: 0,
+      rollbacks: 1,
+      releases: 1,
+    });
   });
 });

@@ -387,6 +387,49 @@ are also `null`. Unknown report IDs return `404`; malformed IDs return `400`.
 }
 ```
 
+`PATCH /admin/reports/:id` requires a platform administrator and accepts:
+
+```json
+{
+  "status": "resolved",
+  "resolution": "no_action",
+  "resolution_note": "Reviewed by the moderation team."
+}
+```
+
+`status` is required and must be `under_review`, `resolved`, or `rejected`.
+`resolution` is required only for `resolved` and must be one of `no_action`,
+`content_removed`, `user_warned`, `user_suspended`, or `user_banned`.
+`resolution_note` is optional plain text up to 2,000 characters and is trimmed.
+Fields such as `reviewed_by` are rejected; attribution is derived from the
+validated administrator token.
+
+Allowed state transitions are:
+
+| Current status | `under_review` | `resolved` | `rejected` |
+| -------------- | -------------- | ---------- | ---------- |
+| `open`         | allowed        | allowed    | allowed    |
+| `under_review` | `409`          | allowed    | allowed    |
+| `resolved`     | `409`          | `409`      | `409`      |
+| `rejected`     | `409`          | `409`      | `409`      |
+
+Resolved and rejected reports are terminal. Repeating the current status also
+returns `409`, preserving the original reviewer and timestamp. `rejected`
+means the report was not a violation and has no resolution outcome; `resolved`
+with `resolution: "no_action"` means it was reviewed as a possible violation
+but no action was taken. Resolving a report records a decision only: even
+`resolution: "user_suspended"`, `"user_banned"`, or `"content_removed"` does
+not itself suspend or ban an account or remove content. Those actions require
+their separate moderation endpoints. The report update and its
+`report_status_changed` audit entry are committed in one transaction; audit
+metadata includes only `from_status`, `to_status`, and `resolution`, never the
+free-text note.
+
+Administrators cannot review reports where they are the reporter or the
+reported user; those requests return `403`. Reopening reports and changing
+terminal decisions are not supported; appeals or a reopening workflow require
+a separate policy and state-machine change.
+
 ### User reports
 
 The `user_reports` table stores account reports and moderation lifecycle data.

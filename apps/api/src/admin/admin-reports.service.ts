@@ -1,12 +1,20 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import type { Pool, RowDataPacket } from 'mysql2/promise';
+import {
+  ConflictException,
+  ForbiddenException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import type {
   ReportContextType,
   ReportReason,
   ReportStatus,
 } from '../reports/report.constants';
+import { AuditLogService } from './audit-log.service';
 import { ListReportsDto } from './dto/list-reports.dto';
+import { UpdateReportStatusDto } from './dto/update-report-status.dto';
 
 interface ReportListRow extends RowDataPacket {
   id: string;
@@ -26,6 +34,13 @@ export interface AdminReportDetailRecord extends ReportListRow {
   resolution_note: string | null;
   reviewed_by_username: string | null;
   reported_user_id: string;
+}
+
+interface ReportTransitionRow extends RowDataPacket {
+  id: string;
+  reporter_id: string | null;
+  reported_user_id: string;
+  status: ReportStatus;
 }
 
 interface ReportContextRow extends RowDataPacket {
@@ -137,7 +152,10 @@ export function toAdminReportDetailDto(
 
 @Injectable()
 export class AdminReportsService {
-  constructor(@Inject(MYSQL_POOL) private readonly pool: Pool) {}
+  constructor(
+    @Inject(MYSQL_POOL) private readonly pool: Pool,
+    private readonly auditLogService: AuditLogService,
+  ) {}
 
   async findAll(query: ListReportsDto): Promise<AdminReportList> {
     const page = query.page ?? 1;
@@ -232,7 +250,6 @@ export class AdminReportsService {
     if (!report) {
       throw new NotFoundException('Report not found');
     }
-
     const context = await this.loadContext(
       report.context_type,
       report.context_id,
@@ -266,6 +283,113 @@ export class AdminReportsService {
         total: Number(row.total),
       })),
     );
+  }
+
+  async updateStatus(
+    id: string,
+    input: UpdateReportStatusDto,
+    actorId: string,
+  ): Promise<AdminReportDetail> {
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+
+      const [reports] = await connection.execute<ReportTransitionRow[]>(
+        `SELECT id, reporter_id, reported_user_id, status
+         FROM user_reports
+         WHERE id = ? LIMIT 1 FOR UPDATE`,
+        [id],
+      );
+      const report = reports[0];
+      if (!report) {
+        throw new NotFoundException('Report not found');
+      }
+      if (
+        report.reporter_id === actorId ||
+        report.reported_user_id === actorId
+      ) {
+        throw new ForbiddenException(
+          'Administrators cannot review their own reports',
+        );
+      }
+
+      const sourceStatuses: ReportStatus[] =
+        input.status === 'under_review' ? ['open'] : ['open', 'under_review'];
+      if (!sourceStatuses.includes(report.status)) {
+        throw new ConflictException('Report status cannot be changed');
+      }
+
+      const resolution =
+        input.status === 'resolved' ? (input.resolution ?? null) : null;
+      const [updateResult] = await connection.execute<ResultSetHeader>(
+        `UPDATE user_reports
+         SET status = ?, resolution = ?, resolution_note = ?,
+             reviewed_by = ?, reviewed_at = UTC_TIMESTAMP()
+         WHERE id = ? AND status IN (${sourceStatuses.map(() => '?').join(', ')})
+           AND reported_user_id <> ?
+           AND (reporter_id IS NULL OR reporter_id <> ?)`,
+        [
+          input.status,
+          resolution,
+          input.resolution_note ?? null,
+          actorId,
+          id,
+          ...sourceStatuses,
+          actorId,
+          actorId,
+        ],
+      );
+
+      if (updateResult.affectedRows !== 1) {
+        const [currentReports] = await connection.execute<
+          ReportTransitionRow[]
+        >(
+          `SELECT id, reporter_id, reported_user_id, status
+           FROM user_reports
+           WHERE id = ? LIMIT 1`,
+          [id],
+        );
+        const currentReport = currentReports[0];
+        if (!currentReport) {
+          throw new NotFoundException('Report not found');
+        }
+        if (
+          currentReport.reporter_id === actorId ||
+          currentReport.reported_user_id === actorId
+        ) {
+          throw new ForbiddenException(
+            'Administrators cannot review their own reports',
+          );
+        }
+        throw new ConflictException('Report status changed concurrently');
+      }
+
+      await this.auditLogService.record(connection, {
+        actorId,
+        action: 'report_status_changed',
+        targetType: 'report',
+        targetId: id,
+        metadata: {
+          from_status: report.status,
+          to_status: input.status,
+          resolution,
+        },
+      });
+      await connection.commit();
+      transactionStarted = false;
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
+
+    return this.findOne(id);
   }
 
   private async loadContext(

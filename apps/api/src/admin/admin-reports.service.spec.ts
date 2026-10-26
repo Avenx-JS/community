@@ -1,8 +1,14 @@
-import { NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { beforeEach, describe, expect, it } from '@jest/globals';
 import { Test, TestingModule } from '@nestjs/testing';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { AuditLogService } from './audit-log.service';
 import { ListReportsDto } from './dto/list-reports.dto';
+import { UpdateReportStatusDto } from './dto/update-report-status.dto';
 import { AdminReportsService } from './admin-reports.service';
 
 describe('AdminReportsService', () => {
@@ -13,6 +19,18 @@ describe('AdminReportsService', () => {
   let detailRow: Record<string, unknown> | undefined;
   let contextRow: Record<string, unknown> | undefined;
   let resolutionRows: Array<Record<string, unknown>>;
+  let transitionRow:
+    | {
+        id: string;
+        reporter_id: string | null;
+        reported_user_id: string;
+        status: 'open' | 'under_review' | 'resolved' | 'rejected';
+      }
+    | undefined;
+  let updateAffectedRows: number;
+  let transaction: { commits: number; rollbacks: number; releases: number };
+  let auditEntries: Array<{ connection: unknown; entry: unknown }>;
+  let failAudit: boolean;
 
   beforeEach(async () => {
     calls = [];
@@ -21,6 +39,16 @@ describe('AdminReportsService', () => {
     detailRow = undefined;
     contextRow = undefined;
     resolutionRows = [];
+    transitionRow = {
+      id: 'report-1',
+      reporter_id: 'reporter-id',
+      reported_user_id: 'target-id',
+      status: 'open',
+    };
+    updateAffectedRows = 1;
+    transaction = { commits: 0, rollbacks: 0, releases: 0 };
+    auditEntries = [];
+    failAudit = false;
     const pool = {
       execute: (sql: string, values: unknown[]) => {
         calls.push({ sql, values });
@@ -62,8 +90,68 @@ describe('AdminReportsService', () => {
         throw new Error(`Unexpected query: ${sql}`);
       },
     };
+    const connection = {
+      beginTransaction: () => Promise.resolve(),
+      commit: () => {
+        transaction.commits += 1;
+        return Promise.resolve();
+      },
+      rollback: () => {
+        transaction.rollbacks += 1;
+        return Promise.resolve();
+      },
+      release: () => {
+        transaction.releases += 1;
+      },
+      execute: (sql: string, values: unknown[]) => {
+        calls.push({ sql, values });
+        if (sql.startsWith('SELECT id, reporter_id, reported_user_id')) {
+          return Promise.resolve([
+            transitionRow ? [{ ...transitionRow }] : [],
+            [],
+          ]);
+        }
+        if (sql.startsWith('UPDATE user_reports')) {
+          if (updateAffectedRows === 1 && transitionRow) {
+            const [status] = values as [
+              'open' | 'under_review' | 'resolved' | 'rejected',
+            ];
+            transitionRow.status = status;
+            if (detailRow) {
+              detailRow.status = status;
+              detailRow.resolution = values[1];
+              detailRow.resolution_note = values[2];
+              detailRow.reviewed_by_username = 'admin';
+              detailRow.reviewed_at = '2026-10-26T12:00:00Z';
+            }
+          }
+          return Promise.resolve([{ affectedRows: updateAffectedRows }, []]);
+        }
+        throw new Error(`Unexpected transaction query: ${sql}`);
+      },
+    };
     const module: TestingModule = await Test.createTestingModule({
-      providers: [AdminReportsService, { provide: MYSQL_POOL, useValue: pool }],
+      providers: [
+        AdminReportsService,
+        {
+          provide: MYSQL_POOL,
+          useValue: {
+            ...pool,
+            getConnection: () => Promise.resolve(connection),
+          },
+        },
+        {
+          provide: AuditLogService,
+          useValue: {
+            record: (usedConnection: unknown, entry: unknown) => {
+              auditEntries.push({ connection: usedConnection, entry });
+              return failAudit
+                ? Promise.reject(new Error('Audit insert failed'))
+                : Promise.resolve();
+            },
+          },
+        },
+      ],
     }).compile();
     service = module.get<AdminReportsService>(AdminReportsService);
   });
@@ -265,5 +353,148 @@ describe('AdminReportsService', () => {
     await expect(service.findOne('missing')).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+
+  it('updates a valid status and audits it in the same transaction', async () => {
+    detailRow = {
+      id: 'report-1',
+      reporter_username: 'reporter',
+      reported_username: 'target',
+      reported_user_id: 'target-id',
+      reason: 'spam',
+      status: 'open',
+      resolution: null,
+      context_type: null,
+      context_id: null,
+      description: 'detail',
+      resolution_note: null,
+      reviewed_by_username: null,
+      created_at: '2026-10-25T10:00:00Z',
+      reviewed_at: null,
+    };
+    const input = {
+      status: 'resolved',
+      resolution: 'user_suspended',
+      resolution_note: 'reviewed',
+    } as UpdateReportStatusDto;
+
+    const result = await service.updateStatus('report-1', input, 'admin-id');
+
+    expect(result.status).toBe('resolved');
+    expect(result.resolution).toBe('user_suspended');
+    expect(result.resolution_note).toBe('reviewed');
+    expect(transaction).toEqual({ commits: 1, rollbacks: 0, releases: 1 });
+    expect(auditEntries).toHaveLength(1);
+    const { connection: auditConnection, entry } = auditEntries[0];
+    expect(auditConnection).toBeDefined();
+    expect(entry).toEqual({
+      actorId: 'admin-id',
+      action: 'report_status_changed',
+      targetType: 'report',
+      targetId: 'report-1',
+      metadata: {
+        from_status: 'open',
+        to_status: 'resolved',
+        resolution: 'user_suspended',
+      },
+    });
+    expect(JSON.stringify(entry)).not.toContain('resolution_note');
+    const mutations = calls.filter((call) =>
+      /^(UPDATE|INSERT|DELETE)/.test(call.sql),
+    );
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0].sql).toContain('UPDATE user_reports');
+    expect(mutations[0].sql).toContain('reviewed_at = UTC_TIMESTAMP()');
+  });
+
+  it.each(['under_review', 'rejected'] as const)(
+    'allows open reports to move to %s without a resolution outcome',
+    async (status) => {
+      detailRow = {
+        id: 'report-1',
+        reporter_username: 'reporter',
+        reported_username: 'target',
+        reported_user_id: 'target-id',
+        reason: 'spam',
+        status: 'open',
+        resolution: null,
+        context_type: null,
+        context_id: null,
+        description: 'detail',
+        resolution_note: null,
+        reviewed_by_username: null,
+        created_at: '2026-10-25T10:00:00Z',
+        reviewed_at: null,
+      };
+
+      await service.updateStatus('report-1', { status }, 'admin-id');
+
+      const update = calls.find((call) =>
+        call.sql.startsWith('UPDATE user_reports'),
+      );
+      expect(update?.values[0]).toBe(status);
+      expect(update?.values[1]).toBeNull();
+      expect(auditEntries).toHaveLength(1);
+      expect(auditEntries[0].entry).toMatchObject({
+        metadata: {
+          from_status: 'open',
+          to_status: status,
+          resolution: null,
+        },
+      });
+    },
+  );
+
+  it('rejects terminal transitions and self-review without writing', async () => {
+    transitionRow = {
+      id: 'report-1',
+      reporter_id: 'reporter-id',
+      reported_user_id: 'target-id',
+      status: 'resolved',
+    };
+    await expect(
+      service.updateStatus('report-1', { status: 'rejected' }, 'admin-id'),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(transaction.rollbacks).toBe(1);
+
+    transitionRow = {
+      id: 'report-1',
+      reporter_id: 'admin-id',
+      reported_user_id: 'target-id',
+      status: 'open',
+    };
+    await expect(
+      service.updateStatus('report-1', { status: 'under_review' }, 'admin-id'),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(transaction.rollbacks).toBe(2);
+    expect(
+      calls.some((call) => call.sql.startsWith('UPDATE user_reports')),
+    ).toBe(false);
+  });
+
+  it('rolls back the report status when audit recording fails', async () => {
+    failAudit = true;
+    await expect(
+      service.updateStatus(
+        'report-1',
+        {
+          status: 'resolved',
+          resolution: 'no_action',
+        },
+        'admin-id',
+      ),
+    ).rejects.toThrow('Audit insert failed');
+    expect(transaction).toEqual({ commits: 0, rollbacks: 1, releases: 1 });
+  });
+
+  it('returns conflict when a conditional status update loses a race', async () => {
+    updateAffectedRows = 0;
+
+    await expect(
+      service.updateStatus('report-1', { status: 'under_review' }, 'admin-id'),
+    ).rejects.toBeInstanceOf(ConflictException);
+
+    expect(transaction).toEqual({ commits: 0, rollbacks: 1, releases: 1 });
+    expect(auditEntries).toHaveLength(0);
   });
 });
