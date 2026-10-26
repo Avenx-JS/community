@@ -107,6 +107,48 @@ namespace. If expected dashboard usage exceeds the existing read bucket,
 introduce an explicit documented rate-limit override rather than bypassing
 limits.
 
+### Administrative action audit log
+
+`admin_actions` records moderation and other administrative decisions. It is
+separate from operational logs and is append-only in application code: there
+are no update or delete operations for audit entries. `AuditLogService.record`
+can use a caller's existing `PoolConnection`, so a moderation action and its
+audit row commit or roll back together. If a caller has no transaction, it may
+use the standalone overload, which acquires and releases a connection. A
+failure to insert the audit record must fail the enclosing action as well.
+
+The actor ID comes from the caller's validated bearer-token identity; the
+service looks up the actor username from the database and snapshots it into
+`actor_username`. The snapshot remains readable after the actor account is
+deleted and `actor_id` is set to `NULL`. If usernames are ever reusable, that
+snapshot identifies the historical username, not necessarily the current
+account using it. `target_id` is polymorphic and deliberately has no foreign
+key, so readers must handle deleted targets without assuming they exist.
+
+Only the following metadata keys may be recorded:
+
+| Action                  | Allowed metadata                            |
+| ----------------------- | ------------------------------------------- |
+| `report_status_changed` | `from_status`, `to_status`, `resolution`    |
+| `user_suspended`        | `restriction_id`, `expires_at`, `report_id` |
+| `user_banned`           | `restriction_id`, `report_id`               |
+| `restriction_lifted`    | `restriction_id`, `restriction_type`        |
+| `user_role_changed`     | `from_role`, `to_role`                      |
+
+The service builds metadata from this allowlist and drops extra runtime keys.
+Passwords and hashes, tokens, session identifiers, email addresses, and free
+text such as `reason`, `lift_reason`, or `resolution_note` are never copied to
+audit metadata. Audit entries themselves are sensitive and may only be exposed
+through future admin-authorized read routes. Do not log the contents of an
+audit entry to application logs. Database grants or a trigger can additionally
+enforce append-only behavior at deployment time.
+
+**Retention policy:** retain audit actions indefinitely by default; do not
+automatically purge them. A database operator may purge records only
+case-by-case after documented privacy or legal approval. Operational log
+retention guidance (normally no more than 30 days) does not apply to this
+moderation-decision history.
+
 ### Admin user directory
 
 `GET /admin/users` and `GET /admin/users/:id` require a bearer token and the
@@ -117,7 +159,7 @@ limits.
 | ------------- | --------------------------------------------------------------------------------------------- |
 | `search`      | Case-insensitive username substring, up to 100 characters; `%`, `_`, and `=` match literally  |
 | `role`        | `user`, `moderator`, or `admin`                                                               |
-| `status`      | `active`, `suspended`, or `banned`, derived from active restriction rows                       |
+| `status`      | `active`, `suspended`, or `banned`, derived from active restriction rows                      |
 | `from` / `to` | ISO 8601 timestamps; UTC half-open range over `created_at` (`from` inclusive, `to` exclusive) |
 | `page`        | Integer 1–10000; defaults to `1`                                                              |
 | `limit`       | Integer 1–100; defaults to `20`                                                               |
