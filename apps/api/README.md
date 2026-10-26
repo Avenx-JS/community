@@ -182,8 +182,8 @@ When direct database writes have left multiple active restrictions on one
 account, the directory treats an active ban as dominant over a suspension;
 the restrictions service must prevent creating that state through the API.
 Detail responses include the number of active restrictions and total history
-count, but not restriction reasons or a paginated history. `last_seen_at`
-remains `null` until that column is introduced.
+count, but not restriction reasons or a paginated history. `last_seen_at` is the latest recorded authenticated API activity time; accounts
+not yet seen since collection began have `null`.
 
 Restriction storage choices: deleting a restricted account cascades its
 restriction rows, while deleting the applying/lifting administrator or linked
@@ -546,7 +546,9 @@ exist, the endpoint returns HTTP `404`:
 - **Private account data:** email is accepted for registration and login but is
   not returned by profile, auth, content, or list responses. The signed-in
   auth-response user object contains only that account's ID and username; user
-  creation time is not exposed by the profile or auth response.
+  creation time and `last_seen_at` are not exposed by the profile or auth
+  response. `last_seen_at` is private behavioral data and is only available
+  through admin-authorized account detail and analytics.
 - **Never returned or logged:** plaintext passwords, password hashes, salts,
   bearer/refresh tokens, token hashes, and session identifiers. Encoded
   password hashes remain database-only. Access and refresh credentials appear
@@ -571,6 +573,30 @@ and retain logs for no longer than 30 days unless an incident or legal hold
 requires a documented extension. HMAC rate-limit bucket keys are pseudonymous
 operational identifiers rather than anonymous data and should be purged after
 the longest configured counter window.
+
+### Authenticated activity and active-user definition
+
+> An account is **active in a window** if `last_seen_at` falls within that window, where `last_seen_at` is the time of its most recent authenticated API request, recorded at a resolution of `USER_ACTIVITY_WRITE_INTERVAL_SECONDS` (default 5 minutes).
+
+`USER_ACTIVITY_WRITE_INTERVAL_SECONDS` accepts an integer from 1 through 86400. The conditional timestamp update runs only after access-token
+validation; telemetry errors are deliberately ignored and cannot turn an
+invalid token into a successful authentication. Writes are limited to at most
+one effective update per user per configured interval. Public and unauthenticated
+requests are not attributed, so this measures authenticated API use, not
+signed-out browsing or use satisfied entirely by client-side caching.
+
+`last_seen_at` is not backfillable: it is `NULL` for every account until its
+first authenticated request after deployment. Active-user history before
+collection began is unknown, not zero. Analytics should expose collection
+start; the earliest non-null `last_seen_at` is the simplest available signal
+for when the series became meaningful. The five-minute default also limits
+precision: activity within a single interval is not distinguishable.
+
+A daily `user_activity (user_id, activity_date, request_count)` rollup could
+support long-term trends and retention cohorts while allowing old daily rows to
+be purged. It is intentionally deferred because it adds a second table, an
+upsert per interval, and a separate backfill/retention design. Revisit that
+model when long-window trends are needed.
 
 ## REST input and content safety
 

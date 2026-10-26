@@ -33,6 +33,7 @@ describe('Admin users API (e2e)', () => {
     username: 'sample_user',
     role: 'user' as const,
     created_at: new Date('2026-01-01T00:00:00.000Z'),
+    last_seen_at: null,
     status: 'active' as const,
     restriction_expires_at: null,
     open_reports_against: 0,

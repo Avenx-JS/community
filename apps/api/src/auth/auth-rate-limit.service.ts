@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { createHmac } from 'node:crypto';
 import type { Pool, RowDataPacket } from 'mysql2/promise';
+import { readPositiveInteger } from '../common/read-positive-integer';
 import { MYSQL_POOL } from './auth.service';
 
 export interface RateLimitSignal {
@@ -39,19 +40,6 @@ interface AuthRateLimitConfig {
 }
 
 const localDevelopmentSecret = 'community-local-rate-limit-secret';
-
-function readPositiveInteger(name: string, fallback: number): number {
-  const configured = process.env[name];
-  if (configured === undefined) {
-    return fallback;
-  }
-
-  const value = Number(configured);
-  if (!Number.isSafeInteger(value) || value < 1 || value > 86400) {
-    throw new Error(`${name} must be an integer between 1 and 86400`);
-  }
-  return value;
-}
 
 function readOptions(
   prefix: string,

@@ -11,6 +11,7 @@ interface AdminUserRow extends RowDataPacket {
   username: string;
   role: PlatformRole;
   created_at: Date | string;
+  last_seen_at: Date | string | null;
   status: 'active' | 'suspended' | 'banned';
   restriction_expires_at: Date | string | null;
   open_reports_against: number | string;
@@ -61,7 +62,7 @@ export interface AdminUserList {
 }
 
 export interface AdminUserDetail extends AdminUserListItem {
-  last_seen_at: null;
+  last_seen_at: string | null;
   posts_count: number;
   comments_count: number;
   votes_count: number;
@@ -209,6 +210,7 @@ export class AdminUsersService {
   async findOne(id: string): Promise<AdminUserDetail> {
     const [users] = await this.pool.execute<AdminUserRow[]>(
       `SELECT u.id, u.username, u.role, u.created_at,
+         u.last_seen_at,
          CASE
            WHEN restriction_state.active_ban = 1 THEN 'banned'
            WHEN restriction_state.active_suspension = 1 THEN 'suspended'
@@ -257,7 +259,10 @@ export class AdminUsersService {
     const reports = reportRows[0];
     return {
       ...toListItem(user),
-      last_seen_at: null,
+      last_seen_at:
+        user.last_seen_at === null || user.last_seen_at === undefined
+          ? null
+          : new Date(user.last_seen_at).toISOString(),
       posts_count: Number(activity?.posts_count ?? 0),
       comments_count: Number(activity?.comments_count ?? 0),
       votes_count: Number(activity?.votes_count ?? 0),

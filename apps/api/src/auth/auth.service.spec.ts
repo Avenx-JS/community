@@ -70,6 +70,85 @@ describe('AuthService', () => {
     } as unknown as Pool);
   });
 
+  it('records last-seen with the configured conditional interval after validation', async () => {
+    const previousInterval = process.env.USER_ACTIVITY_WRITE_INTERVAL_SECONDS;
+    process.env.USER_ACTIVITY_WRITE_INTERVAL_SECONDS = '42';
+    const configuredService = new AuthService({
+      execute,
+      getConnection: () => Promise.resolve({}),
+    } as unknown as Pool);
+    results.push([[{ id: 'user-1' }], []], [{ affectedRows: 1 }, []]);
+
+    try {
+      await expect(
+        configuredService.validateAccessToken('valid-token'),
+      ).resolves.toBe('user-1');
+    } finally {
+      if (previousInterval === undefined) {
+        delete process.env.USER_ACTIVITY_WRITE_INTERVAL_SECONDS;
+      } else {
+        process.env.USER_ACTIVITY_WRITE_INTERVAL_SECONDS = previousInterval;
+      }
+    }
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0].sql).toContain('FROM auth_sessions');
+    expect(calls[1].sql).toContain('SET last_seen_at = UTC_TIMESTAMP()');
+    expect(calls[1].sql).toContain(
+      'last_seen_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? SECOND)',
+    );
+    expect(calls[1].values).toEqual(['user-1', 42]);
+  });
+
+  it('uses the five-minute default activity interval', async () => {
+    const previousInterval = process.env.USER_ACTIVITY_WRITE_INTERVAL_SECONDS;
+    delete process.env.USER_ACTIVITY_WRITE_INTERVAL_SECONDS;
+    const defaultService = new AuthService({
+      execute,
+      getConnection: () => Promise.resolve({}),
+    } as unknown as Pool);
+    results.push([[{ id: 'user-1' }], []], [{ affectedRows: 1 }, []]);
+
+    try {
+      await expect(
+        defaultService.validateAccessToken('valid-token'),
+      ).resolves.toBe('user-1');
+    } finally {
+      if (previousInterval === undefined) {
+        delete process.env.USER_ACTIVITY_WRITE_INTERVAL_SECONDS;
+      } else {
+        process.env.USER_ACTIVITY_WRITE_INTERVAL_SECONDS = previousInterval;
+      }
+    }
+
+    expect(calls[1].values).toEqual(['user-1', 300]);
+  });
+
+  it('does not update activity for invalid tokens', async () => {
+    results.push([[], []]);
+
+    await expect(service.validateAccessToken('invalid-token')).resolves.toBe(
+      null,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].sql).toContain('FROM auth_sessions');
+  });
+
+  it('keeps valid token validation successful when activity telemetry fails', async () => {
+    results.push(
+      [[{ id: 'user-1' }], []],
+      new Error('Telemetry database unavailable'),
+    );
+
+    await expect(service.validateAccessToken('valid-token')).resolves.toBe(
+      'user-1',
+    );
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1].sql).toContain('UPDATE users');
+  });
+
   it('stores hashes for both opaque credentials and returns short-lived tokens', async () => {
     results.push(
       [{ affectedRows: 1 }, []],

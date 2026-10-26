@@ -13,6 +13,7 @@ interface TestUser {
   email: string;
   password_hash: string;
   created_at: Date;
+  last_seen_at: Date | null;
 }
 
 interface TestSession {
@@ -46,6 +47,10 @@ describe('Auth endpoints (e2e)', () => {
   let rateLimitBuckets: Map<string, TestRateLimitBucket>;
   let previousLoginIpMax: string | undefined;
   let previousLoginIpWindow: string | undefined;
+  let previousActivityWriteInterval: string | undefined;
+  let activityUpdateAttempts: number;
+  let activityUpdateWrites: number;
+  let throwOnActivityUpdate: boolean;
   let pool: {
     execute: (sql: string, values: unknown[]) => Promise<[unknown, unknown]>;
     getConnection: () => Promise<{
@@ -60,8 +65,14 @@ describe('Auth endpoints (e2e)', () => {
   beforeEach(async () => {
     previousLoginIpMax = process.env.AUTH_LOGIN_IP_MAX;
     previousLoginIpWindow = process.env.AUTH_LOGIN_IP_WINDOW_SECONDS;
+    previousActivityWriteInterval =
+      process.env.USER_ACTIVITY_WRITE_INTERVAL_SECONDS;
     process.env.AUTH_LOGIN_IP_MAX = '2';
     process.env.AUTH_LOGIN_IP_WINDOW_SECONDS = '60';
+    process.env.USER_ACTIVITY_WRITE_INTERVAL_SECONDS = '300';
+    activityUpdateAttempts = 0;
+    activityUpdateWrites = 0;
+    throwOnActivityUpdate = false;
     users = [];
     userInsertCount = 0;
     sessions = [];
@@ -96,6 +107,7 @@ describe('Auth endpoints (e2e)', () => {
           email,
           password_hash: passwordHash,
           created_at: new Date(),
+          last_seen_at: null,
         });
         return Promise.resolve([{ affectedRows: 1 }, []]);
       }
@@ -107,6 +119,13 @@ describe('Auth endpoints (e2e)', () => {
               user.email === identifier ||
               user.username.toLowerCase() === identifier,
           ),
+          [],
+        ]);
+      }
+      if (sql.startsWith('SELECT username FROM users WHERE username')) {
+        const [username] = values as [string];
+        return Promise.resolve([
+          users.filter((user) => user.username === username),
           [],
         ]);
       }
@@ -124,6 +143,24 @@ describe('Auth endpoints (e2e)', () => {
           user.password_hash = passwordHash;
         }
         return Promise.resolve([{ affectedRows: user ? 1 : 0 }, []]);
+      }
+      if (sql.includes('SET last_seen_at = UTC_TIMESTAMP()')) {
+        activityUpdateAttempts += 1;
+        if (throwOnActivityUpdate) {
+          return Promise.reject(new Error('Activity write unavailable'));
+        }
+        const [userId, intervalSeconds] = values as [string, number];
+        const user = users.find((entry) => entry.id === userId);
+        const cutoff = Date.now() - intervalSeconds * 1000;
+        if (
+          user &&
+          (user.last_seen_at === null || user.last_seen_at.getTime() < cutoff)
+        ) {
+          user.last_seen_at = new Date();
+          activityUpdateWrites += 1;
+          return Promise.resolve([{ affectedRows: 1 }, []]);
+        }
+        return Promise.resolve([{ affectedRows: 0 }, []]);
       }
       if (sql.startsWith('SELECT user_id AS id FROM auth_sessions')) {
         const [tokenHash] = values as [string];
@@ -340,6 +377,12 @@ describe('Auth endpoints (e2e)', () => {
     } else {
       process.env.AUTH_LOGIN_IP_WINDOW_SECONDS = previousLoginIpWindow;
     }
+    if (previousActivityWriteInterval === undefined) {
+      delete process.env.USER_ACTIVITY_WRITE_INTERVAL_SECONDS;
+    } else {
+      process.env.USER_ACTIVITY_WRITE_INTERVAL_SECONDS =
+        previousActivityWriteInterval;
+    }
   });
 
   it('registers a user and returns a bearer credential without password data', async () => {
@@ -387,6 +430,85 @@ describe('Auth endpoints (e2e)', () => {
     expect(body.user).not.toHaveProperty('password');
     expect(body.user).not.toHaveProperty('password_hash');
     expect(users[0].password_hash).not.toBe('correct-horse-battery');
+  });
+
+  it('updates activity once per interval for authenticated requests only', async () => {
+    const registration = await request(app.getHttpServer())
+      .post('/auth/register')
+      .send({
+        username: 'activity_user',
+        email: 'activity@example.com',
+        password: 'correct-horse-battery',
+      })
+      .expect(201);
+    const firstToken = (registration.body as { accessToken: string })
+      .accessToken;
+    const login = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({
+        identifier: 'activity_user',
+        password: 'correct-horse-battery',
+      })
+      .expect(200);
+    const secondToken = (login.body as { accessToken: string }).accessToken;
+
+    await request(app.getHttpServer())
+      .post('/auth/logout')
+      .set('Authorization', `Bearer ${firstToken}`)
+      .expect(204);
+    await request(app.getHttpServer())
+      .post('/auth/logout')
+      .set('Authorization', `Bearer ${secondToken}`)
+      .expect(204);
+
+    expect(activityUpdateAttempts).toBe(2);
+    expect(activityUpdateWrites).toBe(1);
+    expect(users[0].last_seen_at).toBeInstanceOf(Date);
+  });
+
+  it('does not attribute public profile requests or invalid tokens as activity', async () => {
+    users.push({
+      id: 'public-user',
+      username: 'public_user',
+      email: 'public@example.com',
+      password_hash: 'unused',
+      created_at: new Date(),
+      last_seen_at: null,
+    });
+
+    await request(app.getHttpServer())
+      .get('/users/public_user')
+      .expect(200)
+      .expect({ username: 'public_user' });
+    await request(app.getHttpServer())
+      .post('/auth/logout')
+      .set('Authorization', 'Bearer invalid-token')
+      .expect(401);
+
+    expect(activityUpdateAttempts).toBe(0);
+    expect(users[0].last_seen_at).toBeNull();
+  });
+
+  it('keeps an authenticated request successful when activity telemetry fails', async () => {
+    const registration = await request(app.getHttpServer())
+      .post('/auth/register')
+      .send({
+        username: 'telemetry_user',
+        email: 'telemetry@example.com',
+        password: 'correct-horse-battery',
+      })
+      .expect(201);
+    const accessToken = (registration.body as { accessToken: string })
+      .accessToken;
+    throwOnActivityUpdate = true;
+
+    await request(app.getHttpServer())
+      .post('/auth/logout')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(204);
+
+    expect(activityUpdateAttempts).toBe(1);
+    expect(users[0].last_seen_at).toBeNull();
   });
 
   it('rejects a role supplied during registration before inserting a user', async () => {

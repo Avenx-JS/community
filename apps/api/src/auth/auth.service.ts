@@ -14,6 +14,7 @@ import {
   timingSafeEqual,
 } from 'node:crypto';
 import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
+import { readPositiveInteger } from '../common/read-positive-integer';
 
 export const MYSQL_POOL = Symbol('MYSQL_POOL');
 
@@ -105,6 +106,11 @@ export interface AuthResponse {
 
 @Injectable()
 export class AuthService {
+  private readonly activityWriteIntervalSeconds = readPositiveInteger(
+    'USER_ACTIVITY_WRITE_INTERVAL_SECONDS',
+    300,
+  );
+
   constructor(@Inject(MYSQL_POOL) private readonly pool: Pool) {}
 
   async register(input: RegisterInput): Promise<AuthResponse> {
@@ -175,7 +181,25 @@ export class AuthService {
       [tokenHash],
     );
 
-    return sessions[0]?.id ?? null;
+    const userId = sessions[0]?.id;
+    if (!userId) {
+      return null;
+    }
+
+    try {
+      await this.pool.execute<ResultSetHeader>(
+        `UPDATE users
+         SET last_seen_at = UTC_TIMESTAMP()
+         WHERE id = ?
+           AND (last_seen_at IS NULL
+                OR last_seen_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? SECOND))`,
+        [userId, this.activityWriteIntervalSeconds],
+      );
+    } catch {
+      // Activity is best-effort telemetry; token validation has already succeeded.
+    }
+
+    return userId;
   }
 
   async logout(token: string): Promise<void> {

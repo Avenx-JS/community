@@ -152,6 +152,7 @@ describe('AdminUsersService', () => {
         username: 'member',
         role: 'user',
         created_at: new Date('2026-01-01T00:00:00Z'),
+        last_seen_at: null,
         open_reports_against: 0,
       },
     ];
@@ -213,6 +214,7 @@ describe('AdminUsersService', () => {
         username: 'member',
         role: 'user',
         created_at: new Date('2026-01-01T00:00:00Z'),
+        last_seen_at: null,
         status: 'suspended',
         restriction_expires_at: new Date('2026-01-02T00:00:00Z'),
         open_reports_against: 0,
@@ -223,6 +225,26 @@ describe('AdminUsersService', () => {
 
     expect(result.status).toBe('suspended');
     expect(result.restriction_expires_at).toBe('2026-01-02T00:00:00.000Z');
+  });
+
+  it('returns last-seen activity only in admin account detail', async () => {
+    users = [
+      {
+        id: 'user-1',
+        username: 'member',
+        role: 'user',
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        last_seen_at: new Date('2026-03-01T12:30:00Z'),
+        status: 'active',
+        restriction_expires_at: null,
+        open_reports_against: 0,
+      },
+    ];
+
+    const result = await service.findOne('user-1');
+
+    expect(result.last_seen_at).toBe('2026-03-01T12:30:00.000Z');
+    expect(calls[0].sql).toContain('u.last_seen_at');
   });
 
   it('returns not found for an unknown account without issuing aggregate queries', async () => {
