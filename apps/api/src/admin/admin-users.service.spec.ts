@@ -31,6 +31,8 @@ describe('AdminUsersService', () => {
       resolved: 0,
       rejected: 0,
       reports_filed_count: 0,
+      active_restrictions: 0,
+      restriction_history_count: 0,
     };
     const pool = {
       execute: (sql: string, values: unknown[]) => {
@@ -89,6 +91,23 @@ describe('AdminUsersService', () => {
   });
 
   it.each([
+    ['active', 'restriction_state.user_id IS NULL'],
+    [
+      'suspended',
+      'restriction_state.active_suspension = 1 AND restriction_state.active_ban = 0',
+    ],
+    ['banned', 'restriction_state.active_ban = 1'],
+  ] as const)(
+    'applies the %s filter to both page and count',
+    async (status, clause) => {
+      await service.findAll({ status } as ListUsersDto);
+
+      expect(calls[0].sql).toContain(clause);
+      expect(calls[1].sql).toContain(clause);
+    },
+  );
+
+  it.each([
     ['new', 'u.created_at DESC, u.id DESC'],
     ['oldest', 'u.created_at ASC, u.id ASC'],
     ['username', 'u.username ASC, u.id ASC'],
@@ -103,6 +122,8 @@ describe('AdminUsersService', () => {
       username: `member_${index}`,
       role: 'user',
       created_at: '2026-01-01T00:00:00Z',
+      status: 'active',
+      restriction_expires_at: null,
       open_reports_against: '2',
     }));
     total = 100;
@@ -148,6 +169,8 @@ describe('AdminUsersService', () => {
       resolved: '3',
       rejected: '4',
       reports_filed_count: '5',
+      active_restrictions: '1',
+      restriction_history_count: '2',
     };
 
     const detail = await service.findOne('user-1');
@@ -166,6 +189,7 @@ describe('AdminUsersService', () => {
         rejected: 4,
       },
       reports_filed_count: 5,
+      restrictions: { active: 1, history_count: 2 },
       last_seen_at: null,
     });
     expect(calls).toHaveLength(3);
@@ -173,7 +197,32 @@ describe('AdminUsersService', () => {
       '(SELECT COUNT(*) FROM posts WHERE author_id = ?)',
     );
     expect(calls[1].values).toEqual(Array.from({ length: 6 }, () => 'user-1'));
+    expect(calls[0].sql).toContain(
+      'lifted_at IS NULL AND (expires_at IS NULL OR expires_at > UTC_TIMESTAMP())',
+    );
+    expect(calls[2].sql).toContain(
+      'lifted_at IS NULL AND (expires_at IS NULL OR expires_at > UTC_TIMESTAMP())',
+    );
     expect(JSON.stringify(detail)).not.toMatch(/email|password_hash|token/i);
+  });
+
+  it('returns the expiry only for an active suspension', async () => {
+    users = [
+      {
+        id: 'user-1',
+        username: 'member',
+        role: 'user',
+        created_at: new Date('2026-01-01T00:00:00Z'),
+        status: 'suspended',
+        restriction_expires_at: new Date('2026-01-02T00:00:00Z'),
+        open_reports_against: 0,
+      },
+    ];
+
+    const result = await service.findOne('user-1');
+
+    expect(result.status).toBe('suspended');
+    expect(result.restriction_expires_at).toBe('2026-01-02T00:00:00.000Z');
   });
 
   it('returns not found for an unknown account without issuing aggregate queries', async () => {

@@ -1,6 +1,7 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { Pool, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { ACTIVE_USER_RESTRICTION_PREDICATE } from '../common/active-user-restriction';
 import { escapeLikeSearch } from '../common/like-search';
 import { ListUsersDto } from './dto/list-users.dto';
 import type { PlatformRole } from '../users/users.service';
@@ -10,6 +11,8 @@ interface AdminUserRow extends RowDataPacket {
   username: string;
   role: PlatformRole;
   created_at: Date | string;
+  status: 'active' | 'suspended' | 'banned';
+  restriction_expires_at: Date | string | null;
   open_reports_against: number | string;
 }
 
@@ -28,6 +31,8 @@ interface ReportSummaryRow extends RowDataPacket {
   resolved: number | string;
   rejected: number | string;
   reports_filed_count: number | string;
+  active_restrictions: number | string;
+  restriction_history_count: number | string;
 }
 
 export interface AdminUserListItem {
@@ -35,8 +40,8 @@ export interface AdminUserListItem {
   username: string;
   role: PlatformRole;
   created_at: string;
-  status: 'active';
-  restriction_expires_at: null;
+  status: 'active' | 'suspended' | 'banned';
+  restriction_expires_at: string | null;
   open_reports_against: number;
 }
 
@@ -48,6 +53,7 @@ export interface AdminUserList {
   filters: {
     search: string | null;
     role: PlatformRole | null;
+    status: 'active' | 'suspended' | 'banned' | null;
     from: string | null;
     to: string | null;
     sort: 'new' | 'oldest' | 'username';
@@ -69,7 +75,28 @@ export interface AdminUserDetail extends AdminUserListItem {
     rejected: number;
   };
   reports_filed_count: number;
+  restrictions: {
+    active: number;
+    history_count: number;
+  };
 }
+
+const USER_DIRECTORY_FROM = `FROM users u
+  LEFT JOIN (
+    SELECT reported_user_id,
+      SUM(status IN ('open', 'under_review')) AS open_reports_against
+    FROM user_reports
+    GROUP BY reported_user_id
+  ) report_counts ON report_counts.reported_user_id = u.id
+  LEFT JOIN (
+    SELECT user_id,
+      MAX(type = 'ban') AS active_ban,
+      MAX(type = 'suspension') AS active_suspension,
+      MAX(CASE WHEN type = 'suspension' THEN expires_at END) AS restriction_expires_at
+    FROM user_restrictions
+    WHERE ${ACTIVE_USER_RESTRICTION_PREDICATE}
+    GROUP BY user_id
+  ) restriction_state ON restriction_state.user_id = u.id`;
 
 function toUtcSqlDate(value: string): string {
   const withUtcZone = /[zZ]|[+-]\d{2}:?\d{2}$/.test(value)
@@ -84,8 +111,11 @@ function toListItem(user: AdminUserRow): AdminUserListItem {
     username: user.username,
     role: user.role,
     created_at: new Date(user.created_at).toISOString(),
-    status: 'active',
-    restriction_expires_at: null,
+    status: user.status,
+    restriction_expires_at:
+      user.status !== 'suspended' || user.restriction_expires_at === null
+        ? null
+        : new Date(user.restriction_expires_at).toISOString(),
     open_reports_against: Number(user.open_reports_against),
   };
 }
@@ -110,6 +140,15 @@ export class AdminUsersService {
       filters.push('u.role = ?');
       values.push(query.role);
     }
+    if (query.status === 'active') {
+      filters.push('restriction_state.user_id IS NULL');
+    } else if (query.status === 'suspended') {
+      filters.push(
+        'restriction_state.active_suspension = 1 AND restriction_state.active_ban = 0',
+      );
+    } else if (query.status === 'banned') {
+      filters.push('restriction_state.active_ban = 1');
+    }
     if (query.from) {
       filters.push(
         "u.created_at >= CONVERT_TZ(?, '+00:00', @@session.time_zone)",
@@ -133,20 +172,23 @@ export class AdminUsersService {
 
     const [users] = await this.pool.execute<AdminUserRow[]>(
       `SELECT u.id, u.username, u.role, u.created_at,
+         CASE
+           WHEN restriction_state.active_ban = 1 THEN 'banned'
+           WHEN restriction_state.active_suspension = 1 THEN 'suspended'
+           ELSE 'active'
+         END AS status,
+         CASE
+           WHEN restriction_state.active_ban = 1 THEN NULL
+           ELSE restriction_state.restriction_expires_at
+         END AS restriction_expires_at,
          COALESCE(report_counts.open_reports_against, 0) AS open_reports_against
-       FROM users u
-       LEFT JOIN (
-         SELECT reported_user_id,
-           SUM(status IN ('open', 'under_review')) AS open_reports_against
-         FROM user_reports
-         GROUP BY reported_user_id
-       ) report_counts ON report_counts.reported_user_id = u.id${where}
+       ${USER_DIRECTORY_FROM}${where}
        ORDER BY ${order} LIMIT ? OFFSET ?`,
       [...values, limit, offset],
     );
     const [countRows] = await this.pool.execute<
       (RowDataPacket & { total: number | string })[]
-    >(`SELECT COUNT(*) AS total FROM users u${where}`, values);
+    >(`SELECT COUNT(*) AS total ${USER_DIRECTORY_FROM}${where}`, values);
 
     return {
       items: users.map(toListItem),
@@ -156,6 +198,7 @@ export class AdminUsersService {
       filters: {
         search: query.search ?? null,
         role: query.role ?? null,
+        status: query.status ?? null,
         from: query.from ?? null,
         to: query.to ?? null,
         sort: query.sort ?? 'new',
@@ -166,14 +209,17 @@ export class AdminUsersService {
   async findOne(id: string): Promise<AdminUserDetail> {
     const [users] = await this.pool.execute<AdminUserRow[]>(
       `SELECT u.id, u.username, u.role, u.created_at,
+         CASE
+           WHEN restriction_state.active_ban = 1 THEN 'banned'
+           WHEN restriction_state.active_suspension = 1 THEN 'suspended'
+           ELSE 'active'
+         END AS status,
+         CASE
+           WHEN restriction_state.active_ban = 1 THEN NULL
+           ELSE restriction_state.restriction_expires_at
+         END AS restriction_expires_at,
          COALESCE(report_counts.open_reports_against, 0) AS open_reports_against
-       FROM users u
-       LEFT JOIN (
-         SELECT reported_user_id,
-           SUM(status IN ('open', 'under_review')) AS open_reports_against
-         FROM user_reports
-         GROUP BY reported_user_id
-       ) report_counts ON report_counts.reported_user_id = u.id
+       ${USER_DIRECTORY_FROM}
        WHERE u.id = ? LIMIT 1`,
       [id],
     );
@@ -198,10 +244,13 @@ export class AdminUsersService {
          COALESCE(SUM(status = 'under_review'), 0) AS under_review,
          COALESCE(SUM(status = 'resolved'), 0) AS resolved,
          COALESCE(SUM(status = 'rejected'), 0) AS rejected,
-         (SELECT COUNT(*) FROM user_reports WHERE reporter_id = ?) AS reports_filed_count
+         (SELECT COUNT(*) FROM user_reports WHERE reporter_id = ?) AS reports_filed_count,
+         (SELECT COUNT(*) FROM user_restrictions
+          WHERE user_id = ? AND ${ACTIVE_USER_RESTRICTION_PREDICATE}) AS active_restrictions,
+         (SELECT COUNT(*) FROM user_restrictions WHERE user_id = ?) AS restriction_history_count
        FROM user_reports
        WHERE reported_user_id = ?`,
-      [id, id],
+      [id, id, id, id],
     );
 
     const activity = activityRows[0];
@@ -224,6 +273,10 @@ export class AdminUsersService {
         rejected: Number(reports?.rejected ?? 0),
       },
       reports_filed_count: Number(reports?.reports_filed_count ?? 0),
+      restrictions: {
+        active: Number(reports?.active_restrictions ?? 0),
+        history_count: Number(reports?.restriction_history_count ?? 0),
+      },
     };
   }
 }

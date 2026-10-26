@@ -33,6 +33,8 @@ describe('Admin users API (e2e)', () => {
     username: 'sample_user',
     role: 'user' as const,
     created_at: new Date('2026-01-01T00:00:00.000Z'),
+    status: 'active' as const,
+    restriction_expires_at: null,
     open_reports_against: 0,
   };
 
@@ -44,7 +46,7 @@ describe('Admin users API (e2e)', () => {
     ]);
     const execute = (sql: string, values: unknown[]) => {
       poolCalls.push({ sql, values });
-      if (sql.startsWith('SELECT COUNT(*) AS total FROM users')) {
+      if (sql.startsWith('SELECT COUNT(*) AS total')) {
         return Promise.resolve([[{ total: 1 }], []]);
       }
       if (sql.includes('AS posts_count')) {
@@ -71,6 +73,8 @@ describe('Admin users API (e2e)', () => {
               resolved: 0,
               rejected: 0,
               reports_filed_count: 0,
+              active_restrictions: 0,
+              restriction_history_count: 0,
             },
           ],
           [],
@@ -158,7 +162,14 @@ describe('Admin users API (e2e)', () => {
       page: 1,
       limit: 100,
       total: 1,
-      filters: { search: null, role: null, from: null, to: null, sort: 'new' },
+      filters: {
+        search: null,
+        role: null,
+        status: null,
+        from: null,
+        to: null,
+        sort: 'new',
+      },
     });
     expectNoSensitiveKeys(response.body);
     expect(poolCalls).toHaveLength(2);
@@ -166,6 +177,34 @@ describe('Admin users API (e2e)', () => {
     expect(poolCalls[0].sql).toContain(
       "SUM(status IN ('open', 'under_review'))",
     );
+  });
+
+  it('echoes and applies list filters including the derived status', async () => {
+    const response = await adminRequest(
+      '/admin/users?search=sample&role=user&status=active&from=2026-01-01T00%3A00%3A00Z&to=2026-02-01T00%3A00%3A00Z&sort=oldest&page=1&limit=5',
+    ).expect(200);
+
+    expect(response.body).toMatchObject({
+      filters: {
+        search: 'sample',
+        role: 'user',
+        status: 'active',
+        from: '2026-01-01T00:00:00Z',
+        to: '2026-02-01T00:00:00Z',
+        sort: 'oldest',
+      },
+    });
+    expect(poolCalls[0].sql).toContain('restriction_state.user_id IS NULL');
+    expect(poolCalls[1].sql).toContain('restriction_state.user_id IS NULL');
+    expect(poolCalls[0].values).toEqual([
+      '%sample%',
+      'user',
+      '2026-01-01 00:00:00',
+      '2026-02-01 00:00:00',
+      5,
+      0,
+    ]);
+    expectNoSensitiveKeys(response.body);
   });
 
   it('returns detail counts, not-found and malformed-id responses', async () => {
@@ -181,10 +220,12 @@ describe('Admin users API (e2e)', () => {
       moderated_communities_count: 0,
       reports_against: { open: 0, under_review: 0, resolved: 0, rejected: 0 },
       reports_filed_count: 0,
+      restrictions: { active: 0, history_count: 0 },
     });
     expectNoSensitiveKeys(detail.body);
     await adminRequest('/admin/users/unknown').expect(404);
     await adminRequest('/admin/users/bad.id').expect(400);
     await adminRequest('/admin/users?unknown=value').expect(400);
+    await adminRequest('/admin/users?status=invalid').expect(400);
   });
 });

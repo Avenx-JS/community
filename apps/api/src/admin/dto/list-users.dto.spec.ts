@@ -18,6 +18,7 @@ describe('ListUsersDto', () => {
     { search: 'x'.repeat(101) },
     { search: 'contains\u0000control' },
     { role: 'owner' },
+    { status: 'restricted' },
     { from: 'not-a-date' },
     { page: 0 },
     { limit: 101 },

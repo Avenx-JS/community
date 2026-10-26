@@ -25,6 +25,10 @@ export class ListUsersDto {
   role?: PlatformRole;
 
   @IsOptional()
+  @IsIn(['active', 'suspended', 'banned'])
+  status?: 'active' | 'suspended' | 'banned';
+
+  @IsOptional()
   @IsISO8601()
   from?: string;
 

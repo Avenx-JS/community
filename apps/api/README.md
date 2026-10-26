@@ -117,6 +117,7 @@ limits.
 | ------------- | --------------------------------------------------------------------------------------------- |
 | `search`      | Case-insensitive username substring, up to 100 characters; `%`, `_`, and `=` match literally  |
 | `role`        | `user`, `moderator`, or `admin`                                                               |
+| `status`      | `active`, `suspended`, or `banned`, derived from active restriction rows                       |
 | `from` / `to` | ISO 8601 timestamps; UTC half-open range over `created_at` (`from` inclusive, `to` exclusive) |
 | `page`        | Integer 1–10000; defaults to `1`                                                              |
 | `limit`       | Integer 1–100; defaults to `20`                                                               |
@@ -127,16 +128,56 @@ time, `status`, `restriction_expires_at`, and `open_reports_against`.
 `GET /admin/users/:id` adds `last_seen_at`, activity counts
 (`posts_count`, `comments_count`, `votes_count`, `communities_created`,
 `subscriptions_count`, and `moderated_communities_count`), `reports_against`
-counts by queue status, and `reports_filed_count`. Unknown IDs return `404`;
-malformed IDs return `400`.
+counts by queue status, `reports_filed_count`, and `restrictions` counts for
+active rows and total history. Unknown IDs return `404`; malformed IDs return
+`400`.
 
-Restriction-derived behavior is deferred until the `user_restrictions` schema
-is introduced: the current schema has no restriction records, so accounts are
-reported as `status: "active"` with `restriction_expires_at: null`. There is
-not yet a `status` filter or a restriction summary in the detail response.
-Likewise, `last_seen_at` is `null` until that column is introduced. These fields
-can be wired to their schema when those changes land; no restriction history
-or session view is exposed here.
+Account status is derived from `user_restrictions`, not stored on `users`. The
+shared active-row predicate is
+`lifted_at IS NULL AND (expires_at IS NULL OR expires_at > UTC_TIMESTAMP())`.
+An expired suspension therefore becomes inactive without a background job.
+When direct database writes have left multiple active restrictions on one
+account, the directory treats an active ban as dominant over a suspension;
+the restrictions service must prevent creating that state through the API.
+Detail responses include the number of active restrictions and total history
+count, but not restriction reasons or a paginated history. `last_seen_at`
+remains `null` until that column is introduced.
+
+Restriction storage choices: deleting a restricted account cascades its
+restriction rows, while deleting the applying/lifting administrator or linked
+report preserves the restriction and nulls that reference. Applying and lifting
+are otherwise recorded in the restriction row rather than deleting history.
+The database permits more than one active row because expiry depends on the
+current time and cannot be represented by a normal unique constraint. The
+restriction-writing service must enforce one active restriction in a
+transaction; read paths use `EXISTS`-compatible/aggregated logic that tolerates
+multiple rows.
+
+Restrictions are authoritative and status is derived rather than duplicated in
+a `users.status` column. This avoids two sources of truth and avoids an expiry
+job whose delay or failure could leave a suspension in force after its expiry.
+The trade-off is a restriction lookup on reads, supported by
+`idx_user_restrictions_active`. The active predicate is exported as
+`ACTIVE_USER_RESTRICTION_PREDICATE` for shared query use. `CHECK` constraints
+require MySQL 8.0.16 or later; confirm the deployed minor version because the
+compose file's `mysql:8.0` tag alone does not guarantee that minimum.
+
+Restriction policy decisions not established by the project remain
+**undecided**:
+
+1. Whether permanent bans are permitted at launch.
+2. Whether a ban should remove existing account content. Restricting rather
+   than deleting preserves posts, comments, and communities; account deletion
+   currently cascades its communities and their content.
+3. Whether a ban should release the username or email for reuse. Both remain
+   reserved while the account row exists.
+4. Whether an appeal process is needed and requires states beyond `lifted_at`.
+5. The maximum allowed suspension duration.
+
+The restriction table stores reasons as plain text; reasons are not interpreted
+as HTML. It stores no email, password hash, token, or session data. The
+restriction-writing and enforcement API surfaces are separate work; this
+migration alone does not block authentication or create restrictions.
 
 Email is intentionally excluded from both admin responses. This preserves the
 data-classification guarantee that email is not returned by profile, auth,
@@ -166,6 +207,7 @@ Example list response:
   "filters": {
     "search": null,
     "role": null,
+    "status": null,
     "from": null,
     "to": null,
     "sort": "new"
@@ -197,7 +239,11 @@ Example detail response:
     "resolved": 0,
     "rejected": 0
   },
-  "reports_filed_count": 2
+  "reports_filed_count": 2,
+  "restrictions": {
+    "active": 1,
+    "history_count": 2
+  }
 }
 ```
 
