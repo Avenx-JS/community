@@ -264,6 +264,61 @@ describe('AuthService', () => {
     expect(transactions.commits).toBe(0);
   });
 
+  it('returns a restricted token result with the user id and restriction metadata', async () => {
+    const expiresAt = new Date(Date.now() + 60_000);
+    results.push([
+      [
+        {
+          id: 'user-restricted',
+          restriction_type: 'suspension',
+          restriction_expires_at: expiresAt,
+        },
+      ],
+      [],
+    ]);
+
+    await expect(service.validateAccessTokenState('restricted-token')).resolves.toEqual({
+      kind: 'restricted',
+      userId: 'user-restricted',
+      restriction: {
+        type: 'suspension',
+        expires_at: expiresAt.toISOString(),
+      },
+    });
+  });
+
+  it('blocks restricted accounts from logging in with a forbidden response payload', async () => {
+    const password = 'correct-password';
+    const argonHash = await argon2Hash(password, {
+      type: argon2id,
+      version: 0x13,
+      memoryCost: 19 * 1024,
+      timeCost: 2,
+      parallelism: 1,
+      hashLength: 32,
+    });
+    const user = {
+      id: 'user-restricted',
+      username: 'restricted_user',
+      email: 'restricted@example.com',
+      password_hash: argonHash,
+      created_at: new Date(),
+    };
+    const expiresAt = new Date(Date.now() + 60_000);
+    results.push([[user], []], [[{ type: 'suspension', expires_at: expiresAt }], []]);
+
+    try {
+      await service.login({ identifier: 'restricted_user', password });
+      throw new Error('expected restriction rejection');
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error & { getResponse?: () => unknown }).getResponse?.()).toEqual({
+        type: 'suspension',
+        expires_at: expiresAt.toISOString(),
+      });
+    }
+  });
+
   it('maps unique username or email conflicts to 409', async () => {
     results.push(
       Object.assign(new Error('Duplicate'), { code: 'ER_DUP_ENTRY' }),
@@ -302,6 +357,7 @@ describe('AuthService', () => {
         [],
       ],
       [[user], []],
+      [[], []],
       [{ affectedRows: 1 }, []],
       [{ affectedRows: 1 }, []],
       [{ affectedRows: 1 }, []],
@@ -316,9 +372,9 @@ describe('AuthService', () => {
     expect(calls[0].values[0]).toBe(
       createHash('sha256').update(refreshToken).digest('hex'),
     );
-    expect(calls[2].sql).toContain('SET used_at');
-    expect(calls[3].sql).toContain('UPDATE auth_sessions');
-    expect(calls[4].sql).toContain('INSERT INTO auth_refresh_tokens');
+    expect(calls[3].sql).toContain('SET used_at');
+    expect(calls[4].sql).toContain('UPDATE auth_sessions');
+    expect(calls[5].sql).toContain('INSERT INTO auth_refresh_tokens');
     expect(transactions.commits).toBe(1);
     expect(transactions.rollbacks).toBe(0);
   });

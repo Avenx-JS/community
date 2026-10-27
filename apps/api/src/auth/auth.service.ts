@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Inject,
   Injectable,
   UnauthorizedException,
@@ -14,6 +15,7 @@ import {
   timingSafeEqual,
 } from 'node:crypto';
 import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
+import { ACTIVE_USER_RESTRICTION_PREDICATE } from '../common/active-user-restriction';
 import { readPositiveInteger } from '../common/read-positive-integer';
 
 export const MYSQL_POOL = Symbol('MYSQL_POOL');
@@ -71,6 +73,13 @@ interface UserRow extends RowDataPacket {
 
 interface SessionUserRow extends RowDataPacket {
   id: string;
+  restriction_type?: 'suspension' | 'ban';
+  restriction_expires_at?: Date | string | null;
+}
+
+interface ActiveRestrictionRow extends RowDataPacket {
+  type: 'suspension' | 'ban';
+  expires_at: Date | string | null;
 }
 
 interface RefreshTokenRow extends RowDataPacket {
@@ -91,6 +100,16 @@ export interface LoginInput {
   identifier: string;
   password: string;
 }
+
+export interface ActiveRestriction {
+  type: 'suspension' | 'ban';
+  expires_at: string | null;
+}
+
+export type AccessTokenValidationResult =
+  | { kind: 'valid'; userId: string }
+  | { kind: 'restricted'; userId: string; restriction: ActiveRestriction }
+  | { kind: 'invalid' };
 
 export interface AuthResponse {
   accessToken: string;
@@ -171,21 +190,55 @@ export class AuthService {
       user.password_hash = passwordHash;
     }
 
+    const restriction = await this.getActiveRestriction(user.id);
+    if (restriction) {
+      throw new ForbiddenException(this.restrictionErrorPayload(restriction));
+    }
+
     return this.createSession(user);
   }
 
   async validateAccessToken(token: string): Promise<string | null> {
+    const result = await this.validateAccessTokenState(token);
+    return result.kind === 'valid' ? result.userId : null;
+  }
+
+  async validateAccessTokenState(token: string): Promise<AccessTokenValidationResult> {
     const tokenHash = this.hashToken(token);
     const [sessions] = await this.pool.execute<SessionUserRow[]>(
-      'SELECT user_id AS id FROM auth_sessions WHERE token_hash = ? AND expires_at > UTC_TIMESTAMP() LIMIT 1',
+      `SELECT auth_sessions.user_id AS id,
+         restriction.type AS restriction_type,
+         restriction.expires_at AS restriction_expires_at
+       FROM auth_sessions
+       LEFT JOIN user_restrictions restriction
+         ON restriction.user_id = auth_sessions.user_id
+        AND ${ACTIVE_USER_RESTRICTION_PREDICATE}
+       WHERE auth_sessions.token_hash = ?
+         AND auth_sessions.expires_at > UTC_TIMESTAMP()
+       LIMIT 1`,
       [tokenHash],
     );
 
-    const userId = sessions[0]?.id;
-    if (!userId) {
-      return null;
+    const session = sessions[0];
+    if (!session) {
+      return { kind: 'invalid' };
     }
 
+    if (session.restriction_type) {
+      return {
+        kind: 'restricted',
+        userId: session.id,
+        restriction: {
+          type: session.restriction_type,
+          expires_at:
+            session.restriction_expires_at === null
+              ? null
+              : new Date(session.restriction_expires_at).toISOString(),
+        },
+      };
+    }
+
+    const userId = session.id;
     try {
       await this.pool.execute<ResultSetHeader>(
         `UPDATE users
@@ -199,7 +252,7 @@ export class AuthService {
       // Activity is best-effort telemetry; token validation has already succeeded.
     }
 
-    return userId;
+    return { kind: 'valid', userId };
   }
 
   async logout(token: string): Promise<void> {
@@ -272,6 +325,47 @@ export class AuthService {
     }
   }
 
+  private async getActiveRestriction(
+    userId: string,
+    executor: {
+      execute: (
+        sql: string,
+        values: unknown[],
+      ) => Promise<[ActiveRestrictionRow[], unknown]>;
+    } = this.pool,
+  ): Promise<ActiveRestriction | null> {
+    const [rows] = await executor.execute(
+      `SELECT type, expires_at
+       FROM user_restrictions
+       WHERE user_id = ? AND ${ACTIVE_USER_RESTRICTION_PREDICATE}
+       LIMIT 1`,
+      [userId],
+    );
+    const restriction = rows[0];
+    if (!restriction) {
+      return null;
+    }
+    return {
+      type: restriction.type,
+      expires_at:
+        restriction.expires_at === null
+          ? null
+          : new Date(restriction.expires_at).toISOString(),
+    };
+  }
+
+  private restrictionErrorPayload(restriction: ActiveRestriction): {
+    type: 'suspension' | 'ban';
+    expires_at?: string;
+  } {
+    return restriction.type === 'suspension'
+      ? {
+          type: restriction.type,
+          expires_at: restriction.expires_at ?? undefined,
+        }
+      : { type: restriction.type };
+  }
+
   async refresh(refreshToken: string): Promise<AuthResponse> {
     const connection = await this.pool.getConnection();
     let transactionStarted = false;
@@ -311,6 +405,30 @@ export class AuthService {
         const user = users[0];
         if (!user) {
           throw new UnauthorizedException('Invalid or expired refresh token');
+        }
+
+        const restriction = await this.getActiveRestriction(user.id, connection);
+        if (restriction) {
+          if (restriction.type === 'ban') {
+            await connection.execute<ResultSetHeader>(
+              'DELETE FROM auth_sessions WHERE user_id = ?',
+              [user.id],
+            );
+            await connection.execute<ResultSetHeader>(
+              'UPDATE auth_refresh_tokens SET revoked_at = UTC_TIMESTAMP() WHERE user_id = ? AND revoked_at IS NULL',
+              [user.id],
+            );
+            transactionStarted = false;
+            await connection.commit();
+            throw new ForbiddenException(
+              this.restrictionErrorPayload(restriction),
+            );
+          }
+          transactionStarted = false;
+          await connection.commit();
+          throw new ForbiddenException(
+            this.restrictionErrorPayload(restriction),
+          );
         }
 
         const accessToken = randomBytes(32).toString('base64url');

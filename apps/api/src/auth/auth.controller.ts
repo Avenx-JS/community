@@ -12,6 +12,7 @@ import {
 import type { Request, Response } from 'express';
 import { AuthGuard } from './auth.guard';
 import type { AuthenticatedRequest } from './auth.guard';
+import { AllowRestricted } from './allow-restricted.decorator';
 import { AuthService } from './auth.service';
 import { AuthRateLimitService } from './auth-rate-limit.service';
 import { LoginDto } from './dto/login.dto';
@@ -79,6 +80,7 @@ export class AuthController {
   @Post('logout')
   @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(AuthGuard)
+  @AllowRestricted()
   async logout(@Req() request: AuthenticatedRequest): Promise<void> {
     await this.authService.logout(request.accessToken);
   }
@@ -86,6 +88,7 @@ export class AuthController {
   @Post('logout-all')
   @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(AuthGuard)
+  @AllowRestricted()
   async logoutAll(@Req() request: AuthenticatedRequest): Promise<void> {
     await this.authService.logoutAll(request.user.id);
   }
