@@ -15,8 +15,17 @@ export const REPORT_STATUSES = [
   'rejected',
 ] as const;
 
+export const REPORT_RESOLUTIONS = [
+  'no_action',
+  'content_removed',
+  'user_warned',
+  'user_suspended',
+  'user_banned',
+] as const;
+
 export type ReportReason = (typeof REPORT_REASONS)[number];
 export type ReportStatus = (typeof REPORT_STATUSES)[number];
+export type ReportResolution = (typeof REPORT_RESOLUTIONS)[number];
 export type ReportContextType = 'post' | 'comment';
 
 export function isReportReason(value: unknown): value is ReportReason {

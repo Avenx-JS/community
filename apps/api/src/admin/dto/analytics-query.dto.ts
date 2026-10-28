@@ -3,7 +3,7 @@ import type { AnalyticsGranularity } from '../analytics-range';
 
 // Cross-field range rules (from < to, at most 366 days) depend on the
 // defaults, so they are enforced by resolveAnalyticsRange after validation.
-export class UserAnalyticsQueryDto {
+export class AnalyticsQueryDto {
   @IsOptional()
   @IsISO8601({ strict: true })
   from?: string;

@@ -2,7 +2,7 @@ import 'reflect-metadata';
 import { describe, expect, it } from '@jest/globals';
 import { BadRequestException, ValidationPipe } from '@nestjs/common';
 import { resolveAnalyticsRange } from '../analytics-range';
-import { UserAnalyticsQueryDto } from './user-analytics-query.dto';
+import { AnalyticsQueryDto } from './analytics-query.dto';
 
 const pipe = new ValidationPipe({
   whitelist: true,
@@ -13,15 +13,15 @@ const pipe = new ValidationPipe({
 const validateQuery = (query: Record<string, unknown>) =>
   pipe.transform(query, {
     type: 'query',
-    metatype: UserAnalyticsQueryDto,
-  }) as Promise<UserAnalyticsQueryDto>;
+    metatype: AnalyticsQueryDto,
+  }) as Promise<AnalyticsQueryDto>;
 
 // The DTO validates each field; resolveAnalyticsRange applies the cross-field
 // rules after defaults are known. Together they form the request contract.
 const resolve = async (query: Record<string, unknown>, now: Date) =>
   resolveAnalyticsRange(await validateQuery(query), now);
 
-describe('UserAnalyticsQueryDto', () => {
+describe('AnalyticsQueryDto', () => {
   const now = new Date('2026-10-23T09:14:02Z');
 
   it('defaults to day granularity and the last 30 days', async () => {

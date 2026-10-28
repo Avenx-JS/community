@@ -133,6 +133,8 @@ CREATE TABLE user_reports (
     INDEX idx_user_reports_reporter_created (reporter_id, created_at),
     INDEX idx_user_reports_reporter_reported_status (reporter_id, reported_user_id, status),
     INDEX idx_user_reports_reviewed_by (reviewed_by),
+    INDEX idx_user_reports_created_reason (created_at, reason),
+    INDEX idx_user_reports_reviewed (reviewed_at, status, resolution, created_at),
     CONSTRAINT chk_user_reports_not_self CHECK (reporter_id IS NULL OR reporter_id <> reported_user_id),
     CONSTRAINT chk_user_reports_context CHECK (
         (context_type IS NULL AND context_id IS NULL) OR
@@ -211,4 +213,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('004_create_admin_actions'),
     ('005_add_user_last_seen_at'),
     ('006_add_admin_actions_actor_username_index'),
-    ('007_add_analytics_indexes');
+    ('007_add_analytics_indexes'),
+    ('008_add_report_analytics_indexes');

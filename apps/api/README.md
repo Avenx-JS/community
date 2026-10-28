@@ -344,6 +344,81 @@ record the plans in the pull request; the mocked test suites cannot show a
 plan. No cache is used. If dashboards later poll aggressively, a short TTL
 cache is a separate change.
 
+### Admin moderation analytics
+
+`GET /admin/analytics/moderation` returns aggregate report and sanction
+metrics. It uses `@UseGuards(AuthGuard, AdminGuard)` (`401`/`403` as above),
+writes nothing, and audits nothing. Query parameters, defaults, and `400`
+rules are identical to `/admin/analytics/users`; both routes share
+`AnalyticsQueryDto` and `resolveAnalyticsRange`.
+
+**Submitted and decided reports are different populations.** A report
+submitted last month and decided today counts in `reports_reviewed` and not in
+`reports_submitted`. The two figures come from different columns and are not
+comparable as a ratio. Every metric names its time column in
+`meta.time_basis`. Point-in-time figures sit under their own
+`point_in_time` key, so they cannot be read as range metrics by accident.
+
+| Field                                          | Definition                                                                         | Scope         | Time column                    | Source                                                    |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------- | ------------- | ------------------------------ | --------------------------------------------------------- |
+| `totals.reports_submitted`                     | Reports created in `[from, to)`                                                    | range         | `user_reports.created_at`      | `user_reports`                                            |
+| `series.reports_submitted`                     | The same per UTC day or ISO week, zero-filled, summing to the total                | range         | `user_reports.created_at`      | `user_reports`, grouped by UTC day                        |
+| `reports_by_reason`                            | Reports created in range per reason, with `0` for every unused reason              | range         | `user_reports.created_at`      | `user_reports`                                            |
+| `totals.reports_reviewed`                      | Reports **decided** (`resolved` or `rejected`) in `[from, to)`                     | range         | `user_reports.reviewed_at`     | `user_reports`                                            |
+| `resolutions_by_type`                          | Decided-in-range reports per resolution, plus `rejected`; `0` for unused values    | range         | `user_reports.reviewed_at`     | `user_reports`                                            |
+| `time_to_review_seconds`                       | `{ average, maximum, count }` of `reviewed_at - created_at` for decided-in-range reports; `null`s when `count` is 0 | range | `user_reports.reviewed_at` | `user_reports` |
+| `restrictions_applied`                         | Restrictions created in range per type                                             | range         | `user_restrictions.created_at` | `user_restrictions`                                       |
+| `totals.restrictions_lifted`                   | Restrictions explicitly lifted in range; expiry alone does not count               | range         | `user_restrictions.lifted_at`  | `user_restrictions`                                       |
+| `point_in_time.backlog_by_status`              | Reports in each status now, with `0` for every unused status                       | point in time | —                              | `user_reports GROUP BY status`                            |
+| `point_in_time.oldest_open_report_age_seconds` | Age of the oldest `open` or `under_review` report now; `null` when there is none   | point in time | —                              | `user_reports`                                            |
+
+Details:
+
+- `reviewed_at` is also written when a report moves to `under_review`, so a
+  triaged-but-undecided report has a `reviewed_at`. The reviewed metrics
+  therefore count only terminal statuses, for which `reviewed_at` is the
+  decision time. Reports with `reviewed_at IS NULL` never count. Reports
+  currently under review appear only in the backlog.
+- `rejected` is its own bucket in `resolutions_by_type`, because rejected
+  reports carry no resolution. `time_to_review_seconds.count` always equals
+  `totals.reports_reviewed`, so a reader can judge how much the average is
+  worth. The average is rounded to whole seconds.
+- Durations and ages use `UNIX_TIMESTAMP()` differences rather than
+  `TIMESTAMPDIFF(…, UTC_TIMESTAMP())`. The latter mixes a session-zone value
+  with a UTC value, and it shifts across DST changes.
+- **Median is deliberately omitted.** MySQL 8.0 has no `MEDIAN` aggregate,
+  and computing one needs a window function that sorts the matching set,
+  instead of a streaming aggregate. Average, maximum, and count ship first.
+  Add a percentile as a separate, measured change if the average proves
+  misleading.
+
+**Aggregate-only.** The response contains enum counts only: no report id,
+reporter or reported account, username, or free text (`description`,
+`resolution_note`, `reason`, `lift_reason`). There is deliberately no
+"most reported accounts", "top reporters", or other ranking. Those are
+row-level data about identifiable people, and a leaderboard invites acting on
+report volume rather than on reviewed evidence. Per-account report counts
+belong on the user directory and report detail, next to their context. The
+low-count caveat from user analytics applies here too: acceptable for
+administrators, not for any other surface. No statement touches `email`,
+`password_hash`, or any `auth_*` table.
+
+**Cost.** Each request runs a fixed six statements in parallel, whatever the
+range length. Migration `008_add_report_analytics_indexes` adds covering
+indexes for both report populations:
+
+| Statement                              | Expected index                                                            |
+| -------------------------------------- | ------------------------------------------------------------------------- |
+| submitted per day and reason           | `idx_user_reports_created_reason (created_at, reason)`, covering          |
+| decided outcomes and time to review    | `idx_user_reports_reviewed (reviewed_at, status, resolution, created_at)`, covering |
+| backlog by status                      | `idx_user_reports_status_created`                                         |
+| oldest open report                     | `idx_user_reports_status_created` (`status IN` range, `MIN(created_at)`)  |
+| restrictions applied                   | `idx_user_restrictions_created_at` (migration `007`)                      |
+| restrictions lifted                    | `idx_user_restrictions_unlifted (lifted_at, expires_at)` (migration `007`) |
+
+Verify the plans with `EXPLAIN` against the docker-compose MySQL 8.0 instance
+and record them in the pull request.
+
 ### Admin user directory
 
 `GET /admin/users` and `GET /admin/users/:id` require a bearer token and the

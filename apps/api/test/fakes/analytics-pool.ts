@@ -14,9 +14,18 @@ export interface FakeRestriction {
   lifted_at: Date | null;
 }
 
+export interface FakeReport {
+  reason: string;
+  status: 'open' | 'under_review' | 'resolved' | 'rejected';
+  resolution: string | null;
+  created_at: Date;
+  reviewed_at: Date | null;
+}
+
 export interface FakeAnalyticsData {
   users: FakeUser[];
   restrictions: FakeRestriction[];
+  reports?: FakeReport[];
   /** The database clock used for UTC_TIMESTAMP() in the restriction predicate. */
   now: Date;
 }
@@ -41,6 +50,101 @@ export function executeAnalyticsQuery(
   values: unknown[],
 ): Promise<Result> | undefined {
   const result = (rows: unknown) => Promise.resolve([rows, []] as Result);
+  const reports = data.reports ?? [];
+  // Honour the statement's own status list, so a missing filter is visible.
+  const statusFilter = (rows: FakeReport[]) => {
+    const match = /status IN \(([^)]*)\)/.exec(sql);
+    if (!match) return rows;
+    const allowed = match[1]
+      .split(',')
+      .map((value) => value.trim().slice(1, -1));
+    return rows.filter((row) => allowed.includes(row.status));
+  };
+  const seconds = (value: Date) => Math.floor(value.getTime() / 1000);
+
+  if (sql.includes('FROM user_reports') && sql.includes('AS day_number')) {
+    const groups = new Map<
+      string,
+      { day_number: number; key: string; total: number }
+    >();
+    for (const report of reports) {
+      if (inRange(report.created_at, values)) {
+        const day = Math.floor(report.created_at.getTime() / 86_400_000);
+        const id = `${day}:${report.reason}`;
+        const group = groups.get(id) ?? {
+          day_number: day,
+          key: report.reason,
+          total: 0,
+        };
+        group.total += 1;
+        groups.set(id, group);
+      }
+    }
+    return result([...groups.values()]);
+  }
+  if (sql.includes('FROM user_reports') && sql.includes('review_seconds_sum')) {
+    const groups = new Map<
+      string,
+      {
+        status: string;
+        resolution: string | null;
+        total: number;
+        review_seconds_sum: number;
+        review_seconds_max: number;
+      }
+    >();
+    for (const report of statusFilter(reports)) {
+      if (report.reviewed_at === null || !inRange(report.reviewed_at, values)) {
+        continue;
+      }
+      const duration = seconds(report.reviewed_at) - seconds(report.created_at);
+      const id = `${report.status}:${report.resolution}`;
+      const group = groups.get(id) ?? {
+        status: report.status,
+        resolution: report.resolution,
+        total: 0,
+        review_seconds_sum: 0,
+        review_seconds_max: Number.NEGATIVE_INFINITY,
+      };
+      group.total += 1;
+      group.review_seconds_sum += duration;
+      group.review_seconds_max = Math.max(group.review_seconds_max, duration);
+      groups.set(id, group);
+    }
+    return result(
+      [...groups.values()].map((group) => ({
+        ...group,
+        review_seconds_sum: String(group.review_seconds_sum),
+      })),
+    );
+  }
+  if (sql.startsWith('SELECT status AS `key`')) {
+    const counts = new Map<string, number>();
+    for (const report of reports) {
+      counts.set(report.status, (counts.get(report.status) ?? 0) + 1);
+    }
+    return result([...counts].map(([key, total]) => ({ key, total })));
+  }
+  if (sql.includes('AS oldest_open_report_age_seconds')) {
+    const open = statusFilter(reports);
+    return result([
+      {
+        oldest_open_report_age_seconds:
+          open.length === 0
+            ? null
+            : seconds(data.now) -
+              Math.min(...open.map((report) => seconds(report.created_at))),
+      },
+    ]);
+  }
+  if (sql.includes('FROM user_restrictions') && sql.includes('lifted_at >=')) {
+    return result([
+      {
+        total: data.restrictions.filter((row) => inRange(row.lifted_at, values))
+          .length,
+      },
+    ]);
+  }
 
   if (sql.startsWith('SELECT role AS `key`')) {
     const counts = new Map<string, number>();

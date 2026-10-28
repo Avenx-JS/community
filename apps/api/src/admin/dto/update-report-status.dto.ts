@@ -10,17 +10,13 @@ import {
   ValidatorConstraintInterface,
 } from 'class-validator';
 import { PlainTextConstraint } from '../../common/safe-text.constraint';
-import type { ReportStatus } from '../../reports/report.constants';
+import { REPORT_RESOLUTIONS as reportResolutions } from '../../reports/report.constants';
+import type {
+  ReportResolution,
+  ReportStatus,
+} from '../../reports/report.constants';
 
-const reportResolutions = [
-  'no_action',
-  'content_removed',
-  'user_warned',
-  'user_suspended',
-  'user_banned',
-] as const;
-
-export type ReportResolution = (typeof reportResolutions)[number];
+export type { ReportResolution };
 
 @ValidatorConstraint({ name: 'reportResolutionMatchesStatus', async: false })
 export class ReportResolutionMatchesStatusConstraint implements ValidatorConstraintInterface {
