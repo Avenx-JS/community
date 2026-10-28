@@ -149,6 +149,111 @@ case-by-case after documented privacy or legal approval. Operational log
 retention guidance (normally no more than 30 days) does not apply to this
 moderation-decision history.
 
+The metadata allowlist above is also the disclosure boundary for
+`GET /admin/audit-log`, which returns metadata exactly as stored. Loosening the
+allowlist exposes the new keys through that route; change both together.
+
+### Admin audit log API
+
+`GET /admin/audit-log` is the read-only view of `admin_actions`. It uses
+`@UseGuards(AuthGuard, AdminGuard)` with an explicit `@RequiresRole('admin')`:
+`401` without a valid token, and `403` for members and platform moderators.
+
+**Moderator access is an open decision.** The trail records enforcement
+actions against identifiable accounts, along with the administrators who took
+them. That is oversight material, not triage material, so the default is
+administrators only. Granting moderators access means changing the one
+`@RequiresRole` decorator on `AdminAuditLogController`.
+
+**The trail is append-only.** There is no `PATCH`, `PUT`, or `DELETE` route on
+`/admin/audit-log` or any sub-path; those verbs return `404` from the router.
+An administrator who could edit the record of their own actions would make
+the trail worthless.
+
+| Parameter        | Rules                                                                      |
+| ---------------- | -------------------------------------------------------------------------- |
+| `actor_username` | 3–50 of `[A-Za-z0-9_]`; exact match on the stored username snapshot        |
+| `action`         | one of the `admin_actions.action` values (shared `ADMIN_ACTIONS` constant) |
+| `target_type`    | `user`, `report`, or `restriction`                                         |
+| `target_id`      | 1–36 of `[A-Za-z0-9_-]`; requires `target_type`                            |
+| `from`, `to`     | ISO 8601; half-open UTC interval `from <= created_at < to`                 |
+| `page`           | integer 1–10000, default 1                                                 |
+| `limit`          | integer 1–100, default 20                                                  |
+| `sort`           | `new` (default, `created_at DESC, id DESC`) or `oldest` (`ASC, ASC`)       |
+
+Unknown parameters, invalid values, and `target_id` without `target_type`
+return `400`. `target_id` needs `target_type` because ids are not unique
+across target kinds, and because the target index starts with `target_type`.
+`actor_username` matches the snapshot column rather than joining `users`, so
+entries by a deleted administrator remain findable. The `id` tiebreaker gives
+a total order, because a single transaction can write several entries within
+the same second. Every filter applies to both the items and `total`.
+
+Example response:
+
+```json
+{
+  "items": [
+    {
+      "id": "action-id",
+      "actor_username": "admin",
+      "actor_id": "admin-user-id",
+      "action": "user_suspended",
+      "target_type": "user",
+      "target_id": "target-user-id",
+      "metadata": {
+        "restriction_id": "restriction-id",
+        "expires_at": "2026-10-31T10:00:00.000Z",
+        "report_id": "report-id"
+      },
+      "created_at": "2026-10-28T10:00:00.000Z"
+    }
+  ],
+  "page": 1,
+  "limit": 20,
+  "total": 1,
+  "filters": {
+    "actor_username": null,
+    "action": null,
+    "target_type": null,
+    "target_id": null,
+    "from": null,
+    "to": null,
+    "sort": "new"
+  }
+}
+```
+
+`actor_id` is `null` once the acting account has been deleted, while
+`actor_username` keeps the snapshot. Clients can use this to tell a current
+administrator from a departed one. `metadata` is a JSON object or `null`.
+
+**No target resolution.** `target_id` has no foreign key, and the route
+returns the raw id without joining a username or report title. For details,
+follow up with `GET /admin/users/:id` or `GET /admin/reports/:id`; deleted
+targets return `404` there. Entries whose target no longer exists are still
+listed.
+
+Index use per filter (MySQL picks one index; other conditions filter its
+rows):
+
+| Filter present                       | Index                                                 |
+| ------------------------------------ | ----------------------------------------------------- |
+| `target_type` (+ `target_id`)        | `idx_admin_actions_target`                            |
+| `actor_username`                     | `idx_admin_actions_actor_username` (migration `006`)  |
+| `action`                             | `idx_admin_actions_action`                            |
+| none, or only `from`/`to`            | `idx_admin_actions_created_at`                        |
+
+The four indexes from Draft 11 did not cover `actor_username`, because
+`idx_admin_actions_actor` is on `actor_id`. Migration
+`006_add_admin_actions_actor_username_index` adds `(actor_username,
+created_at)`. Deep offsets are bounded by the page cap. A full-history export
+would be a separate streaming tool, not a change to this endpoint.
+
+Reads of the audit log are not themselves audited, matching the other admin
+read routes. Auditing audit reads is a defensible policy for larger
+organisations; it is deliberately not implemented here.
+
 ### Admin user directory
 
 `GET /admin/users` and `GET /admin/users/:id` require a bearer token and the

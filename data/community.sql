@@ -191,6 +191,7 @@ CREATE TABLE admin_actions (
     INDEX idx_admin_actions_actor (actor_id, created_at),
     INDEX idx_admin_actions_target (target_type, target_id, created_at),
     INDEX idx_admin_actions_action (action, created_at),
+    INDEX idx_admin_actions_actor_username (actor_username, created_at),
     FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE SET NULL
 );
 
@@ -205,4 +206,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('002_create_user_reports'),
     ('003_create_user_restrictions'),
     ('004_create_admin_actions'),
-    ('005_add_user_last_seen_at');
+    ('005_add_user_last_seen_at'),
+    ('006_add_admin_actions_actor_username_index');

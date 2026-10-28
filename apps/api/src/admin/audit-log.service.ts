@@ -5,14 +5,21 @@ import { MYSQL_POOL } from '../auth/auth.service';
 import type { ReportStatus } from '../reports/report.constants';
 import type { PlatformRole } from '../users/users.service';
 
-export type AdminAction =
-  | 'report_status_changed'
-  | 'user_suspended'
-  | 'user_banned'
-  | 'restriction_lifted'
-  | 'user_role_changed';
+// Mirrors the admin_actions.action and target_type enums; read filters
+// validate against these lists so they cannot drift from what is written.
+export const ADMIN_ACTIONS = [
+  'report_status_changed',
+  'user_suspended',
+  'user_banned',
+  'restriction_lifted',
+  'user_role_changed',
+] as const;
 
-export type AdminActionTarget = 'user' | 'report' | 'restriction';
+export type AdminAction = (typeof ADMIN_ACTIONS)[number];
+
+export const ADMIN_ACTION_TARGETS = ['user', 'report', 'restriction'] as const;
+
+export type AdminActionTarget = (typeof ADMIN_ACTION_TARGETS)[number];
 
 export type AuditEntry =
   | {
