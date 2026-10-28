@@ -217,9 +217,10 @@ Restriction policy decisions not established by the project remain
 5. The maximum allowed suspension duration.
 
 The restriction table stores reasons as plain text; reasons are not interpreted
-as HTML. It stores no email, password hash, token, or session data. The
-restriction-writing and enforcement API surfaces are separate work; this
-migration alone does not block authentication or create restrictions.
+as HTML. It stores no email, password hash, token, or session data.
+Restrictions are created and lifted through the routes in
+[Account restrictions](#account-restrictions-suspensions-and-bans) and
+enforced on authentication, refresh, and every guarded route.
 
 Email is intentionally excluded from both admin responses. This preserves the
 data-classification guarantee that email is not returned by profile, auth,
@@ -429,6 +430,125 @@ Administrators cannot review reports where they are the reporter or the
 reported user; those requests return `403`. Reopening reports and changing
 terminal decisions are not supported; appeals or a reopening workflow require
 a separate policy and state-machine change.
+
+### Account restrictions (suspensions and bans)
+
+Deleting, suspending, and banning an account are three different operations.
+These routes implement only temporary suspension and permanent ban, each as an
+explicitly typed operation; there is no account deletion here, and no single
+call performs more than one of them. All three routes use
+`@UseGuards(AuthGuard, AdminGuard)`: `401` without a valid token, `403` for
+non-administrators. Both path ids pass `SafeRouteParamPipe('id')`, so a
+malformed id returns `400`.
+
+| Method | Path                                                  | Success |
+| ------ | ----------------------------------------------------- | ------- |
+| `POST` | `/admin/users/:id/restrictions`                       | `201`   |
+| `POST` | `/admin/users/:id/restrictions/:restrictionId/lift`   | `200`   |
+| `GET`  | `/admin/users/:id/restrictions?page=1&limit=20`       | `200`   |
+
+Apply body:
+
+```json
+{
+  "type": "suspension",
+  "reason": "Repeated spam after warning",
+  "duration_hours": 72,
+  "report_id": "optional-report-id"
+}
+```
+
+`type` is `suspension` or `ban`. `reason` is required trimmed plain text,
+1–2000 characters. `duration_hours` is an integer from 1 to 8760, required for
+a suspension and rejected for a ban (`400` either way). `report_id` is
+optional and must reference an existing report (`404` otherwise); it links the
+restriction to the report whose outcome Draft 07 records, without that
+endpoint applying anything itself. Unknown properties, including
+`created_by`, `expires_at`, and `lifted_at`, return `400`. The acting
+administrator is always the token's user id.
+
+**Duration, not timestamp.** The server computes
+`expires_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL duration_hours HOUR)`, so the
+deadline comes from the database clock like every other timestamp. Accepting
+a client-supplied `expires_at` would invite timezone and clock-skew mistakes,
+and would allow a deadline in the past. The 8760-hour ceiling is a proposal;
+the maximum suspension length is still an open policy question (see above).
+
+Apply rules:
+
+- Unknown user: `404`.
+- An account with an active restriction: `409`. Restrictions do not stack.
+- **Escalation is explicit.** To turn a suspension into a ban, lift the
+  suspension, then apply the ban. That takes two calls, writes two audit
+  entries, and leaves an unambiguous history. There is no silent replace.
+- Restricting your own account: `403`.
+- Restricting an account with `role = 'admin'`: `403`. This conservative
+  default stays until a policy defines who may restrict administrators and
+  with what oversight. Moderators and members can be restricted.
+
+The apply runs in one transaction. It locks the target `users` row
+(`FOR UPDATE`) and then re-checks the active-restriction predicate. Concurrent
+applies for one account are therefore serialised: exactly one succeeds and
+the rest get `409`. Locking the row matters because the re-check usually
+matches nothing, and gap locks alone would let two inserts deadlock. The insert
+and its `user_suspended`/`user_banned` audit entry commit together, and an
+audit failure rolls back the restriction.
+
+**Session revocation happens after the commit, and its failure is
+tolerated.** After the transaction commits, the service calls
+`AuthService.logoutAll(userId)`, which deletes the account's sessions and
+revokes its refresh tokens. That call is a latency optimisation, not the
+enforcement mechanism. `AuthGuard`, login, and refresh check the restriction
+row on every request. So if revocation fails, the restriction stays in place
+and the request still succeeds: the next request with an old access token is
+refused as restricted, and refresh is refused too. Moving revocation into the
+transaction would make it a single point of failure for the whole feature.
+
+Lift body: `{ "lift_reason": "Appeal accepted" }`, with the same text rules as
+`reason`. Lifting is `POST .../lift` rather than `DELETE`: the row is kept and
+annotated with `lifted_at`, `lifted_by`, and `lift_reason`, and a `DELETE`
+with a required body would be semantically wrong and awkward for clients. The
+update is conditional on `lifted_at IS NULL`. A restriction that is already
+lifted returns `409`. An unknown restriction id, or one that belongs to a
+different user than the path names, returns `404`. A lift writes a
+`restriction_lifted` audit entry in the same transaction.
+
+An **expired suspension can still be lifted**. It changes nothing for
+enforcement, but it records that an administrator closed the case, and
+moderators do not have to compare clock times before acting.
+
+**Lifting does not restore sessions.** Tokens revoked when the restriction
+was applied are gone for good. After a lift, the user signs in again.
+
+Restriction response, used by apply, lift, and history items:
+
+```json
+{
+  "id": "restriction-id",
+  "type": "suspension",
+  "reason": "Repeated spam after warning",
+  "created_by_username": "admin",
+  "created_at": "2026-10-28T10:00:00.000Z",
+  "expires_at": "2026-10-31T10:00:00.000Z",
+  "lifted_at": null,
+  "lifted_by_username": null,
+  "lift_reason": null,
+  "report_id": null,
+  "active": true
+}
+```
+
+History returns `{ items, page, limit, total }`, with `page` 1–10000,
+`limit` 1–100 (default 20), ordered `created_at DESC, id DESC`. `active` is
+computed with `ACTIVE_USER_RESTRICTION_PREDICATE`. `created_by_username` and
+`lifted_by_username` are `null` when the acting administrator's account has
+been deleted. An unknown user returns `404`; an account without restrictions
+returns an empty `items` array.
+
+`reason`, `lift_reason`, and the acting administrators appear only in these
+admin responses. A restricted user sees only `type` and, for a suspension,
+`expires_at`. No response here contains an email address, password hash,
+token, or session value. The global API write rate limits apply.
 
 ### User reports
 
