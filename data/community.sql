@@ -13,6 +13,7 @@ CREATE TABLE users (
 
 CREATE INDEX idx_users_role ON users (role);
 CREATE INDEX idx_users_last_seen_at ON users (last_seen_at);
+CREATE INDEX idx_users_created_at ON users (created_at);
 
 CREATE TABLE auth_sessions (
     token_hash CHAR(64) PRIMARY KEY,
@@ -158,6 +159,8 @@ CREATE TABLE user_restrictions (
     INDEX idx_user_restrictions_user_created (user_id, created_at),
     INDEX idx_user_restrictions_expires_at (expires_at),
     INDEX idx_user_restrictions_created_by (created_by),
+    INDEX idx_user_restrictions_unlifted (lifted_at, expires_at),
+    INDEX idx_user_restrictions_created_at (created_at),
     CONSTRAINT chk_user_restrictions_expiry CHECK (
         (type = 'suspension' AND expires_at IS NOT NULL) OR
         (type = 'ban' AND expires_at IS NULL)
@@ -207,4 +210,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('003_create_user_restrictions'),
     ('004_create_admin_actions'),
     ('005_add_user_last_seen_at'),
-    ('006_add_admin_actions_actor_username_index');
+    ('006_add_admin_actions_actor_username_index'),
+    ('007_add_analytics_indexes');

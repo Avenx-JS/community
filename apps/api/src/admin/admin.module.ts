@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { DatabaseModule } from '../database/database.module';
 import { UsersModule } from '../users/users.module';
+import { AdminAnalyticsController } from './admin-analytics.controller';
+import { AdminAnalyticsService } from './admin-analytics.service';
 import { AdminAuditLogController } from './admin-audit-log.controller';
 import { AdminAuditLogService } from './admin-audit-log.service';
 import { AdminReportsController } from './admin-reports.controller';
@@ -19,8 +21,10 @@ import { AuditLogService } from './audit-log.service';
     AdminUsersController,
     AdminRestrictionsController,
     AdminAuditLogController,
+    AdminAnalyticsController,
   ],
   providers: [
+    AdminAnalyticsService,
     AdminAuditLogService,
     AdminReportsService,
     AdminUsersService,

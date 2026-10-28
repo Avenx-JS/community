@@ -254,6 +254,96 @@ Reads of the audit log are not themselves audited, matching the other admin
 read routes. Auditing audit reads is a defensible policy for larger
 organisations; it is deliberately not implemented here.
 
+### Admin user analytics
+
+`GET /admin/analytics/users` returns aggregate account metrics. It uses
+`@UseGuards(AuthGuard, AdminGuard)`: `401` without a valid token, `403` for
+members and moderators. Platform statistics are not public, and
+`suspended_users` is a moderation signal. The route is read-only and writes no
+audit entry.
+
+| Parameter     | Rules                                                                    |
+| ------------- | ------------------------------------------------------------------------ |
+| `from`, `to`  | strict ISO 8601, UTC when no zone is given; half-open `[from, to)`       |
+| `granularity` | `day` (default) or `week`; affects only the series buckets               |
+
+Without `from`/`to`, the range is the 30 days ending now, truncated to the
+second. If only one bound is given, the other defaults to 30 days from it (or
+to now). The request returns `400` when `from >= to`, when the range exceeds 366
+days, when a date is malformed, or when an unknown parameter is present. The
+resolved `from`/`to` and `generated_at` are echoed, so a dashboard can label
+exactly what it shows.
+
+**Point-in-time and range metrics are mixed deliberately.** Point-in-time
+metrics describe the moment of the request and ignore the range. A
+`suspended_users` value does **not** mean "suspended during this period".
+`meta.scopes` labels each metric in the response.
+
+| Field                  | Definition                                                                 | Scope         | Time column                    | Source                                                                       |
+| ---------------------- | -------------------------------------------------------------------------- | ------------- | ------------------------------ | ---------------------------------------------------------------------------- |
+| `total_users`          | All accounts that exist now                                                | point in time | —                              | `users`; the sum of `users_by_role` (`role` is `NOT NULL`)                   |
+| `new_users`            | Accounts created in `[from, to)`                                           | range         | `users.created_at`             | `users`; the sum of the daily series rows                                    |
+| `series.new_users`     | `new_users` per UTC day or ISO week, zero-filled                           | range         | `users.created_at`             | `users`, grouped by `FLOOR(UNIX_TIMESTAMP(created_at) / 86400)`              |
+| `active_users`         | Accounts whose most recent authenticated request is in `[from, to)`        | range         | `users.last_seen_at`           | `users`; `NULL` `last_seen_at` never counts                                  |
+| `users_by_role`        | Accounts per platform role, with `0` for unused roles                      | point in time | —                              | `users GROUP BY role`                                                        |
+| `suspended_users`      | Distinct accounts with an active `suspension` now                          | point in time | —                              | `user_restrictions`, `ACTIVE_USER_RESTRICTION_PREDICATE`, `COUNT(DISTINCT user_id)` |
+| `banned_users`         | Distinct accounts with an active `ban` now                                 | point in time | —                              | as above, `type = 'ban'`                                                     |
+| `restrictions_applied` | Restrictions created in `[from, to)`, by type, including lifted ones       | range         | `user_restrictions.created_at` | `user_restrictions GROUP BY type`                                            |
+
+Details:
+
+- The restriction counts use the same predicate as enforcement and
+  `COUNT(DISTINCT user_id)`. An account with two active rows is counted once,
+  and expired or lifted rows drop out without any job running.
+- Series buckets are UTC days (`2026-09-23`) or ISO weeks (`2026-W39`). The
+  ISO week-year can differ from the calendar year: 2027-01-03 is in
+  `2026-W53`. Every bucket that overlaps the range is present, with `0` where
+  nothing happened, because MySQL emits no row for an empty day. Edge buckets
+  can be partial, but the series always sums to `new_users`. SQL groups by UTC
+  day, and weeks are rolled up from days in application code
+  (`analytics-range.ts`), independent of MySQL week modes and the session time
+  zone.
+
+**Active-user caveats.** `last_seen_at` records only each account's *most
+recent* request, at a resolution of `USER_ACTIVITY_WRITE_INTERVAL_SECONDS`, and
+it cannot be backfilled. Therefore:
+
+- `meta.active_users_since` is the earliest non-null `last_seen_at`. Because
+  each account's value moves forward when it is seen again, this marks
+  collection start conservatively late.
+- `meta.active_users_resolution_seconds` is the configured write interval.
+- `meta.active_users_is_floor` is `true` when the count is a lower bound,
+  not a count. That happens when no activity has been recorded, when `from`
+  precedes `active_users_since`, or when `to` is further in the past than one
+  resolution interval. In the last case, accounts active in the window and
+  again afterwards have moved out of it. Windows ending now are exact.
+
+The response is **aggregate-only**: no username, account id, email, or
+individual timestamp appears in it. Row-level lists such as "recent
+registrations" belong in the user directory, not here. Low counts on a small
+deployment can still narrow things down. That is acceptable only because the
+audience is administrators who can read the rows directly; do not expose these
+metrics on a non-admin surface. No statement touches `email`, `password_hash`,
+`auth_sessions`, `auth_refresh_tokens`, or `auth_rate_limits`.
+
+**Cost.** Each request runs a fixed five statements in parallel, whatever the
+range length. Together with the 366-day cap and the global read rate limits,
+that bounds the work per request. Migration `007_add_analytics_indexes` adds
+the indexes these statements need:
+
+| Statement                        | Expected index                                                |
+| -------------------------------- | ------------------------------------------------------------- |
+| registration count and series    | `idx_users_created_at` (range, covering)                      |
+| active users                     | `idx_users_last_seen_at` (range; `MIN` resolved from index)   |
+| role grouping                    | `idx_users_role`                                              |
+| active restrictions              | `idx_user_restrictions_unlifted` (`lifted_at IS NULL` ref)    |
+| restrictions applied             | `idx_user_restrictions_created_at` (range)                    |
+
+Verify these with `EXPLAIN` against the docker-compose MySQL 8.0 instance and
+record the plans in the pull request; the mocked test suites cannot show a
+plan. No cache is used. If dashboards later poll aggressively, a short TTL
+cache is a separate change.
+
 ### Admin user directory
 
 `GET /admin/users` and `GET /admin/users/:id` require a bearer token and the
