@@ -1037,7 +1037,8 @@ All request bodies and query DTOs pass through the global NestJS validation
 pipe, which transforms declared fields, rejects unknown fields, and returns
 `400` for invalid values. Route parameters for usernames, community names, and
 resource IDs are separately constrained to their documented length and
-allowlisted characters before a service or database query is called.
+allowlisted characters before a service or database query is called; numeric
+route parameters such as a rule version are bounded integers.
 Pagination and search values have explicit bounds. User-controlled query
 values are passed as MySQL parameters; the vote target table is selected only
 from the fixed `post`/`comment` allowlist, never from arbitrary input.
@@ -1340,7 +1341,8 @@ Only the community creator can appoint or remove moderators using
 `204`, unknown communities/users return `404`, and non-creator attempts return
 `403`. The actor identity comes only from the validated bearer token; request
 data cannot set a role or actor ID. The creator cannot delegate moderator
-management, and moderators cannot appoint other moderators.
+management, and moderators cannot appoint other moderators. Publishing
+community rules is likewise creator-only (see [Rules API](#rules-api)).
 
 Post and comment authors retain their existing ability to delete their own
 content. A moderator or creator can additionally delete content only within
@@ -1419,7 +1421,8 @@ scratch database, the same test also checks the query against MySQL.
 ### Community rules
 
 Community rules are stored as immutable, versioned documents (migration
-`009_create_community_rule_documents`). No endpoint reads or writes them yet.
+`009_create_community_rule_documents`) and are read and published through the
+routes described under [Rules API](#rules-api).
 
 - `community_rule_documents` holds one row per published version of a
   community's rules: `version`, `content_hash`, `published_at`, and
@@ -1465,6 +1468,125 @@ dated `communities.created_at`, attributed to the community creator, and has
 one rule at position `1` titled `Community rules` whose body is the legacy text
 verbatim. Communities with `NULL`, empty, or whitespace-only rules get no
 document and have no rules to accept.
+
+#### Rules API
+
+`CommunityRulesController` and `CommunityRulesService` own these routes. The
+three reads are public, like `GET /communities/:name`: rules are published
+community policy, and people deciding whether to join must be able to read
+them without an account. Every route resolves the community by its exact name,
+returns `400` for an invalid name and `404` for an unknown community, and
+counts against the global API rate limits (reads, or writes for `PUT`); none is
+exempt and there is no dedicated bucket, because publishing is rare.
+
+`GET /communities/:name/rules` returns the current document (highest
+`version`) with its items in ascending `position`:
+
+```json
+{
+  "version": 2,
+  "published_at": "2026-10-22T08:00:00.000Z",
+  "items": [
+    { "position": 1, "title": "Be civil", "body": "No personal attacks." }
+  ]
+}
+```
+
+A community that has never published rules returns `200` with
+`{ "version": null, "published_at": null, "items": [] }`, not `404`. Having no
+rules is a valid state, the one in which no acceptance is required, and `404`
+stays reserved for an unknown community.
+
+`GET /communities/:name/rules/versions` returns the version history in the
+standard collection envelope, newest version first. It accepts `page`
+(`1-10000`, default `1`) and `limit` (`1-100`, default `20`); out-of-range,
+non-integer, or unknown query parameters return `400`.
+
+```json
+{
+  "items": [
+    {
+      "version": 2,
+      "published_at": "2026-10-22T08:00:00.000Z",
+      "published_by_username": "creator_name",
+      "rule_count": 1
+    }
+  ],
+  "page": 1,
+  "limit": 20,
+  "total": 2
+}
+```
+
+`published_by_username` is `null` when the publishing account has been
+deleted.
+
+`GET /communities/:name/rules/versions/:version` returns one version in the
+same shape as the current-rules route. `version` must be an integer from `1`
+to `4294967295`; anything else returns `400`, and a version the community never
+published returns `404`. Published versions never change, so this is how an
+acceptance record's version is resolved back to the text that was accepted.
+
+`PUT /communities/:name/rules` requires a bearer token, publishes the complete
+document, and returns `200` with the resulting document in the same shape:
+
+```json
+{
+  "items": [
+    { "title": "Be civil", "body": "No personal attacks." },
+    { "title": "No spam" }
+  ]
+}
+```
+
+- `items` is required and holds `1-50` rules in display order.
+- `title` is required, trimmed, and 1-200 characters after trimming.
+- `body` is optional, trimmed, and up to 4,000 characters; a missing, `null`,
+  or whitespace-only body is stored as `NULL`.
+- Both reject control characters other than tab, line feed, and carriage
+  return.
+- `position` is not accepted: each item's position is its one-based index in
+  `items`, so a request cannot create gaps, duplicates, or a stored order that
+  disagrees with the submitted one. Sending `position`, or any other unknown
+  property, returns `400`.
+
+Invalid bodies return `400` and write nothing. A document near every bound can
+exceed the default 64 KiB JSON body limit and receive `413`; raise
+`API_BODY_LIMIT_BYTES` if a community needs that much text.
+
+Publishing replaces the whole document rather than offering per-rule
+`POST`/`PATCH`/`DELETE`. Documents are immutable and versioned, so editing one
+rule in place would need a partial-version concept; a whole-document replace
+keeps every version a complete, self-contained document, and "what changed
+between v1 and v2" is answered by comparing two of them.
+
+The service normalises the items, derives positions, and computes
+`content_hash` over exactly what it stores. If that equals the current
+document's hash, the request returns `200` with the current version and
+inserts nothing, so a cosmetic re-save never forces members to accept again.
+Reordering the same items changes the hash and publishes a new version,
+because order is part of the published document. Otherwise one transaction
+locks the community row (`SELECT ... FOR UPDATE`), re-reads the current
+document, inserts the next `version` with `published_by` taken from the token
+and `published_at` from the database clock, and inserts the items. Any failure
+rolls back the whole publish, so a version without rules cannot exist, and
+earlier versions are never touched. If two publishes still race to the same
+version, the unique `(community_id, version)` key rejects the second, which
+returns `409` and writes nothing; the client may retry.
+
+**Authorization.** Only the community creator (`communities.creator_id`) may
+publish; everyone else, including community moderators, receives `403`, and
+an unauthenticated request receives `401`. An unknown community returns `404`
+before authorization is evaluated, matching the moderator-management routes.
+Excluding moderators is the conservative default: rules are the document every
+member must agree to, and widening who may rewrite them is a product decision.
+The check lives only in `canPublishCommunityRules()` in
+`src/communities/community-rules.service.ts`; permitting moderators later means
+changing that function and its test. Platform administrators have no bypass;
+the `/admin` surface does not edit community rules.
+
+No rules response contains an email address, password hash, token, or session
+value.
 
 #### Rule acceptances
 

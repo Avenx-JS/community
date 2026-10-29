@@ -4,6 +4,8 @@ import { DatabaseModule } from '../database/database.module';
 import { CommunitiesService } from './communities.service';
 import { CommunitiesController } from './communities.controller';
 import { CommunityRuleAcceptanceService } from './community-rule-acceptance.service';
+import { CommunityRulesController } from './community-rules.controller';
+import { CommunityRulesService } from './community-rules.service';
 import { NotificationPreferencesService } from './notification-preferences.service';
 import { SubscriptionsController } from './subscriptions.controller';
 
@@ -12,9 +14,14 @@ import { SubscriptionsController } from './subscriptions.controller';
   providers: [
     CommunitiesService,
     CommunityRuleAcceptanceService,
+    CommunityRulesService,
     NotificationPreferencesService,
   ],
-  controllers: [CommunitiesController, SubscriptionsController],
+  controllers: [
+    CommunitiesController,
+    CommunityRulesController,
+    SubscriptionsController,
+  ],
   exports: [CommunitiesService, CommunityRuleAcceptanceService],
 })
 export class CommunitiesModule {}

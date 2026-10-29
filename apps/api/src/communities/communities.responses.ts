@@ -6,6 +6,12 @@ import type {
   SubscriptionListDto,
   SubscriptionStatusDto,
 } from './communities.service';
+import type { CommunityRuleItem } from './community-rules-hash';
+import type {
+  CommunityRulesDto,
+  CommunityRuleVersionDto,
+  CommunityRuleVersionListDto,
+} from './community-rules.service';
 import type { NotificationPreferencesDto } from './notification-preferences.service';
 
 export class CommunityResponse implements CommunityDto {
@@ -99,4 +105,65 @@ export class SubscriptionStatusResponse implements SubscriptionStatusDto {
 
   @ApiProperty({ type: String, format: 'date-time', nullable: true })
   subscribed_at!: string | null;
+}
+
+export class CommunityRuleItemResponse implements CommunityRuleItem {
+  @ApiProperty({
+    type: 'integer',
+    description: 'One-based; the item index in the published request.',
+  })
+  position!: number;
+
+  @ApiProperty()
+  title!: string;
+
+  @ApiProperty({ type: String, nullable: true })
+  body!: string | null;
+}
+
+export class CommunityRulesResponse implements CommunityRulesDto {
+  @ApiProperty({
+    type: 'integer',
+    nullable: true,
+    description: 'Null when the community has never published rules.',
+  })
+  version!: number | null;
+
+  @ApiProperty({ type: String, format: 'date-time', nullable: true })
+  published_at!: string | null;
+
+  @ApiProperty({ type: [CommunityRuleItemResponse] })
+  items!: CommunityRuleItemResponse[];
+}
+
+export class CommunityRuleVersionResponse implements CommunityRuleVersionDto {
+  @ApiProperty({ type: 'integer' })
+  version!: number;
+
+  @ApiProperty({ format: 'date-time' })
+  published_at!: string;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description: 'Null when the publishing account has been deleted.',
+  })
+  published_by_username!: string | null;
+
+  @ApiProperty({ type: 'integer' })
+  rule_count!: number;
+}
+
+export class CommunityRuleVersionListResponse implements CommunityRuleVersionListDto {
+  @ApiProperty({ type: [CommunityRuleVersionResponse] })
+  items!: CommunityRuleVersionResponse[];
+
+  @ApiProperty({ type: 'integer' })
+  page!: number;
+
+  @ApiProperty({ type: 'integer' })
+  limit!: number;
+
+  @ApiProperty({ type: 'integer' })
+  total!: number;
 }
