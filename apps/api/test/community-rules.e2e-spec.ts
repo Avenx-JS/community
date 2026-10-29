@@ -30,6 +30,7 @@ const tokenUsers: Record<string, string> = {
   'creator-token': 'creator',
   'moderator-token': 'moderator',
   'member-token': 'member',
+  'outsider-token': 'outsider',
 };
 
 // Extra columns on every fake row let the tests prove that responses carry
@@ -62,6 +63,14 @@ describe('Community rules endpoints (e2e)', () => {
   let beforeCurrentRead: (() => Promise<void>) | null;
   let rateLimitCalls: Array<{ method: string; path: string }>;
   let clock: number;
+  let acceptanceClock: number;
+  let acceptances: Array<{
+    user_id: string;
+    document_id: string;
+    community_id: string;
+    accepted_at: Date;
+  }>;
+  let statements: string[];
 
   const communities = [
     { id: 'community-a', creator_id: 'creator', name: 'gardening' },
@@ -81,6 +90,9 @@ describe('Community rules endpoints (e2e)', () => {
     beforeCurrentRead = null;
     rateLimitCalls = [];
     clock = Date.parse('2026-10-22T08:00:00.000Z');
+    acceptanceClock = Date.parse('2026-10-25T08:00:00.000Z');
+    acceptances = [];
+    statements = [];
 
     // A connection buffers its writes until commit. Like InnoDB, an
     // uncommitted insert reserves its (community_id, version) key for every
@@ -98,6 +110,7 @@ describe('Community rules endpoints (e2e)', () => {
       const visibleRules = () => [...ruleRows, ...(pending?.rules ?? [])];
 
       return async (sql: string, values: unknown[]) => {
+        statements.push(sql);
         if (sql.startsWith('SELECT id, creator_id FROM communities')) {
           const [name] = values as [string];
           return [
@@ -246,6 +259,90 @@ describe('Community rules endpoints (e2e)', () => {
             });
           }
           return [{ affectedRows: values.length / 5 }, []];
+        }
+
+        // CommunityRuleAcceptanceService.getState: the current document and
+        // this user's acceptance of it.
+        if (sql.includes('LEFT JOIN community_rule_acceptances a')) {
+          const [userId, communityId] = values as [string, string];
+          const current = visibleDocuments()
+            .filter((document) => document.community_id === communityId)
+            .sort((left, right) => right.version - left.version)[0];
+          if (!current) {
+            return [[], []];
+          }
+          const accepted = acceptances.find(
+            (row) => row.user_id === userId && row.document_id === current.id,
+          );
+          return [
+            [
+              {
+                document_id: current.id,
+                version: current.version,
+                accepted_at: accepted?.accepted_at ?? null,
+              },
+            ],
+            [],
+          ];
+        }
+
+        // getLatestAcceptance: the highest version this user accepted.
+        if (sql.includes('FROM community_rule_acceptances a')) {
+          const [userId, communityId] = values as [string, string];
+          const latest = acceptances
+            .filter(
+              (row) =>
+                row.user_id === userId && row.community_id === communityId,
+            )
+            .map((row) => ({
+              version: visibleDocuments().find(
+                (document) => document.id === row.document_id,
+              )!.version,
+              accepted_at: row.accepted_at,
+            }))
+            .sort((left, right) => right.version - left.version)[0];
+          return [latest ? [{ ...latest, ...privateColumns }] : [], []];
+        }
+
+        // accept: INSERT ... SELECT that matches only the current version;
+        // a duplicate keeps the original row and, with FOUND_ROWS, still
+        // reports one affected row.
+        if (sql.startsWith('INSERT INTO community_rule_acceptances')) {
+          expect(sql).toContain('NOT EXISTS');
+          expect(sql).toContain(
+            'ON DUPLICATE KEY UPDATE accepted_at = accepted_at',
+          );
+          const [userId, communityId, version] = values as [
+            string,
+            string,
+            number,
+          ];
+          const forCommunity = visibleDocuments().filter(
+            (document) => document.community_id === communityId,
+          );
+          const document = forCommunity.find(
+            (candidate) =>
+              candidate.version === version &&
+              !forCommunity.some((newer) => newer.version > version),
+          );
+          if (!document) {
+            return [{ affectedRows: 0 }, []];
+          }
+          if (
+            !acceptances.some(
+              (row) =>
+                row.user_id === userId && row.document_id === document.id,
+            )
+          ) {
+            acceptanceClock += 60_000;
+            acceptances.push({
+              user_id: userId,
+              document_id: document.id,
+              community_id: document.community_id,
+              accepted_at: new Date(acceptanceClock),
+            });
+          }
+          return [{ affectedRows: 1 }, []];
         }
 
         throw new Error(`Unexpected SQL query: ${sql}`);
@@ -576,5 +673,215 @@ describe('Community rules endpoints (e2e)', () => {
       { method: 'GET', path: '/communities/gardening/rules/versions' },
       { method: 'GET', path: '/communities/gardening/rules/versions/1' },
     ]);
+  });
+
+  describe('acceptance', () => {
+    const acceptancePath = '/communities/gardening/rules/acceptance';
+    const getAcceptance = (token: string, path = acceptancePath) =>
+      request(server()).get(path).set('Authorization', `Bearer ${token}`);
+    const accept = (
+      body: unknown,
+      token = 'outsider-token',
+      path = acceptancePath,
+    ) =>
+      request(server())
+        .post(path)
+        .set('Authorization', `Bearer ${token}`)
+        .send(body as object);
+
+    it('reports no acceptance needed for a community without rules', async () => {
+      await getAcceptance('outsider-token').expect(200, {
+        current_version: null,
+        accepted_version: null,
+        accepted_at: null,
+        acceptance_required: false,
+      });
+    });
+
+    it('answers 401, 400 and 404 for both routes', async () => {
+      await request(server()).get(acceptancePath).expect(401);
+      await request(server())
+        .post(acceptancePath)
+        .send({ version: 1 })
+        .expect(401);
+      await getAcceptance(
+        'outsider-token',
+        '/communities/missing/rules/acceptance',
+      ).expect(404);
+      await accept(
+        { version: 1 },
+        'outsider-token',
+        '/communities/missing/rules/acceptance',
+      ).expect(404);
+      await getAcceptance(
+        'outsider-token',
+        '/communities/bad%20name/rules/acceptance',
+      ).expect(400);
+      await accept(
+        { version: 1 },
+        'outsider-token',
+        '/communities/bad%20name/rules/acceptance',
+      ).expect(400);
+    });
+
+    it('lets a non-member accept, 201 then 200, without creating membership', async () => {
+      await publish(rules('Be kind')).expect(200);
+      await getAcceptance('outsider-token').expect(200, {
+        current_version: 1,
+        accepted_version: null,
+        accepted_at: null,
+        acceptance_required: true,
+      });
+
+      const created = await accept({ version: 1 }).expect(201);
+      expect(created.body).toEqual({
+        current_version: 1,
+        accepted_version: 1,
+        accepted_at: '2026-10-25T08:01:00.000Z',
+        acceptance_required: false,
+      });
+      expect(acceptances).toEqual([
+        {
+          user_id: 'outsider',
+          document_id: documents[0].id,
+          community_id: 'community-a',
+          accepted_at: new Date('2026-10-25T08:01:00.000Z'),
+        },
+      ]);
+
+      const repeated = await accept({ version: 1 }).expect(200);
+      expect(repeated.body).toEqual(created.body);
+      expect(acceptances).toHaveLength(1);
+      expect(acceptances[0].accepted_at).toEqual(
+        new Date('2026-10-25T08:01:00.000Z'),
+      );
+
+      expect(
+        statements.some((sql) => sql.includes('community_subscriptions')),
+      ).toBe(false);
+    });
+
+    it.each([
+      ['stale', 1],
+      ['ahead', 3],
+    ])(
+      'refuses a %s version with 409 and writes nothing',
+      async (_, version) => {
+        await publish(rules('v1')).expect(200);
+        await publish(rules('v2')).expect(200);
+
+        const response = await accept({ version }).expect(409);
+        expect((response.body as { message: string }).message).toBe(
+          `Version ${version} is not the current rules version (2)`,
+        );
+        expect(acceptances).toHaveLength(0);
+      },
+    );
+
+    it('refuses with a distinct 409 when there are no rules to accept', async () => {
+      const response = await accept({ version: 1 }).expect(409);
+
+      expect((response.body as { message: string }).message).toBe(
+        'This community has no published rules to accept',
+      );
+      expect(acceptances).toHaveLength(0);
+    });
+
+    it.each([
+      {},
+      { version: 0 },
+      { version: -1 },
+      { version: 1.5 },
+      { version: '1' },
+      { version: null },
+      { version: 1, user_id: 'creator' },
+      { version: 1, community_id: 'community-b' },
+    ])('rejects body %o with 400 and writes nothing', async (body) => {
+      await publish(rules('Be kind')).expect(200);
+
+      await accept(body).expect(400);
+      expect(acceptances).toHaveLength(0);
+    });
+
+    it('requires reacceptance after a new version and keeps the old row', async () => {
+      await publish(rules('v1')).expect(200);
+      await accept({ version: 1 }, 'member-token').expect(201);
+      const v1Row = { ...acceptances[0] };
+
+      await publish(rules('v1', 'v2 addition')).expect(200);
+      await getAcceptance('member-token').expect(200, {
+        current_version: 2,
+        accepted_version: 1,
+        accepted_at: v1Row.accepted_at.toISOString(),
+        acceptance_required: true,
+      });
+
+      const v2 = await accept({ version: 2 }, 'member-token').expect(201);
+      expect(v2.body).toMatchObject({
+        current_version: 2,
+        accepted_version: 2,
+        acceptance_required: false,
+      });
+      expect(acceptances).toHaveLength(2);
+      expect(acceptances[0]).toEqual(v1Row);
+    });
+
+    it('does not require reacceptance after a no-op republish', async () => {
+      await publish(rules('Be kind', 'No spam')).expect(200);
+      await accept({ version: 1 }, 'member-token').expect(201);
+
+      const republished = await publish(rules('Be kind', 'No spam')).expect(
+        200,
+      );
+      expect((republished.body as RulesBody).version).toBe(1);
+      expect(documents).toHaveLength(1);
+      await getAcceptance('member-token').expect(200, {
+        current_version: 1,
+        accepted_version: 1,
+        accepted_at: acceptances[0].accepted_at.toISOString(),
+        acceptance_required: false,
+      });
+    });
+
+    it('keeps each account isolated to its own acceptance', async () => {
+      await publish(rules('Be kind')).expect(200);
+      await accept({ version: 1 }, 'member-token').expect(201);
+
+      await getAcceptance('outsider-token').expect(200, {
+        current_version: 1,
+        accepted_version: null,
+        accepted_at: null,
+        acceptance_required: true,
+      });
+      await accept({ version: 1, user_id: 'member' }, 'outsider-token').expect(
+        400,
+      );
+      expect(acceptances.map((row) => row.user_id)).toEqual(['member']);
+    });
+
+    it('never returns private fields and stays rate limited', async () => {
+      await publish(rules('Be kind')).expect(200);
+      rateLimitCalls = [];
+
+      const responses = [
+        await getAcceptance('outsider-token'),
+        await accept({ version: 1 }),
+        await accept({ version: 1 }),
+      ];
+
+      expect(responses.map((response) => response.status)).toEqual([
+        200, 201, 200,
+      ]);
+      for (const response of responses) {
+        expect(response.text).not.toMatch(
+          /email|password|private-hash|private-token|token|session/i,
+        );
+      }
+      expect(rateLimitCalls).toEqual([
+        { method: 'GET', path: acceptancePath },
+        { method: 'POST', path: acceptancePath },
+        { method: 'POST', path: acceptancePath },
+      ]);
+    });
   });
 });

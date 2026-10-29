@@ -130,4 +130,40 @@ describe('CommunityRuleAcceptanceService', () => {
     expect(connectionQueries).toHaveLength(2);
     expect(queries).toHaveLength(0);
   });
+
+  it('matches only the current version, so a stale one is never recorded', async () => {
+    results.push({ affectedRows: 0 });
+
+    await expect(service.accept('user-1', 'community-1', 1)).resolves.toBe(
+      false,
+    );
+    expect(queries[0].sql).toMatch(
+      /NOT EXISTS \(\s*SELECT 1 FROM community_rule_documents newer\s*WHERE newer\.community_id = d\.community_id AND newer\.version > d\.version\s*\)/,
+    );
+    expect(queries[0].values).toEqual(['user-1', 'community-1', 1]);
+  });
+
+  it('reports the highest accepted version for the bound user', async () => {
+    results.push([
+      { version: 3, accepted_at: new Date('2026-10-20T12:00:00.000Z') },
+    ]);
+
+    await expect(
+      service.getLatestAcceptance('user-1', 'community-1'),
+    ).resolves.toEqual({ version: 3, acceptedAt: '2026-10-20T12:00:00.000Z' });
+    expect(queries[0].sql).toContain(
+      'WHERE a.user_id = ? AND a.community_id = ?',
+    );
+    expect(queries[0].sql).toContain('ORDER BY d.version DESC');
+    expect(queries[0].sql).toContain('LIMIT 1');
+    expect(queries[0].values).toEqual(['user-1', 'community-1']);
+  });
+
+  it('reports no accepted version when the user has accepted none', async () => {
+    results.push([]);
+
+    await expect(
+      service.getLatestAcceptance('user-1', 'community-1'),
+    ).resolves.toBeNull();
+  });
 });

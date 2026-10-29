@@ -6,6 +6,7 @@ import {
 import { beforeEach, describe, expect, it } from '@jest/globals';
 import { Test, TestingModule } from '@nestjs/testing';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { CommunityRuleAcceptanceService } from './community-rule-acceptance.service';
 import { hashCommunityRules } from './community-rules-hash';
 import {
   canPublishCommunityRules,
@@ -82,6 +83,7 @@ describe('CommunityRulesService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         CommunityRulesService,
+        CommunityRuleAcceptanceService,
         { provide: MYSQL_POOL, useValue: pool },
       ],
     }).compile();
@@ -275,6 +277,7 @@ describe('CommunityRulesService', () => {
       const module = await Test.createTestingModule({
         providers: [
           CommunityRulesService,
+          CommunityRuleAcceptanceService,
           {
             provide: MYSQL_POOL,
             useValue: { getConnection: () => Promise.resolve(connection) },
@@ -385,6 +388,169 @@ describe('CommunityRulesService', () => {
       expect(queries[1].sql).toContain('LEFT JOIN users u');
       expect(queries[1].sql).toContain('ORDER BY d.version DESC');
       expect(queries[1].values).toEqual(['community-1', 2, 2]);
+    });
+  });
+
+  describe('acceptance', () => {
+    const acceptedAt = new Date('2026-10-20T12:00:00.000Z');
+    const state = (version: number, accepted: Date | null) => [
+      { document_id: `document-${version}`, version, accepted_at: accepted },
+    ];
+    const latest = (version: number) => [{ version, accepted_at: acceptedAt }];
+    const inserts = () =>
+      queries.filter((query) =>
+        query.sql.includes('INSERT INTO community_rule_acceptances'),
+      );
+
+    it.each([
+      [
+        'no published rules',
+        [[], []],
+        {
+          current_version: null,
+          accepted_version: null,
+          accepted_at: null,
+          acceptance_required: false,
+        },
+      ],
+      [
+        'an unaccepted current version after accepting an older one',
+        [state(2, null), latest(1)],
+        {
+          current_version: 2,
+          accepted_version: 1,
+          accepted_at: '2026-10-20T12:00:00.000Z',
+          acceptance_required: true,
+        },
+      ],
+      [
+        'nothing ever accepted',
+        [state(1, null), []],
+        {
+          current_version: 1,
+          accepted_version: null,
+          accepted_at: null,
+          acceptance_required: true,
+        },
+      ],
+      [
+        'the current version accepted',
+        [state(2, acceptedAt), latest(2)],
+        {
+          current_version: 2,
+          accepted_version: 2,
+          accepted_at: '2026-10-20T12:00:00.000Z',
+          acceptance_required: false,
+        },
+      ],
+    ])('reports %s', async (_, rows, expected) => {
+      results = [[community], ...rows];
+
+      await expect(
+        service.getAcceptance('gardening', 'user-a'),
+      ).resolves.toEqual(expected);
+      expect(queries[1].values).toEqual(['user-a', 'community-1']);
+      expect(queries[2].values).toEqual(['user-a', 'community-1']);
+    });
+
+    it('returns 404 for an unknown community before reading any state', async () => {
+      results = [[]];
+
+      await expect(
+        service.getAcceptance('missing', 'user-a'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      results = [[]];
+      await expect(
+        service.accept('missing', 'user-a', 1),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(inserts()).toHaveLength(0);
+    });
+
+    it('records a new acceptance for the bound user and reports it created', async () => {
+      results = [
+        [community],
+        state(2, null),
+        { affectedRows: 1 },
+        state(2, acceptedAt),
+        latest(2),
+      ];
+
+      const result = await service.accept('gardening', 'user-a', 2);
+
+      expect(result).toEqual({
+        created: true,
+        acceptance: {
+          current_version: 2,
+          accepted_version: 2,
+          accepted_at: '2026-10-20T12:00:00.000Z',
+          acceptance_required: false,
+        },
+      });
+      expect(inserts()).toHaveLength(1);
+      expect(inserts()[0].values).toEqual(['user-a', 'community-1', 2]);
+    });
+
+    it('does not write or refresh accepted_at for a repeat acceptance', async () => {
+      results = [
+        [community],
+        state(2, acceptedAt),
+        state(2, acceptedAt),
+        latest(2),
+      ];
+
+      const result = await service.accept('gardening', 'user-a', 2);
+
+      expect(result.created).toBe(false);
+      expect(result.acceptance.accepted_at).toBe('2026-10-20T12:00:00.000Z');
+      expect(inserts()).toHaveLength(0);
+    });
+
+    it.each([
+      ['stale', 1],
+      ['ahead', 3],
+    ])(
+      'refuses a %s version with 409 after a non-matching insert',
+      async (_, version) => {
+        results = [
+          [community],
+          state(2, null),
+          { affectedRows: 0 },
+          state(2, null),
+        ];
+
+        await expect(
+          service.accept('gardening', 'user-a', version),
+        ).rejects.toThrow(
+          new ConflictException(
+            `Version ${version} is not the current rules version (2)`,
+          ),
+        );
+      },
+    );
+
+    it('refuses with a distinct 409 when the community has no rules', async () => {
+      results = [[community], [], { affectedRows: 0 }, []];
+
+      await expect(service.accept('gardening', 'user-a', 1)).rejects.toThrow(
+        new ConflictException(
+          'This community has no published rules to accept',
+        ),
+      );
+    });
+
+    it('still refuses when a new version lands between the check and the insert', async () => {
+      // The check saw v2 as current, but the current-only insert matches
+      // nothing because v3 was published in between.
+      results = [
+        [community],
+        state(2, null),
+        { affectedRows: 0 },
+        state(3, null),
+      ];
+
+      await expect(service.accept('gardening', 'user-a', 2)).rejects.toThrow(
+        'Version 2 is not the current rules version (3)',
+      );
     });
   });
 });

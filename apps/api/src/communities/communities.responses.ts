@@ -11,6 +11,7 @@ import type {
   CommunityRulesDto,
   CommunityRuleVersionDto,
   CommunityRuleVersionListDto,
+  RuleAcceptanceDto,
 } from './community-rules.service';
 import type { NotificationPreferencesDto } from './notification-preferences.service';
 
@@ -166,4 +167,33 @@ export class CommunityRuleVersionListResponse implements CommunityRuleVersionLis
 
   @ApiProperty({ type: 'integer' })
   total!: number;
+}
+
+export class CommunityRuleAcceptanceResponse implements RuleAcceptanceDto {
+  @ApiProperty({
+    type: 'integer',
+    nullable: true,
+    description: 'Null when the community has no published rules.',
+  })
+  current_version!: number | null;
+
+  @ApiProperty({
+    type: 'integer',
+    nullable: true,
+    description: 'Highest version you have accepted, which may be older.',
+  })
+  accepted_version!: number | null;
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description: 'When you accepted accepted_version.',
+  })
+  accepted_at!: string | null;
+
+  @ApiProperty({
+    description: 'True until you accept the current version.',
+  })
+  acceptance_required!: boolean;
 }

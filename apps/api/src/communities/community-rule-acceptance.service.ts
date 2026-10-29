@@ -13,6 +13,11 @@ interface CurrentDocumentRow extends RowDataPacket {
   accepted_at: Date | string | null;
 }
 
+interface LatestAcceptanceRow extends RowDataPacket {
+  version: number;
+  accepted_at: Date | string;
+}
+
 export interface RuleAcceptanceState {
   currentVersion: number | null;
   currentDocumentId: string | null;
@@ -66,12 +71,40 @@ export class CommunityRuleAcceptanceService {
     };
   }
 
+  // The highest version this user has accepted for the community, which may
+  // be older than the current one, or null if they have accepted none.
+  async getLatestAcceptance(
+    userId: string,
+    communityId: string,
+    connection: Pool | PoolConnection = this.pool,
+  ): Promise<{ version: number; acceptedAt: string } | null> {
+    const [rows] = await connection.execute<LatestAcceptanceRow[]>(
+      `SELECT d.version, a.accepted_at
+       FROM community_rule_acceptances a
+       JOIN community_rule_documents d ON d.id = a.document_id
+       WHERE a.user_id = ? AND a.community_id = ?
+       ORDER BY d.version DESC
+       LIMIT 1`,
+      [userId, communityId],
+    );
+    const latest = rows[0];
+    return latest
+      ? {
+          version: latest.version,
+          acceptedAt: new Date(latest.accepted_at).toISOString(),
+        }
+      : null;
+  }
+
   // Resolves the document and its community_id in the same statement, so the
   // stored community can never drift from the document, and the database
-  // clock sets accepted_at. Repeating an acceptance keeps the original time.
-  // Returns false when the community has no document with that version.
-  // Relies on mysql2's default FOUND_ROWS flag, which counts a repeated
-  // acceptance as a matched row.
+  // clock sets accepted_at. Only the current (highest) version matches, so a
+  // stale version can never be recorded, even if a newer one is published
+  // between a caller's check and this insert. Repeating an acceptance keeps
+  // the original time. Returns false when that version is not the community's
+  // current one, including when the community has no rules. Relies on
+  // mysql2's default FOUND_ROWS flag, which counts a repeated acceptance as a
+  // matched row.
   async accept(
     userId: string,
     communityId: string,
@@ -83,6 +116,10 @@ export class CommunityRuleAcceptanceService {
        SELECT ?, d.id, d.community_id
        FROM community_rule_documents d
        WHERE d.community_id = ? AND d.version = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM community_rule_documents newer
+           WHERE newer.community_id = d.community_id AND newer.version > d.version
+         )
        ON DUPLICATE KEY UPDATE accepted_at = accepted_at`,
       [userId, communityId, version],
     );

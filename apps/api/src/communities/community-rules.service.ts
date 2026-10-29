@@ -13,6 +13,7 @@ import type {
   RowDataPacket,
 } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { CommunityRuleAcceptanceService } from './community-rule-acceptance.service';
 import { hashCommunityRules, CommunityRuleItem } from './community-rules-hash';
 import { ListRuleVersionsDto } from './dto/list-rule-versions.dto';
 import { PublishCommunityRulesDto } from './dto/publish-community-rules.dto';
@@ -78,9 +79,83 @@ export function canPublishCommunityRules(
   return community.creator_id === actorId;
 }
 
+export interface RuleAcceptanceDto {
+  current_version: number | null;
+  accepted_version: number | null;
+  accepted_at: string | null;
+  acceptance_required: boolean;
+}
+
 @Injectable()
 export class CommunityRulesService {
-  constructor(@Inject(MYSQL_POOL) private readonly pool: Pool) {}
+  constructor(
+    @Inject(MYSQL_POOL) private readonly pool: Pool,
+    private readonly acceptanceService: CommunityRuleAcceptanceService,
+  ) {}
+
+  // The caller's own acceptance state. Requires no membership, so someone
+  // deciding whether to join can see what they would be agreeing to.
+  async getAcceptance(
+    name: string,
+    userId: string,
+  ): Promise<RuleAcceptanceDto> {
+    const community = await this.getCommunity(this.pool, name);
+    return this.acceptanceDto(userId, community.id);
+  }
+
+  // Records acceptance of the version the client displayed. The version is
+  // required and must be current; it is never derived here, so a user cannot
+  // be bound to rules published after they read them. Neither requires nor
+  // creates membership. `created` is false when the user had already
+  // accepted that version, which leaves the original accepted_at in place.
+  async accept(
+    name: string,
+    userId: string,
+    version: number,
+  ): Promise<{ created: boolean; acceptance: RuleAcceptanceDto }> {
+    const community = await this.getCommunity(this.pool, name);
+
+    // FOUND_ROWS makes a repeated insert report a matched row, so whether
+    // this is new is decided before writing.
+    const before = await this.acceptanceService.getState(userId, community.id);
+    const alreadyAccepted =
+      before.currentVersion === version && before.acceptedAt !== null;
+
+    if (
+      !alreadyAccepted &&
+      !(await this.acceptanceService.accept(userId, community.id, version))
+    ) {
+      // Nothing matched: re-read to report why.
+      const state = await this.acceptanceService.getState(userId, community.id);
+      throw new ConflictException(
+        state.currentVersion === null
+          ? 'This community has no published rules to accept'
+          : `Version ${version} is not the current rules version (${state.currentVersion})`,
+      );
+    }
+
+    return {
+      created: !alreadyAccepted,
+      acceptance: await this.acceptanceDto(userId, community.id),
+    };
+  }
+
+  private async acceptanceDto(
+    userId: string,
+    communityId: string,
+  ): Promise<RuleAcceptanceDto> {
+    const state = await this.acceptanceService.getState(userId, communityId);
+    const latest = await this.acceptanceService.getLatestAcceptance(
+      userId,
+      communityId,
+    );
+    return {
+      current_version: state.currentVersion,
+      accepted_version: latest?.version ?? null,
+      accepted_at: latest?.acceptedAt ?? null,
+      acceptance_required: state.acceptanceRequired,
+    };
+  }
 
   async getCurrent(name: string): Promise<CommunityRulesDto> {
     const community = await this.getCommunity(this.pool, name);

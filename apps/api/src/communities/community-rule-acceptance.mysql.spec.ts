@@ -174,6 +174,14 @@ integration('community rule acceptances (MySQL)', () => {
       acceptanceRequired: true,
     });
 
+    // Version 1 still exists but is no longer current, so it cannot be
+    // (re)accepted.
+    const before = (await acceptances()).length;
+    await expect(service.accept('member-a', 'with-rules', 1)).resolves.toBe(
+      false,
+    );
+    expect(await acceptances()).toHaveLength(before);
+
     await expect(service.accept('member-a', 'with-rules', 2)).resolves.toBe(
       true,
     );

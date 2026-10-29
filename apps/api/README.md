@@ -1591,8 +1591,9 @@ value.
 #### Rule acceptances
 
 `community_rule_acceptances` (migration `012_create_community_rule_acceptances`)
-records which rule document each user accepted and when. No endpoint reads or
-writes it yet.
+records which rule document each user accepted and when. Users read and record
+their own acceptance through the routes in
+[Rule acceptance API](#rule-acceptance-api).
 
 - The key is `(user_id, document_id)`: one row per user per version. Accepting
   the same version again is a no-op that keeps the original `accepted_at`, and
@@ -1626,11 +1627,21 @@ so they can run inside the caller's transaction.
   users who accepted the previous one.
 - `accept(userId, communityId, version)` inserts
   `SELECT ?, d.id, d.community_id FROM community_rule_documents d WHERE
-  d.community_id = ? AND d.version = ?` with
-  `ON DUPLICATE KEY UPDATE accepted_at = accepted_at`. It returns `false` when
-  that community has no such version, which callers map to their error
-  response. A repeated acceptance still returns `true`, which relies on
-  mysql2's default `FOUND_ROWS` connection flag; do not disable it on the pool.
+  d.community_id = ? AND d.version = ?`, restricted by `NOT EXISTS` to the
+  community's highest version, with
+  `ON DUPLICATE KEY UPDATE accepted_at = accepted_at`. Only the current
+  version can be accepted, so a version published between a caller's check
+  and the insert can never leave a stale acceptance behind. It returns `false`
+  when that version is not the community's current one, including when the
+  community has no rules, which callers map to their error response. A
+  repeated acceptance still returns `true`, which relies on mysql2's default
+  `FOUND_ROWS` connection flag; do not disable it on the pool. Because of that
+  flag the result cannot tell a new acceptance from a repeat; a caller that
+  needs to know, like `POST .../rules/acceptance`, reads `getState` first.
+- `getLatestAcceptance(userId, communityId)` returns the highest version the
+  user has accepted for the community and when, or `null`. It may be older
+  than the current version, which is how a client can tell the user the rules
+  changed since they agreed.
 
 **Grandfathering.** Migration `012` records an acceptance of each backfilled
 version 1 document for every subscriber of that community at migration time
@@ -1648,6 +1659,93 @@ The MySQL-backed tests in
 and `012` over a fixture and exercise these rules; they run with
 `MYSQL_INTEGRATION_TEST=true` and `MYSQL_*` credentials that may create a
 scratch database.
+
+#### Rule acceptance API
+
+Two routes on `CommunityRulesController` let a user see and record their own
+acceptance. Both require a bearer token, take the user only from it (no route
+or body field can name another user), and count against the global API rate
+limits, reads and writes respectively; neither is exempt and there is no
+dedicated bucket, because acceptance happens once per version. Like other
+routes without `@AllowRestricted()`, a suspended or banned account receives
+`403`.
+
+**Nothing is enforced yet.** A missing acceptance blocks nothing until the
+enforcement change lands. These routes ship first so clients can be built and
+exercised while enforcement is reviewed.
+
+`GET /communities/:name/rules/acceptance` returns:
+
+```json
+{
+  "current_version": 2,
+  "accepted_version": 1,
+  "accepted_at": "2026-10-20T12:00:00.000Z",
+  "acceptance_required": true
+}
+```
+
+- `current_version` is the community's current rules version, or `null` when
+  it has published none.
+- `accepted_version` is the highest version this user has accepted, and
+  `accepted_at` when; both are `null` if they have accepted none. Reporting the
+  version rather than only a boolean lets a client say "the rules have changed
+  since you agreed" instead of showing an unexplained prompt.
+- `acceptance_required` is `true` until the user accepts the current version,
+  and always `false` for a community without published rules.
+
+It returns `400` for an invalid community name, `404` for an unknown community,
+and `401` without a token. It requires no membership: someone deciding whether
+to join must be able to see what they would be agreeing to.
+
+`POST /communities/:name/rules/acceptance` takes `{ "version": 2 }` and
+returns the same body, updated:
+
+| Status | When                                                                                                 |
+| ------ | ---------------------------------------------------------------------------------------------------- |
+| `201`  | The acceptance was recorded.                                                                         |
+| `200`  | The user had already accepted that version; nothing is written and the original `accepted_at` stays. |
+| `400`  | Invalid community name; `version` missing, not a JSON integer, or below 1; or any other body field.   |
+| `401`  | No valid token.                                                                                      |
+| `404`  | Unknown community.                                                                                   |
+| `409`  | `Version N is not the current rules version (M)`: `version` is older or newer than the current one.  |
+| `409`  | `This community has no published rules to accept`.                                                   |
+
+Every `400`, `404` and `409` writes nothing. The two `409` messages are
+distinct so a client can tell "reload the rules" from "there is nothing to
+accept".
+
+**`version` is required and must be current.** The client names the version
+it displayed, and the server refuses anything else rather than recording
+whatever is current. Otherwise a user could be bound to rules published
+between reading them and submitting: "I agree to what I read" would become "I
+agree to whatever is current", which is exactly what versioned acceptance
+exists to prevent. Do not simplify this into a server-derived version. Because
+`CommunityRuleAcceptanceService.accept` matches only the current version in
+the insert itself, a version published mid-request also produces `409`, never
+a stale acceptance. `version` must be a JSON number; `"2"` and `true` are
+rejected rather than coerced.
+
+**Repeats are idempotent and keep history.** A second acceptance of the same
+version returns `200` and leaves the original row and `accepted_at` untouched,
+so a repeated submit never rewrites when the user agreed. `user_id` comes from
+the token, and `document_id` and `community_id` are derived by the insert,
+never taken from the request.
+
+**Acceptance neither requires nor creates membership.** Enforcement will make
+joining conditional on having accepted, so acceptance must be reachable by a
+non-member or joining becomes impossible. The intended client flow is two
+deliberate calls: accept the rules, then `POST /communities/:name/subscribe`.
+
+**Only real changes require reacceptance.** Publishing a new version makes
+`acceptance_required` true again for everyone, while earlier acceptance rows
+stay on record. A publish whose items hash equal to the current document
+creates no version (see [Rules API](#rules-api)), so it never forces
+reacceptance.
+
+Accepting writes no `admin_actions` entry: the audit log is for
+platform-administrative actions, and the acceptance row is itself the durable,
+timestamped record.
 
 `communities.rules` is retained for now: `POST /communities` still writes it and
 the community DTO still returns it, unchanged. The column and the DTO field are
