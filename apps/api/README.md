@@ -1466,12 +1466,66 @@ one rule at position `1` titled `Community rules` whose body is the legacy text
 verbatim. Communities with `NULL`, empty, or whitespace-only rules get no
 document and have no rules to accept.
 
-Existing members are grandfathered for the backfilled version only: once rule
-acceptance is introduced, the migration that creates the acceptance table must
-record an acceptance of each backfilled v1 document for every current
-subscriber and the community creator (an implicit member), because members were never shown those rules as a condition of
-joining. Every version published after migration `009` requires explicit
-acceptance.
+#### Rule acceptances
+
+`community_rule_acceptances` (migration `012_create_community_rule_acceptances`)
+records which rule document each user accepted and when. No endpoint reads or
+writes it yet.
+
+- The key is `(user_id, document_id)`: one row per user per version. Accepting
+  the same version again is a no-op that keeps the original `accepted_at`, and
+  accepting a newer version adds a row, so every version a user ever accepted
+  stays on record. A per-community key would overwrite the previous acceptance
+  and destroy that history.
+- A mutable `accepted` flag on the membership row was rejected because it
+  would keep reading `true` after the rules change, pointing at text the user
+  never saw. The version must be part of the record.
+- `community_id` is denormalised from the document so that "communities this
+  user accepted rules for" is a single-table, index-served query. It is always
+  copied from the document in the same statement that resolves the document,
+  never taken from a request. `accepted_at` is always set by the database
+  clock.
+- Acceptance cannot be withdrawn; there is no revocation column. A user who no
+  longer agrees leaves the community.
+- Deleting the user, the document, or the community deletes the acceptance.
+
+`CommunityRuleAcceptanceService` (exported by `CommunitiesModule`) owns the
+only queries on this table; participation checks and endpoints must use it
+rather than restating the SQL. Both methods take an optional `PoolConnection`
+so they can run inside the caller's transaction.
+
+- `getState(userId, communityId)` returns `currentVersion`,
+  `currentDocumentId`, `acceptedAt`, and `acceptanceRequired`. The current
+  document is the highest `version`, never the latest `published_at`, so a
+  clock anomaly cannot change the answer. **A community with no published rule
+  document requires no acceptance**; this keeps every community without rules
+  working. Otherwise acceptance is required until the user has accepted the
+  current version, so publishing a new version requires it again even from
+  users who accepted the previous one.
+- `accept(userId, communityId, version)` inserts
+  `SELECT ?, d.id, d.community_id FROM community_rule_documents d WHERE
+  d.community_id = ? AND d.version = ?` with
+  `ON DUPLICATE KEY UPDATE accepted_at = accepted_at`. It returns `false` when
+  that community has no such version, which callers map to their error
+  response. A repeated acceptance still returns `true`, which relies on
+  mysql2's default `FOUND_ROWS` connection flag; do not disable it on the pool.
+
+**Grandfathering.** Migration `012` records an acceptance of each backfilled
+version 1 document for every subscriber of that community at migration time
+and for its creator (an implicit member who wrote the legacy rules). Members
+were never shown the legacy rules as a condition of joining, and blocking all
+of them retroactively would be a regression. At migration time the only
+documents that can exist are migration `009`'s backfill, so nothing else is
+grandfathered. Users who join afterwards, and every version published after
+the migration, require explicit acceptance. Grandfathered rows carry the
+migration time as `accepted_at` and cannot otherwise be told apart from
+explicit acceptances.
+
+The MySQL-backed tests in
+`src/communities/community-rule-acceptance.mysql.spec.ts` run migrations `009`
+and `012` over a fixture and exercise these rules; they run with
+`MYSQL_INTEGRATION_TEST=true` and `MYSQL_*` credentials that may create a
+scratch database.
 
 `communities.rules` is retained for now: `POST /communities` still writes it and
 the community DTO still returns it, unchanged. The column and the DTO field are

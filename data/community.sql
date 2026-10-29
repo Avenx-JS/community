@@ -113,6 +113,19 @@ CREATE TABLE community_rules (
     FOREIGN KEY (document_id) REFERENCES community_rule_documents(id) ON DELETE CASCADE
 );
 
+CREATE TABLE community_rule_acceptances (
+    user_id VARCHAR(36) NOT NULL,
+    document_id VARCHAR(36) NOT NULL,
+    community_id VARCHAR(36) NOT NULL,
+    accepted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, document_id),
+    INDEX idx_community_rule_acceptances_user_community (user_id, community_id, accepted_at),
+    INDEX idx_community_rule_acceptances_document (document_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (document_id) REFERENCES community_rule_documents(id) ON DELETE CASCADE,
+    FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE
+);
+
 CREATE TABLE posts (
     id VARCHAR(36) PRIMARY KEY,
     title VARCHAR(300) NOT NULL,
@@ -279,4 +292,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('008_add_report_analytics_indexes'),
     ('009_create_community_rule_documents'),
     ('010_create_notifications'),
-    ('011_create_community_notification_preferences');
+    ('011_create_community_notification_preferences'),
+    ('012_create_community_rule_acceptances');
