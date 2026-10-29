@@ -7,11 +7,15 @@ import { resolve } from 'node:path';
 import {
   createConnection,
   type Connection,
+  type ResultSetHeader,
   type RowDataPacket,
 } from 'mysql2/promise';
 import { ListNotificationsDto } from './dto/list-notifications.dto';
 import {
   buildNotificationListQuery,
+  DELETE_NOTIFICATION_SQL,
+  MARK_ALL_READ_SQL,
+  MARK_READ_SQL,
   UNREAD_COUNT_SQL,
 } from './notification-inbox.service';
 
@@ -109,5 +113,50 @@ integration('notification inbox query plans (MySQL)', () => {
     await expect(explainKey(sql, values)).resolves.toBe(
       'idx_notifications_recipient_type',
     );
+  });
+
+  it('serves read-all from (recipient_id, read_at, created_at)', async () => {
+    await expect(explainKey(MARK_ALL_READ_SQL, ['recipient-7'])).resolves.toBe(
+      'idx_notifications_recipient_unread',
+    );
+  });
+
+  it('locates single-row writes by primary key', async () => {
+    await expect(
+      explainKey(MARK_READ_SQL, ['n-7', 'recipient-7']),
+    ).resolves.toBe('PRIMARY');
+    await expect(
+      explainKey(DELETE_NOTIFICATION_SQL, ['n-7', 'recipient-7']),
+    ).resolves.toBe('PRIMARY');
+  });
+
+  it('keeps read_at on a repeated read and counts the row as matched', async () => {
+    const [first] = await connection.query<ResultSetHeader>(MARK_READ_SQL, [
+      'n-8',
+      'recipient-8',
+    ]);
+    const [[before]] = await connection.query<RowDataPacket[]>(
+      "SELECT read_at FROM notifications WHERE id = 'n-8'",
+    );
+    await connection.query('DO SLEEP(1.1)');
+    const [repeat] = await connection.query<ResultSetHeader>(MARK_READ_SQL, [
+      'n-8',
+      'recipient-8',
+    ]);
+    const [[after]] = await connection.query<RowDataPacket[]>(
+      "SELECT read_at FROM notifications WHERE id = 'n-8'",
+    );
+
+    // mysql2's default FOUND_ROWS flag: an unchanged matched row still
+    // reports as affected, so the service does not mistake it for a 404.
+    expect(first.affectedRows).toBe(1);
+    expect(repeat.affectedRows).toBe(1);
+    expect(after.read_at).toEqual(before.read_at);
+
+    const [foreign] = await connection.query<ResultSetHeader>(MARK_READ_SQL, [
+      'n-8',
+      'recipient-9',
+    ]);
+    expect(foreign.affectedRows).toBe(0);
   });
 });

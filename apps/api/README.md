@@ -1933,9 +1933,8 @@ Success returns HTTP `201`:
 Notifications are stored in the `notifications` table (migration
 `010_create_notifications`) and written only through `NotificationsService`
 (see [Writing notifications](#writing-notifications)), and read through the
-routes in [Inbox API](#inbox-api). No producer calls the service yet, and the
-state-changing inbox routes (mark read or unread, mark all read, delete) are
-added separately. Each row belongs
+routes in [Inbox API](#inbox-api), which also mark notifications read or
+unread and dismiss them. No producer calls the service yet. Each row belongs
 to one `recipient_id` and records one event: `type`, the optional `actor_id`,
 the triggering `subject_type`/`subject_id`, an optional `community_id`, a
 `metadata` snapshot, `read_at`, and `created_at`.
@@ -2177,28 +2176,104 @@ returns `404`. **Reading a notification does not mark it read.** Marking read
 is an explicit client action owned by the state-changing routes, which keeps
 the badge truthful when a client prefetches.
 
-**Restricted accounts can read their inbox.** All three routes are marked
-`@AllowRestricted()`, so an account under an active suspension or ban can
-reach them. Otherwise the user who most needs "your account was suspended,
-here is the type and expiry" would be the one user who cannot read it. This
-discloses nothing new: `AuthGuard`'s own `403` already returns the restriction
-type and expiry, and moderation notifications carry no moderator identity.
-State-changing notification routes must not be marked `@AllowRestricted()`.
+**Restricted accounts can read their inbox but not change it.** The three read
+routes are marked `@AllowRestricted()`, so an account under an active
+suspension or ban can reach them. Otherwise the user who most needs "your
+account was suspended, here is the type and expiry" would be the one user who
+cannot read it. This discloses nothing new: `AuthGuard`'s own `403` already
+returns the restriction type and expiry, and moderation notifications carry no
+moderator identity. The state-changing routes below are deliberately not
+marked: a restricted account needs to read why it is restricted, not to write,
+and keeping every write blocked keeps the restriction's meaning simple. They
+answer `403` with the restriction payload. A controller test lists which
+handlers are in each group, so a new route must be placed in one on purpose.
+
+#### Changing notification state
+
+All three routes require a bearer token (`401` without one), take the owner
+only from it, and use the same ownership rule as the reads. Each runs one
+statement scoped by `recipient_id`, and a row that does not exist or belongs
+to someone else is `404` either way. **No second query is issued** to tell the
+two apart, so a response can never confirm that another user's notification
+exists. An invalid ID returns `400`.
+
+| Route                          | Body                | Success                           | Errors                         |
+| ------------------------------ | ------------------- | --------------------------------- | ------------------------------ |
+| `PATCH /notifications/:id`     | `{ "read": true }`  | `200` with the notification       | `400`, `401`, `403`, `404`     |
+| `POST /notifications/read-all` | none                | `200` with `{ "updated": 12 }`    | `400`, `401`, `403`            |
+| `DELETE /notifications/:id`    | none                | `204`, no body                    | `400`, `401`, `403`, `404`     |
+
+`PATCH /notifications/:id` takes `{ "read": true }` or `{ "read": false }` and
+returns the notification in the listing's item shape. `read` is a required
+boolean; a missing or non-boolean value, a client-supplied `read_at`, or any
+other property returns `400` and writes nothing. `read: true` runs
+`UPDATE notifications SET read_at = COALESCE(read_at, UTC_TIMESTAMP()) WHERE
+id = ? AND recipient_id = ?`, so `read_at` comes from the database clock and a
+repeat keeps the original time: **marking read is idempotent and never
+refreshes the timestamp**, because when the user read it is the only thing the
+column records. `read: false` sets `read_at` to `NULL`, and the notification
+counts as unread again. Both statements match the row whether or not it
+changes, because mysql2's default `FOUND_ROWS` flag reports a matched row as
+affected; `affectedRows = 0` therefore means only "not yours or missing". Do
+not disable that flag on the pool.
+
+One `PATCH` with a boolean replaces separate `.../read` and `.../unread` routes:
+the operation sets one field on a resource the caller owns, which a partial
+update expresses exactly, and one handler keeps one ownership check instead of
+two that can drift. Marking unread exists so that a one-click "read" can be
+undone; it adds no state the column cannot already express.
+
+`POST /notifications/read-all` runs `UPDATE notifications SET read_at =
+UTC_TIMESTAMP() WHERE recipient_id = ? AND read_at IS NULL` and returns
+`{ "updated": n }`, the number of rows that were unread. The `read_at IS NULL`
+predicate keeps existing timestamps and makes a repeat return
+`{ "updated": 0 }`, as does an empty inbox. It is a `POST` because it is an
+action over a collection the caller does not otherwise address, like
+`POST /auth/logout-all`. **It takes no filters**: any body or query parameter,
+including `type` or `community_id`, returns `400`. A filtered bulk write would
+be an unbounded update whose scope the client decides, and nothing in the
+product needs one; a filtered variant would need its own route and bounds.
+
+The statement's row count is unbounded: a long-lived account could hold tens of
+thousands of unread rows, all locked by one statement. No mitigation is
+applied, because the update is driven by `idx_notifications_recipient_unread`,
+scoped to one recipient, and contends with nothing (only the owner writes
+their own rows). If retention or chunking is ever introduced, this is the
+statement to revisit.
+
+`DELETE /notifications/:id` dismisses one notification and returns `204` with
+no body; it then disappears from the listing and the unread count, and a
+second delete returns `404`. **Dismissal is a hard delete**, not a
+`dismissed_at` flag. A notification is a derived convenience record; the
+durable history lives in `admin_actions` for moderation decisions,
+`user_reports` for reports, and the content tables for posts and replies. A
+soft delete would add a second predicate to every inbox query and the unread
+count for no reader. The consequence is accepted: a user who deletes "your
+account was suspended" cannot get it back, while `user_restrictions` remains
+the record of truth and the admin surface still shows it.
+
+**There is no bulk delete.** Nothing needs one, and deleting everything is a
+destructive unbounded write that deserves a deliberate decision rather than
+arriving as a convenience.
 
 **Indexes.** Each query keeps a prefix of one of migration `010`'s indexes:
 the listing uses `idx_notifications_recipient_created`, the unread filter and
 unread count use `idx_notifications_recipient_unread`, and the type filter
-uses `idx_notifications_recipient_type`. The `community_id` filter, and `read`
-combined with `type`, are served by the recipient prefix and filtered from
-there. `src/notifications/notification-inbox.mysql.spec.ts` checks the plans
+uses `idx_notifications_recipient_type`, and `read-all` uses
+`idx_notifications_recipient_unread`; the single-row writes locate their row
+by primary key. The `community_id` filter, and `read` combined with `type`,
+are served by the recipient prefix and filtered from there. `src/notifications/notification-inbox.mysql.spec.ts` checks the plans
 with `EXPLAIN` against migration `010`; it runs with
 `MYSQL_INTEGRATION_TEST=true` and `MYSQL_*` credentials that may create a
 scratch database.
 
-**Rate limits.** The routes use the global read buckets (120 reads and 300
-requests per IP per minute) and are not exempt. Polling `unread-count` every
-30 seconds costs two requests a minute; if a dashboard pattern later exceeds
-the bucket, add an explicit documented override rather than a bypass.
+**Rate limits.** The read routes use the global read buckets (120 reads and
+300 requests per IP per minute), and the state-changing routes the write
+buckets (60 per IP and 120 per account per minute, comfortably above a human
+rate while bounding a runaway client). None is exempt and none has a dedicated
+bucket. Polling `unread-count` every 30 seconds costs two requests a minute; if
+a dashboard pattern later exceeds a bucket, add an explicit documented override
+rather than a bypass.
 
 **Real-time delivery is a non-goal.** There is no WebSocket, SSE, or event-bus
 support in the API, and adding a transport would be a new architectural

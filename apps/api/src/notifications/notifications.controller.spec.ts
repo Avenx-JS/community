@@ -83,20 +83,27 @@ describe('NotificationsController', () => {
     expect(inbox.findOne).toHaveBeenCalledWith('user-a', 'notification-1');
   });
 
-  it('marks exactly the three read routes as reachable while restricted', () => {
+  // Restricted accounts may read their inbox but never change it; a new
+  // handler must be added to one of these lists deliberately.
+  it('lets restricted accounts reach exactly the read routes', () => {
     const prototype = NotificationsController.prototype;
     const handlers = Object.getOwnPropertyNames(prototype).filter(
       (name) => name !== 'constructor',
     );
+    const allowsRestricted = (name: string): unknown =>
+      Reflect.getMetadata(
+        ALLOW_RESTRICTED,
+        Object.getOwnPropertyDescriptor(prototype, name)?.value as object,
+      );
+    const reads = ['findOne', 'list', 'unreadCount'];
+    const writes = ['markAllRead', 'remove', 'update'];
 
-    expect(handlers.sort()).toEqual(['findOne', 'list', 'unreadCount']);
-    for (const name of handlers) {
-      expect(
-        Reflect.getMetadata(
-          ALLOW_RESTRICTED,
-          Object.getOwnPropertyDescriptor(prototype, name)?.value as object,
-        ),
-      ).toBe(true);
+    expect(handlers.sort()).toEqual([...reads, ...writes].sort());
+    for (const name of reads) {
+      expect([name, allowsRestricted(name)]).toEqual([name, true]);
+    }
+    for (const name of writes) {
+      expect([name, allowsRestricted(name)]).toEqual([name, undefined]);
     }
   });
 });

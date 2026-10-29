@@ -7,6 +7,10 @@ import { MYSQL_POOL } from '../auth/auth.service';
 import { ListNotificationsDto } from './dto/list-notifications.dto';
 import {
   buildNotificationListQuery,
+  DELETE_NOTIFICATION_SQL,
+  MARK_ALL_READ_SQL,
+  MARK_READ_SQL,
+  MARK_UNREAD_SQL,
   NotificationInboxService,
   toNotificationDto,
   UNREAD_COUNT_SQL,
@@ -267,6 +271,102 @@ describe('NotificationInboxService', () => {
       expect(
         toNotificationDto(row({ read_at: '2026-10-23T09:30:00.000Z' })).read_at,
       ).toBe('2026-10-23T09:30:00.000Z');
+    });
+  });
+
+  describe('setRead', () => {
+    it('marks read with the database clock, keeping an existing read_at', async () => {
+      const readAt = new Date('2026-10-23T09:30:00.000Z');
+      results = [{ affectedRows: 1 } as never, [row({ read_at: readAt })]];
+
+      const result = await service.setRead('user-a', 'notification-1', true);
+
+      expect(calls[0]).toEqual({
+        sql: MARK_READ_SQL,
+        values: ['notification-1', 'user-a'],
+      });
+      expect(MARK_READ_SQL).toBe(
+        'UPDATE notifications SET read_at = COALESCE(read_at, UTC_TIMESTAMP()) WHERE id = ? AND recipient_id = ?',
+      );
+      expect(calls[1].sql).toContain('WHERE id = ? AND recipient_id = ?');
+      expect(calls[1].values).toEqual(['notification-1', 'user-a']);
+      expect(result.read_at).toBe('2026-10-23T09:30:00.000Z');
+    });
+
+    it('marks unread by clearing read_at for the owner only', async () => {
+      results = [{ affectedRows: 1 } as never, [row({ read_at: null })]];
+
+      const result = await service.setRead('user-a', 'notification-1', false);
+
+      expect(calls[0]).toEqual({
+        sql: 'UPDATE notifications SET read_at = NULL WHERE id = ? AND recipient_id = ?',
+        values: ['notification-1', 'user-a'],
+      });
+      expect(MARK_UNREAD_SQL).toBe(calls[0].sql);
+      expect(result.read_at).toBeNull();
+    });
+
+    it.each([true, false])(
+      'answers 404 with no follow-up query when nothing matched (read=%s)',
+      async (read) => {
+        results = [{ affectedRows: 0 } as never];
+
+        await expect(
+          service.setRead('user-a', 'belongs-to-user-b', read),
+        ).rejects.toBeInstanceOf(NotFoundException);
+        expect(calls).toHaveLength(1);
+      },
+    );
+  });
+
+  describe('markAllRead', () => {
+    it('updates only the caller unread rows and reports the count', async () => {
+      results = [{ affectedRows: 12 } as never];
+
+      await expect(service.markAllRead('user-a')).resolves.toEqual({
+        updated: 12,
+      });
+      expect(calls).toEqual([
+        {
+          sql: 'UPDATE notifications SET read_at = UTC_TIMESTAMP() WHERE recipient_id = ? AND read_at IS NULL',
+          values: ['user-a'],
+        },
+      ]);
+      expect(MARK_ALL_READ_SQL).toBe(calls[0].sql);
+    });
+
+    it('reports zero when nothing was unread', async () => {
+      results = [{ affectedRows: 0 } as never];
+
+      await expect(service.markAllRead('user-a')).resolves.toEqual({
+        updated: 0,
+      });
+    });
+  });
+
+  describe('remove', () => {
+    it('deletes only a row owned by the caller', async () => {
+      results = [{ affectedRows: 1 } as never];
+
+      await expect(
+        service.remove('user-a', 'notification-1'),
+      ).resolves.toBeUndefined();
+      expect(calls).toEqual([
+        {
+          sql: 'DELETE FROM notifications WHERE id = ? AND recipient_id = ?',
+          values: ['notification-1', 'user-a'],
+        },
+      ]);
+      expect(DELETE_NOTIFICATION_SQL).toBe(calls[0].sql);
+    });
+
+    it('answers 404 with no follow-up query for a missing or foreign row', async () => {
+      results = [{ affectedRows: 0 } as never];
+
+      await expect(
+        service.remove('user-a', 'belongs-to-user-b'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(calls).toHaveLength(1);
     });
   });
 });

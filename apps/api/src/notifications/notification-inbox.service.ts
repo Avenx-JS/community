@@ -1,5 +1,5 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import type { Pool, RowDataPacket } from 'mysql2/promise';
+import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { ListNotificationsDto } from './dto/list-notifications.dto';
 import {
@@ -150,9 +150,26 @@ export function buildNotificationListQuery(
 export const UNREAD_COUNT_SQL =
   'SELECT COUNT(*) AS unread FROM notifications WHERE recipient_id = ? AND read_at IS NULL';
 
-// Read side of the inbox. Every method takes the recipient from the
-// authenticated request; nothing here accepts a recipient from client input.
-// Reads never modify read_at.
+// COALESCE keeps an existing read_at, so marking read again never refreshes
+// when the user read it. Both statements match the row whether or not it
+// changes: mysql2's default FOUND_ROWS flag reports a matched row as affected,
+// so affectedRows = 0 means only that no row with this id is the caller's.
+export const MARK_READ_SQL =
+  'UPDATE notifications SET read_at = COALESCE(read_at, UTC_TIMESTAMP()) WHERE id = ? AND recipient_id = ?';
+export const MARK_UNREAD_SQL =
+  'UPDATE notifications SET read_at = NULL WHERE id = ? AND recipient_id = ?';
+// Served by (recipient_id, read_at, created_at); the read_at IS NULL
+// predicate keeps existing timestamps and makes a repeat update nothing.
+export const MARK_ALL_READ_SQL =
+  'UPDATE notifications SET read_at = UTC_TIMESTAMP() WHERE recipient_id = ? AND read_at IS NULL';
+export const DELETE_NOTIFICATION_SQL =
+  'DELETE FROM notifications WHERE id = ? AND recipient_id = ?';
+
+// The inbox. Every method takes the recipient from the authenticated request;
+// nothing here accepts a recipient from client input. Reads never modify
+// read_at. Writes are scoped by recipient_id in the statement itself, and a
+// row that is missing or another user's is the same 404, decided without any
+// further query, so a response can never confirm that a row exists.
 @Injectable()
 export class NotificationInboxService {
   constructor(@Inject(MYSQL_POOL) private readonly pool: Pool) {}
@@ -197,5 +214,45 @@ export class NotificationInboxService {
       throw new NotFoundException('Notification not found');
     }
     return toNotificationDto(row);
+  }
+
+  // Marks one notification read or unread and returns it. Idempotent in both
+  // directions; a repeated read keeps the original read_at.
+  async setRead(
+    recipientId: string,
+    id: string,
+    read: boolean,
+  ): Promise<NotificationDto> {
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      read ? MARK_READ_SQL : MARK_UNREAD_SQL,
+      [id, recipientId],
+    );
+    if (result.affectedRows === 0) {
+      throw new NotFoundException('Notification not found');
+    }
+    return this.findOne(recipientId, id);
+  }
+
+  // No filters by design: the only bulk action is "everything of mine". The
+  // row count is unbounded, but the statement is index-driven, scoped to one
+  // recipient, and contends with nothing (see "Inbox API" in README.md).
+  async markAllRead(recipientId: string): Promise<{ updated: number }> {
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      MARK_ALL_READ_SQL,
+      [recipientId],
+    );
+    return { updated: result.affectedRows };
+  }
+
+  // A hard delete: notifications are derived records, and the durable history
+  // lives in admin_actions, user_reports and the content tables.
+  async remove(recipientId: string, id: string): Promise<void> {
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      DELETE_NOTIFICATION_SQL,
+      [id, recipientId],
+    );
+    if (result.affectedRows === 0) {
+      throw new NotFoundException('Notification not found');
+    }
   }
 }

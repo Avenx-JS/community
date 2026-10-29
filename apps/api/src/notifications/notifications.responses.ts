@@ -80,3 +80,11 @@ export class UnreadCountResponse implements UnreadCountDto {
   @ApiProperty({ type: 'integer' })
   unread!: number;
 }
+
+export class ReadAllNotificationsResponse {
+  @ApiProperty({
+    type: 'integer',
+    description: 'How many unread notifications were marked read.',
+  })
+  updated!: number;
+}

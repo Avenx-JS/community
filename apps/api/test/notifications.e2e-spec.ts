@@ -10,6 +10,12 @@ import { AuthRateLimitService } from '../src/auth/auth-rate-limit.service';
 import { AuthService, MYSQL_POOL } from '../src/auth/auth.service';
 import { ApiRateLimitInterceptor } from '../src/common/api-rate-limit.interceptor';
 import { SafeApiExceptionFilter } from '../src/common/safe-api-exception.filter';
+import {
+  DELETE_NOTIFICATION_SQL,
+  MARK_ALL_READ_SQL,
+  MARK_READ_SQL,
+  MARK_UNREAD_SQL,
+} from '../src/notifications/notification-inbox.service';
 
 interface NotificationFixture {
   id: string;
@@ -81,6 +87,11 @@ describe('Notification inbox endpoints (e2e)', () => {
   let notifications: NotificationFixture[];
   let queries: Array<{ sql: string; values: unknown[] }>;
   let rateLimitCalls: Array<{ method: string; path: string }>;
+  let databaseClock: number;
+  const nextDatabaseTime = () => {
+    databaseClock += 60_000;
+    return new Date(databaseClock);
+  };
 
   const server = () => app.getHttpServer();
   const get = (path: string, token?: string) => {
@@ -93,6 +104,7 @@ describe('Notification inbox endpoints (e2e)', () => {
   beforeEach(async () => {
     queries = [];
     rateLimitCalls = [];
+    databaseClock = Date.UTC(2026, 9, 23, 9, 0, 0);
     // 12 rows for user A sharing timestamps in pairs, so ordering relies on
     // the id tiebreaker; every third one is read.
     notifications = Array.from({ length: 12 }, (_, index) => ({
@@ -199,8 +211,53 @@ describe('Notification inbox endpoints (e2e)', () => {
         });
       });
     };
+    // Each write is emulated with MySQL semantics: the database clock sets
+    // read_at, COALESCE keeps an existing value, and with mysql2's default
+    // FOUND_ROWS flag affectedRows counts matched rows, changed or not.
+    const owned = (id: unknown, recipientId: unknown) =>
+      notifications.filter(
+        (row) => row.id === id && row.recipient_id === recipientId,
+      );
+    const writes: Record<string, (values: unknown[]) => number> = {
+      [MARK_READ_SQL]: ([id, recipientId]) => {
+        const rows = owned(id, recipientId);
+        for (const row of rows) {
+          row.read_at ??= nextDatabaseTime();
+        }
+        return rows.length;
+      },
+      [MARK_UNREAD_SQL]: ([id, recipientId]) => {
+        const rows = owned(id, recipientId);
+        for (const row of rows) {
+          row.read_at = null;
+        }
+        return rows.length;
+      },
+      [MARK_ALL_READ_SQL]: ([recipientId]) => {
+        const rows = notifications.filter(
+          (row) => row.recipient_id === recipientId && row.read_at === null,
+        );
+        const now = nextDatabaseTime();
+        for (const row of rows) {
+          row.read_at = now;
+        }
+        return rows.length;
+      },
+      [DELETE_NOTIFICATION_SQL]: ([id, recipientId]) => {
+        const before = notifications.length;
+        notifications = notifications.filter(
+          (row) => !(row.id === id && row.recipient_id === recipientId),
+        );
+        return before - notifications.length;
+      },
+    };
+
     const execute = (sql: string, values: unknown[]) => {
       queries.push({ sql, values });
+      const write = writes[sql];
+      if (write) {
+        return Promise.resolve([{ affectedRows: write(values) }, []]);
+      }
       if (/\bJOIN\b|UPDATE|INSERT|DELETE/i.test(sql)) {
         throw new Error(`Unexpected statement: ${sql}`);
       }
@@ -532,5 +589,190 @@ describe('Notification inbox endpoints (e2e)', () => {
       { method: 'GET', path: '/notifications/unread-count' },
       { method: 'GET', path: '/notifications/a-00' },
     ]);
+  });
+
+  describe('state changes', () => {
+    const patch = (id: string, body: unknown, token?: string) => {
+      const pending = request(server())
+        .patch(`/notifications/${id}`)
+        .send(body as object);
+      return token ? pending.set('Authorization', `Bearer ${token}`) : pending;
+    };
+    const readAll = (token?: string, body?: object, query = '') => {
+      const pending = request(server()).post(`/notifications/read-all${query}`);
+      if (body) {
+        pending.send(body);
+      }
+      return token ? pending.set('Authorization', `Bearer ${token}`) : pending;
+    };
+    const remove = (id: string, token?: string) => {
+      const pending = request(server()).delete(`/notifications/${id}`);
+      return token ? pending.set('Authorization', `Bearer ${token}`) : pending;
+    };
+    const unread = async (token = 'token-a') =>
+      (
+        (await get('/notifications/unread-count', token).expect(200)).body as {
+          unread: number;
+        }
+      ).unread;
+    const row = (id: string) => notifications.find((entry) => entry.id === id);
+    const writeCount = () =>
+      queries.filter((query) => /^(UPDATE|DELETE)/.test(query.sql)).length;
+
+    it('returns 401 without a valid token for every write route', async () => {
+      await patch('a-01', { read: true }).expect(401);
+      await readAll().expect(401);
+      await remove('a-01').expect(401);
+      await patch('a-01', { read: true }, 'invalid-token').expect(401);
+      expect(queries).toHaveLength(0);
+    });
+
+    it('tracks read, unread and read again in the unread count', async () => {
+      const before = await unread();
+
+      const read = await patch('a-01', { read: true }, 'token-a').expect(200);
+      const firstReadAt = (read.body as NotificationItem).read_at;
+      expect(firstReadAt).toBe('2026-10-23T09:01:00.000Z');
+      expect(read.body).toMatchObject({ id: 'a-01', type: 'community_post' });
+      expect(await unread()).toBe(before - 1);
+
+      const again = await patch('a-01', { read: true }, 'token-a').expect(200);
+      expect((again.body as NotificationItem).read_at).toBe(firstReadAt);
+      expect(row('a-01')?.read_at?.toISOString()).toBe(firstReadAt);
+
+      const cleared = await patch('a-01', { read: false }, 'token-a').expect(
+        200,
+      );
+      expect((cleared.body as NotificationItem).read_at).toBeNull();
+      expect(await unread()).toBe(before);
+
+      const reread = await patch('a-01', { read: true }, 'token-a').expect(200);
+      expect((reread.body as NotificationItem).read_at).toBe(
+        '2026-10-23T09:02:00.000Z',
+      );
+      expect(await unread()).toBe(before - 1);
+    });
+
+    it.each([
+      {},
+      { read: 'true' },
+      { read: 1 },
+      { read: null },
+      { read: true, read_at: '2026-01-01T00:00:00.000Z' },
+      { read_at: null },
+      { read: true, recipient_id: 'user-b' },
+    ])('rejects body %o with 400 and writes nothing', async (body) => {
+      await patch('a-01', body, 'token-a').expect(400);
+      expect(writeCount()).toBe(0);
+      expect(row('a-01')?.read_at).toBeNull();
+    });
+
+    it('answers 404 for missing or foreign rows with one statement and no change', async () => {
+      queries = [];
+      await patch('does-not-exist', { read: true }, 'token-a').expect(404);
+      await patch('b-secret', { read: true }, 'token-a').expect(404);
+      await remove('b-secret', 'token-a').expect(404);
+      await remove('does-not-exist', 'token-a').expect(404);
+
+      // One owner-scoped statement each; nothing asks whether the id exists.
+      expect(queries).toHaveLength(4);
+      expect(queries.every((query) => /^(UPDATE|DELETE)/.test(query.sql))).toBe(
+        true,
+      );
+      expect(row('b-secret')).toMatchObject({ read_at: null });
+
+      await patch('bad%20id', { read: true }, 'token-a').expect(400);
+      await remove('bad%20id', 'token-a').expect(400);
+    });
+
+    it('marks all of the caller unread rows read, once', async () => {
+      const keptReadAt = row('a-00')?.read_at;
+      const expected = await unread();
+
+      await readAll('token-a').expect(200, { updated: expected });
+      expect(await unread()).toBe(0);
+      expect(row('a-00')?.read_at).toEqual(keptReadAt);
+      expect(row('b-secret')?.read_at).toBeNull();
+      expect(await unread('token-b')).toBe(1);
+
+      await readAll('token-a').expect(200, { updated: 0 });
+      await readAll('token-empty').expect(200, { updated: 0 });
+    });
+
+    it.each([
+      [{ type: 'post_comment' }, ''],
+      [{ community_id: 'community-1' }, ''],
+      [{ recipient_id: 'user-b' }, ''],
+      [undefined, '?type=post_comment'],
+      [undefined, '?community_id=community-1'],
+    ])('rejects read-all with body %o and query %p', async (body, query) => {
+      await readAll('token-a', body, query).expect(400);
+      expect(writeCount()).toBe(0);
+    });
+
+    it('deletes a notification so it leaves the listing and the count', async () => {
+      const before = await unread();
+
+      const response = await remove('a-01', 'token-a').expect(204);
+      expect(response.text).toBe('');
+
+      const listing = await get('/notifications?limit=100', 'token-a').expect(
+        200,
+      );
+      expect(ids(listing.body)).not.toContain('a-01');
+      expect(await unread()).toBe(before - 1);
+      await get('/notifications/a-01', 'token-a').expect(404);
+      await remove('a-01', 'token-a').expect(404);
+    });
+
+    it('never lets one account change or delete another account rows', async () => {
+      const before = structuredClone(
+        notifications.filter((entry) => entry.recipient_id === 'user-b'),
+      );
+
+      await patch('b-secret', { read: true }, 'token-a').expect(404);
+      await patch('b-secret', { read: false }, 'token-a').expect(404);
+      await readAll('token-a').expect(200);
+      await remove('b-secret', 'token-a').expect(404);
+
+      expect(
+        notifications.filter((entry) => entry.recipient_id === 'user-b'),
+      ).toEqual(before);
+      await patch('b-secret', { read: true }, 'token-b').expect(200);
+    });
+
+    it('refuses every write for restricted accounts while reads still work', async () => {
+      for (const token of ['token-suspended', 'token-banned']) {
+        await patch('suspended-notice', { read: true }, token).expect(403);
+        await readAll(token).expect(403);
+        await remove('suspended-notice', token).expect(403);
+        await get('/notifications', token).expect(200);
+      }
+      expect(writeCount()).toBe(0);
+      expect(row('suspended-notice')).toMatchObject({ read_at: null });
+    });
+
+    it('never returns private fields and stays rate limited', async () => {
+      rateLimitCalls = [];
+      const responses = [
+        await patch('a-01', { read: true }, 'token-a'),
+        await readAll('token-a'),
+        await remove('a-02', 'token-a'),
+      ];
+
+      expect(responses.map((response) => response.status)).toEqual([
+        200, 200, 204,
+      ]);
+      for (const response of responses) {
+        expect(response.text).not.toMatch(
+          /email|password|private-|session|refresh_token|actor_id/i,
+        );
+      }
+      expect(rateLimitCalls).toEqual([
+        { method: 'PATCH', path: '/notifications/a-01' },
+        { method: 'POST', path: '/notifications/read-all' },
+        { method: 'DELETE', path: '/notifications/a-02' },
+      ]);
+    });
   });
 });
