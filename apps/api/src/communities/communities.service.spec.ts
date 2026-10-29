@@ -174,4 +174,86 @@ describe('CommunitiesService', () => {
       ),
     ).toBe(false);
   });
+
+  it('lists only the given user subscriptions, newest first, with paging', async () => {
+    results = [
+      [
+        {
+          id: 'community-1',
+          name: 'gardening',
+          description: 'Growing plants',
+          subscribed_at: new Date('2026-10-21T09:00:00.000Z'),
+        },
+      ],
+      [{ total: 7 }],
+    ];
+
+    const result = await service.listSubscriptions('user-1', {
+      page: 3,
+      limit: 2,
+    });
+
+    expect(result).toEqual({
+      items: [
+        {
+          community: {
+            id: 'community-1',
+            name: 'gardening',
+            description: 'Growing plants',
+          },
+          subscribed_at: '2026-10-21T09:00:00.000Z',
+        },
+      ],
+      page: 3,
+      limit: 2,
+      total: 7,
+    });
+    expect(queries[0].sql).toContain('WHERE s.user_id = ?');
+    expect(queries[0].sql).toContain(
+      'ORDER BY s.created_at DESC, s.community_id DESC LIMIT ? OFFSET ?',
+    );
+    expect(queries[0].values).toEqual(['user-1', 2, 4]);
+    expect(queries[1].sql).toContain('WHERE user_id = ?');
+    expect(queries[1].values).toEqual(['user-1']);
+  });
+
+  it('returns an empty subscription page with defaults', async () => {
+    results = [[], [{ total: 0 }]];
+
+    await expect(service.listSubscriptions('user-1', {})).resolves.toEqual({
+      items: [],
+      page: 1,
+      limit: 20,
+      total: 0,
+    });
+    expect(queries[0].values).toEqual(['user-1', 20, 0]);
+  });
+
+  it('reports whether the user is subscribed to a community', async () => {
+    results = [
+      [{ id: 'community-1' }],
+      [{ created_at: new Date('2026-10-21T09:00:00.000Z') }],
+    ];
+    await expect(
+      service.getSubscription('gardening', 'user-1'),
+    ).resolves.toEqual({
+      subscribed: true,
+      subscribed_at: '2026-10-21T09:00:00.000Z',
+    });
+    expect(queries[1].values).toEqual(['user-1', 'community-1']);
+
+    results = [[{ id: 'community-1' }], []];
+    await expect(
+      service.getSubscription('gardening', 'user-1'),
+    ).resolves.toEqual({ subscribed: false, subscribed_at: null });
+  });
+
+  it('returns not found for the subscription of an unknown community', async () => {
+    results = [[]];
+
+    await expect(
+      service.getSubscription('unknown', 'user-1'),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(queries).toHaveLength(1);
+  });
 });

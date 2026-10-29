@@ -11,6 +11,7 @@ import { MYSQL_POOL } from '../auth/auth.service';
 import { escapeLikeSearch } from '../common/like-search';
 import { CreateCommunityDto } from './dto/create-community.dto';
 import { ListCommunitiesDto } from './dto/list-communities.dto';
+import { ListSubscriptionsDto } from './dto/list-subscriptions.dto';
 
 interface CommunityRow extends RowDataPacket {
   id: string;
@@ -35,6 +36,30 @@ export interface CommunityListDto {
   page: number;
   limit: number;
   total: number;
+}
+
+interface SubscriptionRow extends RowDataPacket {
+  id: string;
+  name: string;
+  description: string | null;
+  subscribed_at: Date | string;
+}
+
+export interface SubscriptionDto {
+  community: { id: string; name: string; description: string | null };
+  subscribed_at: string;
+}
+
+export interface SubscriptionListDto {
+  items: SubscriptionDto[];
+  page: number;
+  limit: number;
+  total: number;
+}
+
+export interface SubscriptionStatusDto {
+  subscribed: boolean;
+  subscribed_at: string | null;
 }
 
 @Injectable()
@@ -129,6 +154,65 @@ export class CommunitiesService {
       'INSERT INTO community_subscriptions (user_id, community_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE created_at = created_at',
       [userId, communityId],
     );
+  }
+
+  async listSubscriptions(
+    userId: string,
+    query: ListSubscriptionsDto,
+  ): Promise<SubscriptionListDto> {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+    const offset = (page - 1) * limit;
+
+    const [subscriptions] = await this.pool.execute<SubscriptionRow[]>(
+      `SELECT c.id, c.name, c.description, s.created_at AS subscribed_at
+       FROM community_subscriptions s
+       JOIN communities c ON c.id = s.community_id
+       WHERE s.user_id = ?
+       ORDER BY s.created_at DESC, s.community_id DESC LIMIT ? OFFSET ?`,
+      [userId, limit, offset],
+    );
+    const [countRows] = await this.pool.execute<
+      (RowDataPacket & { total: number })[]
+    >(
+      'SELECT COUNT(*) AS total FROM community_subscriptions WHERE user_id = ?',
+      [userId],
+    );
+
+    return {
+      items: subscriptions.map((subscription) => ({
+        community: {
+          id: subscription.id,
+          name: subscription.name,
+          description: subscription.description,
+        },
+        subscribed_at: new Date(subscription.subscribed_at).toISOString(),
+      })),
+      page,
+      limit,
+      total: countRows[0].total,
+    };
+  }
+
+  async getSubscription(
+    name: string,
+    userId: string,
+  ): Promise<SubscriptionStatusDto> {
+    const communityId = await this.getCommunityId(name);
+    const [subscriptions] = await this.pool.execute<
+      (RowDataPacket & { created_at: Date | string })[]
+    >(
+      'SELECT created_at FROM community_subscriptions WHERE user_id = ? AND community_id = ? LIMIT 1',
+      [userId, communityId],
+    );
+    const subscription = subscriptions[0];
+
+    return subscription
+      ? {
+          subscribed: true,
+          subscribed_at: new Date(subscription.created_at).toISOString(),
+        }
+      : { subscribed: false, subscribed_at: null };
   }
 
   async unsubscribe(name: string, userId: string): Promise<void> {

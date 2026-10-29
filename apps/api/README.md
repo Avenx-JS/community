@@ -1226,6 +1226,56 @@ operation is safe: subscribing twice leaves one subscription, and unsubscribing
 when no subscription exists still returns `204`. An unknown community returns
 `404`.
 
+`GET /subscriptions` requires a bearer token and returns a page of the
+authenticated user's own subscriptions. The user is taken only from the
+validated token; the route accepts no user parameter, so one account cannot
+read another's subscriptions. It accepts `page` (`1-10000`, default `1`) and
+`limit` (`1-100`, default `20`); out-of-range, non-integer, or unknown query
+parameters return `400`. Results are ordered by subscription time descending,
+then community ID descending, so paging is stable. The response uses the
+standard collection envelope, and an account with no subscriptions receives
+`200` with an empty `items` array:
+
+```json
+{
+  "items": [
+    {
+      "community": {
+        "id": "community-id",
+        "name": "sample",
+        "description": null
+      },
+      "subscribed_at": "2026-10-22T08:00:00.000Z"
+    }
+  ],
+  "page": 1,
+  "limit": 20,
+  "total": 1
+}
+```
+
+Each item carries only the community fields a list view needs; `creator_id`
+and `rules` belong to the community detail response.
+
+`GET /communities/:name/subscription` requires a bearer token and reports
+whether the authenticated user is subscribed to that community:
+
+```json
+{ "subscribed": false, "subscribed_at": null }
+```
+
+When subscribed, `subscribed` is `true` and `subscribed_at` is the subscription
+time. A user who is not subscribed receives `200` with `subscribed: false`, not
+`404`: "am I subscribed?" has a valid negative answer, and the route uses `404`
+only for an unknown community, so the two cases stay distinguishable. Invalid
+community names return `400`.
+
+Both routes report the stored subscription row. The community creator is an
+implicit member (see below) but is reported as subscribed only if they have
+also subscribed. The routes report membership only and say nothing about
+notification delivery. Like every other route except `GET /health`, both count
+against the API read rate limits.
+
 ### Community roles and moderation
 
 Community membership is represented by `community_subscriptions`. The

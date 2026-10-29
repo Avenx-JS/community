@@ -53,6 +53,15 @@ export class CommunitiesController {
     return this.communitiesService.subscribe(name, request.user.id);
   }
 
+  @Get(':name/subscription')
+  @UseGuards(AuthGuard)
+  findSubscription(
+    @Param('name', new SafeRouteParamPipe('communityName')) name: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.communitiesService.getSubscription(name, request.user.id);
+  }
+
   @Delete(':name/subscribe')
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
