@@ -25,15 +25,21 @@ describe('migration ordering and application', () => {
     ).toEqual(['009_add_email', '010_add_role']);
   });
 
-  it('loads repository migrations in ascending order with 009 after 008', async () => {
+  it('loads repository migrations in ascending order, each version once', async () => {
     const versions = (
       await loadMigrations(resolve(__dirname, '../../../../data/migrations'))
     ).map(({ version }) => version);
+    const position = (version: string) => {
+      expect(versions).toContain(version);
+      return versions.indexOf(version);
+    };
 
-    expect(versions.slice(-2)).toEqual([
-      '008_add_report_analytics_indexes',
-      '009_create_community_rule_documents',
-    ]);
+    expect(position('009_create_community_rule_documents')).toBe(
+      position('008_add_report_analytics_indexes') + 1,
+    );
+    expect(position('010_create_notifications')).toBe(
+      position('009_create_community_rule_documents') + 1,
+    );
     expect(new Set(versions).size).toBe(versions.length);
   });
 

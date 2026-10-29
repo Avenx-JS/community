@@ -1398,6 +1398,87 @@ Success returns HTTP `201`:
 }
 ```
 
+## Notifications
+
+Notifications are stored in the `notifications` table (migration
+`010_create_notifications`). No endpoint reads them and nothing generates them
+yet; the inbox endpoints and producers are added separately. Each row belongs
+to one `recipient_id` and records one event: `type`, the optional `actor_id`,
+the triggering `subject_type`/`subject_id`, an optional `community_id`, a
+`metadata` snapshot, `read_at`, and `created_at`.
+
+| `type`                | Produced when                                                                                         | Subject                     |
+| --------------------- | ----------------------------------------------------------------------------------------------------- | --------------------------- |
+| `post_comment`        | someone comments on the recipient's post (`CommentsService.create`)                                   | the new comment             |
+| `comment_reply`       | someone replies to the recipient's comment (`CommentsService.create`)                                 | the new reply               |
+| `community_post`      | a post is created in a community the recipient belongs to (`PostsService.create`)                     | the new post                |
+| `report_resolved`     | a report the recipient filed reaches `resolved` or `rejected` (`AdminReportsService.updateStatus`)    | the report                  |
+| `restriction_applied` | the recipient is suspended or banned (`AdminRestrictionsService`)                                     | the restriction             |
+| `restriction_lifted`  | the recipient's restriction is lifted (`AdminRestrictionsService`)                                    | the restriction             |
+| `content_removed`     | a moderator removes the recipient's post or comment (`PostsService.remove`, `CommentsService.remove`) | the removed post or comment |
+
+Adding a type requires a migration, as for the other enums.
+
+**The subject is the triggering object**, not the object it happened to: a
+reply notification points at the new reply, not at the post or comment that
+was replied to. The unique key on
+`(recipient_id, type, subject_type, subject_id)` therefore identifies one event
+per recipient. Two replies to the same post are two subjects and two rows,
+while a retried write of the same event collides. Producers insert with
+`INSERT ... ON DUPLICATE KEY UPDATE id = id`, as for `community_subscriptions`,
+so generation is idempotent and safe to retry. Report and restriction states
+that produce a notification are terminal, so the key never hides a later,
+distinct event.
+
+**There is no foreign key on `subject_id`.** It is polymorphic, like
+`votes.target_id` and `admin_actions.target_id`, so a subject can be deleted
+while its notification survives (`content_removed` always refers to content
+that is gone). Readers must tolerate a missing subject and must never join to
+the subject, actor, or community to render a row; links to the subject are
+best effort. Rows are rendered from `type` and `metadata` alone.
+
+**`metadata` is an allowlisted snapshot** taken when the row is created, built
+only by `buildNotificationMetadata()` in
+`src/notifications/notification-metadata.ts`, never by serialising request or
+row data. Allowed keys depend on the type:
+
+- `post_comment`, `comment_reply`, `community_post`: `actor_username`,
+  `community_name`, `post_title`, `excerpt`.
+- `content_removed`: `community_name`, `post_title`, `excerpt`. The
+  moderator's username is never stored for moderation outcomes.
+- `report_resolved`, `restriction_applied`, `restriction_lifted`: none; these
+  render from `type` alone.
+
+Unknown keys are dropped and non-string values are rejected. `actor_username`
+and `community_name` must be 1-50 characters, matching their source columns;
+anything longer is rejected as a producer bug. `post_title` is truncated to
+120 and `excerpt` to 200 Unicode code points, ending in `…` when cut. Metadata
+that is not an object throws.
+
+**`read_at` is the read state.** `read_at IS NULL` is the unread predicate used
+by the unread filter and the unread count; a timestamp records when the row
+was read.
+
+`community_id` is set for community-scoped types and `NULL` for platform-level
+ones (`report_resolved`, `restriction_applied`, `restriction_lifted`). It is
+denormalised from the subject so an inbox can be filtered per community without
+polymorphic joins, and producers must derive it from the subject on the server,
+never from a request. Deleting the recipient deletes their notifications,
+deleting the actor sets `actor_id` to `NULL` (the snapshot keeps the username),
+and deleting a community deletes its community-scoped notifications.
+
+The indexes serve the inbox queries, all scoped to one recipient and newest
+first: `idx_notifications_recipient_created` for the listing,
+`idx_notifications_recipient_unread` for the unread filter and count, and
+`idx_notifications_recipient_type` for the type filter.
+
+Vote notifications are deliberately excluded: votes are high-volume and
+low-signal, and nothing in the product currently justifies them.
+
+There is no retention policy. The table grows without bound by design for now;
+a retention or archival policy is an open question to settle before inbox
+volume makes it pressing.
+
 ## Project setup
 
 ```bash
