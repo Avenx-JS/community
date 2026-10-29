@@ -39,6 +39,7 @@ describe('Community endpoints (e2e)', () => {
   let communities: TestCommunity[];
   let subscriptions: Set<string>;
   let subscribedAt: Map<string, Date>;
+  let preferences: Map<string, number>;
   let queryCalls: Array<{ sql: string; values: unknown[] }>;
 
   beforeEach(async () => {
@@ -70,6 +71,7 @@ describe('Community endpoints (e2e)', () => {
     ];
     subscriptions = new Set();
     subscribedAt = new Map();
+    preferences = new Map();
     queryCalls = [];
 
     const pool = {
@@ -115,6 +117,38 @@ describe('Community endpoints (e2e)', () => {
           subscriptions.delete(`${userId}:${communityId}`);
           subscribedAt.delete(`${userId}:${communityId}`);
           return [{ affectedRows: 1 }, []];
+        }
+
+        if (sql.startsWith('INSERT INTO community_notification_preferences')) {
+          const [userId, communityId, newPosts] = values as [
+            string,
+            string,
+            boolean,
+          ];
+          preferences.set(`${userId}:${communityId}`, newPosts ? 1 : 0);
+          return [{ affectedRows: 1 }, []];
+        }
+
+        if (
+          sql.startsWith('SELECT c.id,') &&
+          sql.includes('community_notification_preferences')
+        ) {
+          const [userId, , name] = values as [string, string, string];
+          const community = communities.find((entry) => entry.name === name);
+          if (!community) {
+            return [[], []];
+          }
+          const key = `${userId}:${community.id}`;
+          return [
+            [
+              {
+                id: community.id,
+                subscribed: subscriptions.has(key) ? 1 : 0,
+                new_posts: preferences.get(key) ?? null,
+              },
+            ],
+            [],
+          ];
         }
 
         if (sql.includes('FROM community_subscriptions s')) {
@@ -603,5 +637,135 @@ describe('Community endpoints (e2e)', () => {
       .get('/communities/board%27%20OR%201%3D1/subscription')
       .set('Authorization', 'Bearer valid-token')
       .expect(400);
+  });
+
+  describe('notification preferences', () => {
+    const endpoint = '/communities/gardening/notification-preferences';
+
+    it('requires authentication and validates the community name', async () => {
+      await request(app.getHttpServer()).get(endpoint).expect(401);
+      await request(app.getHttpServer())
+        .put(endpoint)
+        .send({ new_posts: false })
+        .expect(401);
+
+      for (const method of ['get', 'put'] as const) {
+        const unknown = await request(app.getHttpServer())
+          [method]('/communities/unknown/notification-preferences')
+          .set('Authorization', 'Bearer valid-token')
+          .send({ new_posts: false })
+          .expect(404);
+        expect((unknown.body as { message: string }).message).toBe(
+          'Community not found',
+        );
+        await request(app.getHttpServer())
+          [method](
+            '/communities/board%27%20OR%201%3D1/notification-preferences',
+          )
+          .set('Authorization', 'Bearer valid-token')
+          .send({ new_posts: false })
+          .expect(400);
+      }
+      expect(preferences.size).toBe(0);
+    });
+
+    it('reports defaults and membership without a stored preference', async () => {
+      const outsider = await request(app.getHttpServer())
+        .get(endpoint)
+        .set('Authorization', 'Bearer valid-token')
+        .expect(200);
+      expect(outsider.body).toEqual({ new_posts: true, subscribed: false });
+
+      seedSubscription(
+        'authenticated-user',
+        'community-a',
+        '2026-10-22T10:00:00.000Z',
+      );
+      const member = await request(app.getHttpServer())
+        .get(endpoint)
+        .set('Authorization', 'Bearer valid-token')
+        .expect(200);
+      expect(member.body).toEqual({ new_posts: true, subscribed: true });
+      expect(preferences.size).toBe(0);
+    });
+
+    it('stores a preference idempotently, also for a non-member', async () => {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const response = await request(app.getHttpServer())
+          .put(endpoint)
+          .set('Authorization', 'Bearer valid-token')
+          .send({ new_posts: false })
+          .expect(200);
+        expect(response.body).toEqual({ new_posts: false, subscribed: false });
+      }
+      expect([...preferences]).toEqual([['authenticated-user:community-a', 0]]);
+
+      const stored = await request(app.getHttpServer())
+        .get(endpoint)
+        .set('Authorization', 'Bearer valid-token')
+        .expect(200);
+      expect(stored.body).toEqual({ new_posts: false, subscribed: false });
+    });
+
+    it('rejects invalid bodies without writing', async () => {
+      for (const body of [
+        {},
+        { new_posts: 'false' },
+        { new_posts: null },
+        { new_posts: false, user_id: 'user-b' },
+        { new_posts: false, unexpected: true },
+      ]) {
+        await request(app.getHttpServer())
+          .put(endpoint)
+          .set('Authorization', 'Bearer valid-token')
+          .send(body)
+          .expect(400);
+      }
+      expect(preferences.size).toBe(0);
+      expect(
+        queryCalls.some((call) =>
+          call.sql.includes('community_notification_preferences'),
+        ),
+      ).toBe(false);
+    });
+
+    it('keeps each account preference separate', async () => {
+      await request(app.getHttpServer())
+        .put(endpoint)
+        .set('Authorization', 'Bearer valid-token')
+        .send({ new_posts: false })
+        .expect(200);
+
+      const other = await request(app.getHttpServer())
+        .get(endpoint)
+        .set('Authorization', 'Bearer other-token')
+        .expect(200);
+      expect(other.body).toEqual({ new_posts: true, subscribed: false });
+
+      await request(app.getHttpServer())
+        .put(endpoint)
+        .set('Authorization', 'Bearer other-token')
+        .send({ new_posts: true })
+        .expect(200);
+
+      const own = await request(app.getHttpServer())
+        .get(endpoint)
+        .set('Authorization', 'Bearer valid-token')
+        .expect(200);
+      expect(own.body).toEqual({ new_posts: false, subscribed: false });
+      expect(Object.fromEntries(preferences)).toEqual({
+        'authenticated-user:community-a': 0,
+        'user-b:community-a': 1,
+      });
+      expect(
+        queryCalls
+          .filter((call) =>
+            call.sql.startsWith(
+              'INSERT INTO community_notification_preferences',
+            ),
+          )
+          .map((call) => call.values[0]),
+      ).toEqual(['authenticated-user', 'user-b']);
+    });
   });
 });

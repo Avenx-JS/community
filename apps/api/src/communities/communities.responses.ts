@@ -6,6 +6,7 @@ import type {
   SubscriptionListDto,
   SubscriptionStatusDto,
 } from './communities.service';
+import type { NotificationPreferencesDto } from './notification-preferences.service';
 
 export class CommunityResponse implements CommunityDto {
   @ApiProperty()
@@ -77,6 +78,19 @@ export class SubscriptionListResponse implements SubscriptionListDto {
 
   @ApiProperty({ type: 'integer' })
   total!: number;
+}
+
+export class NotificationPreferencesResponse implements NotificationPreferencesDto {
+  @ApiProperty({
+    description:
+      'Effective setting; true unless muted. Delivers only while subscribed.',
+  })
+  new_posts!: boolean;
+
+  @ApiProperty({
+    description: 'Membership, which defines whether anything is delivered.',
+  })
+  subscribed!: boolean;
 }
 
 export class SubscriptionStatusResponse implements SubscriptionStatusDto {

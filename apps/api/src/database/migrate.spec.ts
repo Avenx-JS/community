@@ -40,6 +40,9 @@ describe('migration ordering and application', () => {
     expect(position('010_create_notifications')).toBe(
       position('009_create_community_rule_documents') + 1,
     );
+    expect(position('011_create_community_notification_preferences')).toBe(
+      position('010_create_notifications') + 1,
+    );
     expect(new Set(versions).size).toBe(versions.length);
   });
 

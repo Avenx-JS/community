@@ -1349,6 +1349,73 @@ No edit, lock, ban, or other moderator-only operations are exposed by this API
 yet; future such routes must enforce the same server-side, community-scoped
 checks.
 
+### Community notification preferences
+
+Membership defines the delivery scope for community-activity notifications,
+and a preference row is a mute switch inside that scope:
+
+- Only members of a community (rows in `community_subscriptions`) receive its
+  community-activity notifications. Joining opts a member in by default.
+- `community_notification_preferences` holds at most one row per user and
+  community (`new_posts`, `updated_at`). A missing row means `new_posts` is
+  enabled, so joining writes no preference and existing members needed no
+  backfill (migration `011_create_community_notification_preferences`).
+- Leaving a community stops its notifications regardless of any preference,
+  because delivery is driven by membership. Unsubscribing does not touch the
+  preference table; a leftover row has no effect, and it restores the member's
+  mute if they rejoin.
+- A preference never grants delivery to a non-member. Following a community
+  without joining it is deliberately not supported; it would be a separate
+  capability with its own questions about rule acceptance and visibility.
+- Deleting the user or the community deletes their preference rows.
+
+There is a single `new_posts` flag rather than a per-type matrix. New posts are
+the only notification frequent enough to need an off switch; replies and
+moderation outcomes follow from the user's own content or account. Another flag
+can be added later with a migration.
+
+`GET /communities/:name/notification-preferences` and
+`PUT /communities/:name/notification-preferences` require a bearer token and
+always act on the authenticated user's own preference. Both return:
+
+```json
+{ "new_posts": true, "subscribed": false }
+```
+
+`new_posts` is the effective value, resolved from the stored row or the
+default, so clients never need to know that a missing row means enabled.
+`subscribed` is included because nothing is delivered without membership:
+`new_posts: true` with `subscribed: false` delivers nothing. A user with no
+stored preference receives `200` with the defaults, not `404`.
+
+`PUT` takes the complete settings object, `{ "new_posts": false }`, where
+`new_posts` is a required boolean. It replaces the stored value with an upsert,
+so repeating it is safe and leaves one row. A missing or non-boolean
+`new_posts`, or any other property, returns `400` and writes nothing. A
+non-member may store a preference: it is kept but has no effect until they
+join. Both routes return `404` for an unknown community and `400` for an
+invalid community name.
+
+Notification producers must select community-activity recipients with this
+query (`COMMUNITY_NEW_POST_RECIPIENTS_SQL` in
+`src/communities/community-notification-recipients.ts`):
+
+```sql
+SELECT s.user_id
+FROM community_subscriptions s
+LEFT JOIN community_notification_preferences p
+       ON p.user_id = s.user_id AND p.community_id = s.community_id
+WHERE s.community_id = ? AND COALESCE(p.new_posts, TRUE) = TRUE
+```
+
+It selects members without a preference row and members with `new_posts`
+enabled, and excludes muted members and every non-member. Producers may add
+conditions, such as excluding the post's author, but must not drop these.
+`idx_community_notification_preferences_community` serves the join from the
+community side. A unit test keeps this text identical to the constant; with
+`MYSQL_INTEGRATION_TEST=true` and `MYSQL_*` credentials that may create a
+scratch database, the same test also checks the query against MySQL.
+
 ### Community rules
 
 Community rules are stored as immutable, versioned documents (migration

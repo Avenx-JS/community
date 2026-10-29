@@ -7,6 +7,7 @@ import {
   HttpStatus,
   Param,
   Post,
+  Put,
   Query,
   Req,
   UseGuards,
@@ -27,18 +28,24 @@ import {
 import {
   CommunityListResponse,
   CommunityResponse,
+  NotificationPreferencesResponse,
   SubscriptionStatusResponse,
 } from './communities.responses';
 import { CommunitiesService } from './communities.service';
+import { NotificationPreferencesService } from './notification-preferences.service';
 import { CreateCommunityDto } from './dto/create-community.dto';
 import { ListCommunitiesDto } from './dto/list-communities.dto';
 import { ManageModeratorDto } from './dto/manage-moderator.dto';
+import { UpdateNotificationPreferencesDto } from './dto/update-notification-preferences.dto';
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
 
 @ApiTags('communities')
 @Controller('communities')
 export class CommunitiesController {
-  constructor(private readonly communitiesService: CommunitiesService) {}
+  constructor(
+    private readonly communitiesService: CommunitiesService,
+    private readonly notificationPreferencesService: NotificationPreferencesService,
+  ) {}
 
   @Get()
   @ApiOperation({
@@ -125,6 +132,56 @@ export class CommunitiesController {
     @Req() request: AuthenticatedRequest,
   ) {
     return this.communitiesService.getSubscription(name, request.user.id);
+  }
+
+  @Get(':name/notification-preferences')
+  @UseGuards(AuthGuard)
+  @ApiOperation({
+    summary: 'Get your notification preferences for a community',
+    description:
+      'Returns the effective settings; a community you never configured ' +
+      'reports the defaults. Notifications are delivered only while ' +
+      'subscribed.',
+  })
+  @ApiAuthenticated()
+  @ApiRouteParam('name', 'communityName', 'Exact community name.')
+  @ApiOkResponse({ type: NotificationPreferencesResponse })
+  @ApiErrorResponses({
+    400: 'Invalid community name.',
+    404: 'Community not found.',
+  })
+  getNotificationPreferences(
+    @Param('name', new SafeRouteParamPipe('communityName')) name: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.notificationPreferencesService.get(name, request.user.id);
+  }
+
+  @Put(':name/notification-preferences')
+  @UseGuards(AuthGuard)
+  @ApiOperation({
+    summary: 'Replace your notification preferences for a community',
+    description:
+      'Idempotent. Allowed without membership: the setting is stored but ' +
+      'has no effect until you subscribe.',
+  })
+  @ApiAuthenticated()
+  @ApiRouteParam('name', 'communityName', 'Exact community name.')
+  @ApiOkResponse({ type: NotificationPreferencesResponse })
+  @ApiErrorResponses({
+    400: 'Invalid community name or preference data.',
+    404: 'Community not found.',
+  })
+  updateNotificationPreferences(
+    @Param('name', new SafeRouteParamPipe('communityName')) name: string,
+    @Body() body: UpdateNotificationPreferencesDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.notificationPreferencesService.update(
+      name,
+      request.user.id,
+      body,
+    );
   }
 
   @Delete(':name/subscribe')

@@ -79,6 +79,17 @@ CREATE TABLE community_moderators (
     FOREIGN KEY (assigned_by) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE community_notification_preferences (
+    user_id VARCHAR(36) NOT NULL,
+    community_id VARCHAR(36) NOT NULL,
+    new_posts BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, community_id),
+    INDEX idx_community_notification_preferences_community (community_id, new_posts),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE
+);
+
 CREATE TABLE community_rule_documents (
     id VARCHAR(36) PRIMARY KEY,
     community_id VARCHAR(36) NOT NULL,
@@ -267,4 +278,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('007_add_analytics_indexes'),
     ('008_add_report_analytics_indexes'),
     ('009_create_community_rule_documents'),
-    ('010_create_notifications');
+    ('010_create_notifications'),
+    ('011_create_community_notification_preferences');
