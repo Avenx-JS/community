@@ -42,6 +42,7 @@ export class UpdateReportStatusDto {
   @Validate(ReportResolutionMatchesStatusConstraint)
   status!: Exclude<ReportStatus, 'open'>;
 
+  /** Required when status is resolved; forbidden otherwise. */
   @IsOptional()
   @IsIn(reportResolutions)
   resolution?: ReportResolution;

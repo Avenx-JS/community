@@ -17,6 +17,7 @@ export class CreateCommentDto {
   @Validate(PlainTextConstraint)
   content!: string;
 
+  /** Comment being replied to; must belong to the same post. */
   @IsOptional()
   @IsString()
   @Length(1, 36)

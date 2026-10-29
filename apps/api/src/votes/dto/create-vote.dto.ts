@@ -1,3 +1,4 @@
+import { ApiProperty } from '@nestjs/swagger';
 import { IsIn, IsString, Length, Matches } from 'class-validator';
 
 export class CreateVoteDto {
@@ -9,6 +10,7 @@ export class CreateVoteDto {
   @Matches(/^[A-Za-z0-9_-]+$/)
   target_id!: string;
 
+  @ApiProperty({ type: 'integer', enum: [-1, 1] })
   @IsIn([-1, 1])
   value!: -1 | 1;
 }

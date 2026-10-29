@@ -1183,6 +1183,54 @@ forwarded headers by default. HSTS is configured for one year with
 The deployment must provide TLS at the trusted edge and restrict direct access
 to the API so clients cannot impersonate that proxy.
 
+## API documentation (OpenAPI)
+
+The API publishes an OpenAPI 3 document generated from the controllers and
+DTOs with `@nestjs/swagger`:
+
+- `GET /docs` serves Swagger UI. Use **Authorize** with an access token from
+  `POST /auth/login` to try authenticated routes; the token is not persisted
+  in the browser.
+- `GET /docs/openapi.json` and `GET /docs/openapi.yaml` serve the document
+  itself, for client generation or import into API tools.
+
+The documentation is served by default outside production and is off when
+`NODE_ENV=production`. `SWAGGER_ENABLED=true` or `false` overrides the default
+in either direction; any other value fails startup. The document describes
+every route, including administrative ones, so enable it in production only
+deliberately. The docs routes are not rate limited, and their pages get their
+own Content Security Policy (same-origin scripts and requests, inline styles),
+while every API route keeps the policy described under "Security headers and
+CORS".
+
+How the document is built, and what a new route needs:
+
+- **Request schemas** come from the DTO classes through the `@nestjs/swagger`
+  compiler plugin (`nest-cli.json`). It turns class-validator rules into schema
+  constraints (`@IsIn` to `enum`, `@Length` to `minLength`/`maxLength`,
+  `@Matches` to `pattern`, `@Min`/`@Max`) and JSDoc comments on properties into
+  descriptions, so rules are not duplicated. Jest applies the same plugin with
+  the same options through `swagger-plugin.transformer.js`. The plugin misreads
+  properties with initializers (`page = 1`) as required and does not map
+  `@IsInt`, so those properties carry an explicit `@ApiPropertyOptional`.
+  Cross-field rules, which the plugin cannot see, are described in JSDoc.
+- **Response schemas** are classes in each module's `*.responses.ts`. Each one
+  `implements` the service's response interface, so the compiler reports a
+  missing or mistyped field. Enums and count maps are built from the same
+  constants the services use.
+- **Each route** declares `@ApiTags`, `@ApiOperation`, its success response,
+  `@ApiAuthenticated()` when it uses `AuthGuard`, its route parameters with
+  `@ApiRouteParam` (the patterns enforced by `SafeRouteParamPipe`), and its
+  error statuses with `@ApiErrorResponses`. All errors use the
+  `ErrorResponse` schema; a suspended or banned account receives the
+  `RestrictedAccountResponse` 403 body instead. The 429 response is declared
+  once, globally.
+
+`src/common/swagger.spec.ts` builds the document from the full application
+and fails when a route is undocumented, lacks a summary, tag or typed success
+response, when bearer security does not match the route's `AuthGuard`, or
+when a schema property degrades to an untyped object.
+
 ## Communities
 
 `GET /communities` returns a page of communities in a stable order

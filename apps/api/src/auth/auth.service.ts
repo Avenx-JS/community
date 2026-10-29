@@ -14,7 +14,12 @@ import {
   scrypt as scryptCallback,
   timingSafeEqual,
 } from 'node:crypto';
-import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
+import type {
+  Pool,
+  PoolConnection,
+  ResultSetHeader,
+  RowDataPacket,
+} from 'mysql2/promise';
 import { ACTIVE_USER_RESTRICTION_PREDICATE } from '../common/active-user-restriction';
 import { readPositiveInteger } from '../common/read-positive-integer';
 
@@ -231,7 +236,8 @@ export class AuthService {
         restriction: {
           type: session.restriction_type,
           expires_at:
-            session.restriction_expires_at === null
+            session.restriction_expires_at === null ||
+            session.restriction_expires_at === undefined
               ? null
               : new Date(session.restriction_expires_at).toISOString(),
         },
@@ -327,14 +333,9 @@ export class AuthService {
 
   private async getActiveRestriction(
     userId: string,
-    executor: {
-      execute: (
-        sql: string,
-        values: unknown[],
-      ) => Promise<[ActiveRestrictionRow[], unknown]>;
-    } = this.pool,
+    executor: Pool | PoolConnection = this.pool,
   ): Promise<ActiveRestriction | null> {
-    const [rows] = await executor.execute(
+    const [rows] = await executor.execute<ActiveRestrictionRow[]>(
       `SELECT type, expires_at
        FROM user_restrictions
        WHERE user_id = ? AND ${ACTIVE_USER_RESTRICTION_PREDICATE}

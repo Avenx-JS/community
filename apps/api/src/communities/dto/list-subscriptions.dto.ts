@@ -1,7 +1,9 @@
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { IsInt, IsOptional, Max, Min } from 'class-validator';
 
 export class ListSubscriptionsDto {
+  @ApiPropertyOptional({ type: 'integer' })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -9,6 +11,7 @@ export class ListSubscriptionsDto {
   @Max(10000)
   page?: number;
 
+  @ApiPropertyOptional({ type: 'integer' })
   @IsOptional()
   @Type(() => Number)
   @IsInt()

@@ -11,24 +11,58 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import {
+  ApiCreatedResponse,
+  ApiNoContentResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 import { AuthGuard, type AuthenticatedRequest } from '../auth/auth.guard';
+import {
+  ApiAuthenticated,
+  ApiErrorResponses,
+  ApiRouteParam,
+} from '../common/openapi';
+import {
+  CommunityListResponse,
+  CommunityResponse,
+  SubscriptionStatusResponse,
+} from './communities.responses';
 import { CommunitiesService } from './communities.service';
 import { CreateCommunityDto } from './dto/create-community.dto';
 import { ListCommunitiesDto } from './dto/list-communities.dto';
 import { ManageModeratorDto } from './dto/manage-moderator.dto';
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
 
+@ApiTags('communities')
 @Controller('communities')
 export class CommunitiesController {
   constructor(private readonly communitiesService: CommunitiesService) {}
 
   @Get()
+  @ApiOperation({
+    summary: 'List communities',
+    description: 'Newest first, then by ID descending.',
+  })
+  @ApiOkResponse({ type: CommunityListResponse })
+  @ApiErrorResponses({ 400: 'Invalid query parameters.' })
   findAll(@Query() query: ListCommunitiesDto) {
     return this.communitiesService.findAll(query);
   }
 
   @Post()
   @UseGuards(AuthGuard)
+  @ApiOperation({
+    summary: 'Create a community',
+    description: 'The authenticated user becomes its creator.',
+  })
+  @ApiAuthenticated()
+  @ApiCreatedResponse({ type: CommunityResponse })
+  @ApiErrorResponses({
+    400: 'Invalid community data.',
+    409: 'Community name already exists.',
+  })
   create(
     @Body() body: CreateCommunityDto,
     @Req() request: AuthenticatedRequest,
@@ -37,6 +71,13 @@ export class CommunitiesController {
   }
 
   @Get(':name')
+  @ApiOperation({ summary: 'Get a community by name' })
+  @ApiRouteParam('name', 'communityName', 'Exact community name.')
+  @ApiOkResponse({ type: CommunityResponse })
+  @ApiErrorResponses({
+    400: 'Invalid community name.',
+    404: 'Community not found.',
+  })
   findOne(
     @Param('name', new SafeRouteParamPipe('communityName')) name: string,
   ) {
@@ -46,6 +87,17 @@ export class CommunitiesController {
   @Post(':name/subscribe')
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary: 'Subscribe to a community',
+    description: 'Idempotent.',
+  })
+  @ApiAuthenticated()
+  @ApiRouteParam('name', 'communityName', 'Exact community name.')
+  @ApiNoContentResponse({ description: 'The user is subscribed.' })
+  @ApiErrorResponses({
+    400: 'Invalid community name.',
+    404: 'Community not found.',
+  })
   subscribe(
     @Param('name', new SafeRouteParamPipe('communityName')) name: string,
     @Req() request: AuthenticatedRequest,
@@ -55,6 +107,19 @@ export class CommunitiesController {
 
   @Get(':name/subscription')
   @UseGuards(AuthGuard)
+  @ApiOperation({
+    summary: 'Get your subscription to a community',
+    description:
+      'Answers 200 with subscribed: false when not subscribed; 404 is ' +
+      'reserved for an unknown community.',
+  })
+  @ApiAuthenticated()
+  @ApiRouteParam('name', 'communityName', 'Exact community name.')
+  @ApiOkResponse({ type: SubscriptionStatusResponse })
+  @ApiErrorResponses({
+    400: 'Invalid community name.',
+    404: 'Community not found.',
+  })
   findSubscription(
     @Param('name', new SafeRouteParamPipe('communityName')) name: string,
     @Req() request: AuthenticatedRequest,
@@ -65,6 +130,17 @@ export class CommunitiesController {
   @Delete(':name/subscribe')
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary: 'Unsubscribe from a community',
+    description: 'Idempotent.',
+  })
+  @ApiAuthenticated()
+  @ApiRouteParam('name', 'communityName', 'Exact community name.')
+  @ApiNoContentResponse({ description: 'The user is not subscribed.' })
+  @ApiErrorResponses({
+    400: 'Invalid community name.',
+    404: 'Community not found.',
+  })
   unsubscribe(
     @Param('name', new SafeRouteParamPipe('communityName')) name: string,
     @Req() request: AuthenticatedRequest,
@@ -75,6 +151,23 @@ export class CommunitiesController {
   @Post(':name/moderators')
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary: 'Appoint a moderator',
+    description:
+      'Only the community creator may appoint, and only subscribed members ' +
+      'can be appointed. Idempotent.',
+  })
+  @ApiAuthenticated({
+    forbidden:
+      'The caller is not the community creator, or the user is not a ' +
+      'subscribed member.',
+  })
+  @ApiRouteParam('name', 'communityName', 'Exact community name.')
+  @ApiNoContentResponse({ description: 'The user is a moderator.' })
+  @ApiErrorResponses({
+    400: 'Invalid community name or username.',
+    404: 'Community or user not found.',
+  })
   addModerator(
     @Param('name', new SafeRouteParamPipe('communityName')) name: string,
     @Body() body: ManageModeratorDto,
@@ -90,6 +183,17 @@ export class CommunitiesController {
   @Delete(':name/moderators')
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary: 'Remove a moderator',
+    description: 'Only the community creator may remove. Idempotent.',
+  })
+  @ApiAuthenticated({ forbidden: 'The caller is not the community creator.' })
+  @ApiRouteParam('name', 'communityName', 'Exact community name.')
+  @ApiNoContentResponse({ description: 'The user is not a moderator.' })
+  @ApiErrorResponses({
+    400: 'Invalid community name or username.',
+    404: 'Community not found.',
+  })
   removeModerator(
     @Param('name', new SafeRouteParamPipe('communityName')) name: string,
     @Body() body: ManageModeratorDto,

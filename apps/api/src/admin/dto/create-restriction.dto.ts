@@ -1,3 +1,4 @@
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
   IsIn,
@@ -53,6 +54,8 @@ export class CreateRestrictionDto {
   @Validate(PlainTextConstraint)
   reason!: string;
 
+  /** Required for suspensions; must be omitted for bans. */
+  @ApiPropertyOptional({ type: 'integer' })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -60,6 +63,7 @@ export class CreateRestrictionDto {
   @Max(MAX_RESTRICTION_DURATION_HOURS)
   duration_hours?: number;
 
+  /** Report that prompted the restriction. */
   @IsOptional()
   @IsString()
   @Length(1, 36)

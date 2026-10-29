@@ -5,6 +5,7 @@ import { AppModule } from './app.module';
 import { ApiRateLimitInterceptor } from './common/api-rate-limit.interceptor';
 import { configureHttpSecurity } from './common/http-security';
 import { SafeApiExceptionFilter } from './common/safe-api-exception.filter';
+import { configureSwagger } from './common/swagger';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bodyParser: false });
@@ -20,6 +21,7 @@ async function bootstrap() {
       transform: true,
     }),
   );
+  configureSwagger(app);
   await app.listen(process.env.PORT ?? 3000);
 }
 void bootstrap();

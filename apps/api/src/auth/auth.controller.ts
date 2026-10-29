@@ -9,7 +9,23 @@ import {
   Res,
   UseGuards,
 } from '@nestjs/common';
+import {
+  ApiCreatedResponse,
+  ApiForbiddenResponse,
+  ApiNoContentResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 import type { Request, Response } from 'express';
+import {
+  ApiAuthenticated,
+  ApiErrorResponses,
+  ErrorResponse,
+  RestrictedAccountResponse,
+} from '../common/openapi';
+import { AuthTokensResponse } from './auth.responses';
 import { AuthGuard } from './auth.guard';
 import type { AuthenticatedRequest } from './auth.guard';
 import { AllowRestricted } from './allow-restricted.decorator';
@@ -19,6 +35,7 @@ import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { RefreshDto } from './dto/refresh.dto';
 
+@ApiTags('auth')
 @Controller('auth')
 export class AuthController {
   constructor(
@@ -27,6 +44,15 @@ export class AuthController {
   ) {}
 
   @Post('register')
+  @ApiOperation({
+    summary: 'Register an account',
+    description: 'Rate limited per client IP, username, and email.',
+  })
+  @ApiCreatedResponse({ type: AuthTokensResponse })
+  @ApiErrorResponses({
+    400: 'Invalid registration data.',
+    409: 'Registration could not be completed.',
+  })
   async register(
     @Body() body: RegisterDto,
     @Req() request: Request,
@@ -45,6 +71,22 @@ export class AuthController {
 
   @Post('login')
   @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Log in',
+    description:
+      'Accepts a username or email as identifier. Rate limited per client ' +
+      'IP and identifier.',
+  })
+  @ApiOkResponse({ type: AuthTokensResponse })
+  @ApiErrorResponses({ 400: 'Invalid login data.' })
+  @ApiUnauthorizedResponse({
+    type: ErrorResponse,
+    description: 'Invalid credentials.',
+  })
+  @ApiForbiddenResponse({
+    type: RestrictedAccountResponse,
+    description: 'The account is suspended or banned.',
+  })
   async login(
     @Body() body: LoginDto,
     @Req() request: Request,
@@ -62,6 +104,22 @@ export class AuthController {
 
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Rotate tokens',
+    description:
+      'Exchanges a refresh token for a new token pair. Each refresh token ' +
+      'is single-use; presenting a used one revokes the whole session.',
+  })
+  @ApiOkResponse({ type: AuthTokensResponse })
+  @ApiErrorResponses({ 400: 'Invalid refresh token format.' })
+  @ApiUnauthorizedResponse({
+    type: ErrorResponse,
+    description: 'Invalid, expired, or reused refresh token.',
+  })
+  @ApiForbiddenResponse({
+    type: RestrictedAccountResponse,
+    description: 'The account is suspended or banned.',
+  })
   async refresh(
     @Body() body: RefreshDto,
     @Req() request: Request,
@@ -81,6 +139,12 @@ export class AuthController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(AuthGuard)
   @AllowRestricted()
+  @ApiOperation({
+    summary: 'Log out this session',
+    description: 'Also available to suspended and banned accounts.',
+  })
+  @ApiAuthenticated({ allowRestricted: true })
+  @ApiNoContentResponse({ description: 'The current session is revoked.' })
   async logout(@Req() request: AuthenticatedRequest): Promise<void> {
     await this.authService.logout(request.accessToken);
   }
@@ -89,6 +153,14 @@ export class AuthController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(AuthGuard)
   @AllowRestricted()
+  @ApiOperation({
+    summary: 'Log out all sessions',
+    description: 'Also available to suspended and banned accounts.',
+  })
+  @ApiAuthenticated({ allowRestricted: true })
+  @ApiNoContentResponse({
+    description: 'All sessions of the user are revoked.',
+  })
   async logoutAll(@Req() request: AuthenticatedRequest): Promise<void> {
     await this.authService.logoutAll(request.user.id);
   }

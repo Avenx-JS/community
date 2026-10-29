@@ -1,3 +1,4 @@
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   IsIn,
@@ -28,14 +29,17 @@ export class ListUsersDto {
   @IsIn(['active', 'suspended', 'banned'])
   status?: 'active' | 'suspended' | 'banned';
 
+  @ApiPropertyOptional({ format: 'date-time' })
   @IsOptional()
   @IsISO8601()
   from?: string;
 
+  @ApiPropertyOptional({ format: 'date-time' })
   @IsOptional()
   @IsISO8601()
   to?: string;
 
+  @ApiPropertyOptional({ type: 'integer' })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -43,6 +47,7 @@ export class ListUsersDto {
   @Max(10000)
   page = 1;
 
+  @ApiPropertyOptional({ type: 'integer' })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -50,6 +55,7 @@ export class ListUsersDto {
   @Max(100)
   limit = 20;
 
+  @ApiPropertyOptional()
   @IsOptional()
   @IsIn(['new', 'oldest', 'username'])
   sort: 'new' | 'oldest' | 'username' = 'new';

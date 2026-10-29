@@ -67,6 +67,7 @@ export class CreatePostDto {
   @Transform(({ value }: { value: unknown }) =>
     typeof value === 'string' ? value.trim() : value,
   )
+  /** Text body, or an HTTP(S) URL for link and media posts. */
   @IsString()
   @IsNotEmpty()
   @MaxLength(16383)

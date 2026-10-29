@@ -1,3 +1,4 @@
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   IsIn,
@@ -17,6 +18,7 @@ export class ListPostsDto {
   @Matches(/^[A-Za-z0-9_-]+$/)
   community_id?: string;
 
+  @ApiPropertyOptional({ type: 'integer' })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -24,6 +26,7 @@ export class ListPostsDto {
   @Max(10000)
   page?: number;
 
+  @ApiPropertyOptional({ type: 'integer' })
   @IsOptional()
   @Type(() => Number)
   @IsInt()

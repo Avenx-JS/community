@@ -53,10 +53,12 @@ export class CreateReportDto {
   @Validate(PlainTextConstraint)
   description?: string;
 
+  /** Provide together with context_id. */
   @IsOptional()
   @IsIn(['post', 'comment'])
   context_type?: 'post' | 'comment';
 
+  /** Post or comment by the reported user; provide with context_type. */
   @IsOptional()
   @IsString()
   @Length(1, 36)

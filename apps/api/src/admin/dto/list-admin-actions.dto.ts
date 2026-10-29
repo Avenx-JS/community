@@ -1,3 +1,4 @@
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   IsIn,
@@ -45,6 +46,7 @@ export class ListAdminActionsDto {
   @IsIn(ADMIN_ACTION_TARGETS)
   target_type?: AdminActionTarget;
 
+  /** Requires target_type. */
   @IsOptional()
   @IsString()
   @Length(1, 36)
@@ -52,14 +54,17 @@ export class ListAdminActionsDto {
   @Validate(TargetIdRequiresTargetTypeConstraint)
   target_id?: string;
 
+  @ApiPropertyOptional({ format: 'date-time' })
   @IsOptional()
   @IsISO8601()
   from?: string;
 
+  @ApiPropertyOptional({ format: 'date-time' })
   @IsOptional()
   @IsISO8601()
   to?: string;
 
+  @ApiPropertyOptional({ type: 'integer' })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -67,6 +72,7 @@ export class ListAdminActionsDto {
   @Max(10000)
   page = 1;
 
+  @ApiPropertyOptional({ type: 'integer' })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -74,6 +80,7 @@ export class ListAdminActionsDto {
   @Max(100)
   limit = 20;
 
+  @ApiPropertyOptional()
   @IsOptional()
   @IsIn(['new', 'oldest'])
   sort: 'new' | 'oldest' = 'new';
