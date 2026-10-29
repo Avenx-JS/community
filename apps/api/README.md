@@ -1742,8 +1742,10 @@ Success returns HTTP `201`:
 ## Notifications
 
 Notifications are stored in the `notifications` table (migration
-`010_create_notifications`). No endpoint reads them and nothing generates them
-yet; the inbox endpoints and producers are added separately. Each row belongs
+`010_create_notifications`) and written only through `NotificationsService`
+(see [Writing notifications](#writing-notifications)). No endpoint reads them
+and no producer calls the service yet; the inbox endpoints and producers are
+added separately. Each row belongs
 to one `recipient_id` and records one event: `type`, the optional `actor_id`,
 the triggering `subject_type`/`subject_id`, an optional `community_id`, a
 `metadata` snapshot, `read_at`, and `created_at`.
@@ -1779,22 +1781,44 @@ the subject, actor, or community to render a row; links to the subject are
 best effort. Rows are rendered from `type` and `metadata` alone.
 
 **`metadata` is an allowlisted snapshot** taken when the row is created, built
-only by `buildNotificationMetadata()` in
+only by `buildNotificationMetadata(entry)` in
 `src/notifications/notification-metadata.ts`, never by serialising request or
-row data. Allowed keys depend on the type:
+row data. Because `subject_id` has no foreign key, the post or comment can be
+deleted while the notification survives, so the inbox renders from the row
+alone and the snapshot is what keeps it readable, as `admin_actions.actor_username`
+does for the audit log. Allowed keys depend on the type:
 
-- `post_comment`, `comment_reply`, `community_post`: `actor_username`,
-  `community_name`, `post_title`, `excerpt`.
-- `content_removed`: `community_name`, `post_title`, `excerpt`. The
-  moderator's username is never stored for moderation outcomes.
-- `report_resolved`, `restriction_applied`, `restriction_lifted`: none; these
-  render from `type` alone.
+| `type`                | Required keys                             | Optional keys                                           |
+| --------------------- | ----------------------------------------- | ------------------------------------------------------- |
+| `post_comment`        | `post_id`, `post_title`, `excerpt`        | `actor_username`, `community_name`                      |
+| `comment_reply`       | `post_id`, `parent_comment_id`, `excerpt` | `post_title`, `actor_username`, `community_name`        |
+| `community_post`      | `post_title`                              | `excerpt`, `actor_username`, `community_name`           |
+| `report_resolved`     | `status` (`resolved` or `rejected`)       | none                                                    |
+| `restriction_applied` | `restriction_type` (`suspension`, `ban`)  | `expires_at`, for a temporary suspension                |
+| `restriction_lifted`  | `restriction_type`                        | none                                                    |
+| `content_removed`     | none                                      | `community_name`, `post_title`, `excerpt`; never a name |
 
-Unknown keys are dropped and non-string values are rejected. `actor_username`
-and `community_name` must be 1-50 characters, matching their source columns;
-anything longer is rejected as a producer bug. `post_title` is truncated to
-120 and `excerpt` to 200 Unicode code points, ending in `…` when cut. Metadata
-that is not an object throws.
+"Required" is enforced by the `NotificationEntry` type; at runtime the
+allowlist validates whichever allowed keys are present.
+
+- Unknown keys, including keys allowed only for another type, are dropped,
+  not stored.
+- Metadata that is `null`, an array, or not an object throws `TypeError`, as
+  does a non-string value for an allowed key.
+- `post_id` and `parent_comment_id` must match `^[A-Za-z0-9_-]{1,36}$`, the
+  identifier pattern the audit log uses; `expires_at` must be an ISO-8601
+  instant (same regex-plus-`Date.parse` check as the audit log); `status` and
+  `restriction_type` must be one of their listed values. Anything else throws.
+- `actor_username` and `community_name` must be 1-50 characters, matching
+  their source columns; anything longer is rejected as a producer bug.
+- `post_title` is capped at 300 Unicode code points (the `posts.title` column
+  width) and `excerpt` at 200, taken from the start of the comment or post
+  body. Over-long values are cut by code point, never by byte, and end in `…`
+  within the cap, so multi-byte text is never split.
+- When nothing survives, the column stores SQL `NULL`, not `{}`.
+
+The `restriction_applied` snapshot carries only the type and expiry, matching
+what the restricted user is told elsewhere.
 
 **`read_at` is the read state.** `read_at IS NULL` is the unread predicate used
 by the unread filter and the unread count; a timestamp records when the row
@@ -1819,6 +1843,65 @@ low-signal, and nothing in the product currently justifies them.
 There is no retention policy. The table grows without bound by design for now;
 a retention or archival policy is an open question to settle before inbox
 volume makes it pressing.
+
+### Writing notifications
+
+`NotificationsService` (in `NotificationsModule`, which producer modules
+import) is the only code that inserts into `notifications`. Producers never
+write their own insert, so recipient rules, self-notification suppression, the
+metadata snapshot, and idempotency cannot drift between them. It deliberately
+mirrors `AuditLogService`:
+
+- `record(connection, entry)` writes on the caller's connection. Use it from
+  inside a transaction; the row commits or rolls back with the action.
+- `record(entry)` acquires a pool connection, writes, and releases the
+  connection in `finally`. Use it only when the caller has no transaction.
+- `recordMany(connection, entries)` is the fan-out form, for example one row
+  per member for a new post. It validates every entry first, then writes one
+  multi-row `INSERT` per `NOTIFICATION_BATCH_SIZE` (500) entries rather than
+  one round trip per recipient. It always takes the caller's connection, so a
+  multi-batch fan-out is atomic with the action. The producer decides between
+  this and a single `INSERT ... SELECT`, and owns the ceiling on how many
+  recipients one action may notify.
+
+Like `AuditLogService.record`, passing an entry where the connection belongs,
+or a connection where the entry belongs, throws `TypeError`.
+
+Entries are a discriminated union, `NotificationEntry`, so the compiler checks
+that each `type` has its `subjectType`, actor, community, and metadata fields;
+`notification-entry.types.spec.ts` runs the compiler to prove that mismatches
+fail. `assertNotificationEntry()` repeats the check at runtime, rejecting an
+unknown `type`, a `subject_type` that does not match it, a missing or extra
+actor or community, and malformed identifiers before anything is written.
+
+**Moderation notifications never carry an actor.** `report_resolved`,
+`restriction_applied`, `restriction_lifted`, and `content_removed` have
+`actorId: null` in the type, and an entry that names one is rejected, so
+`actor_id` is always `NULL` for them and their metadata has no username field.
+The affected user must not learn which moderator or administrator acted; the
+restriction response already withholds that, and the notification must not be
+the leak.
+
+**Self-notifications are suppressed centrally.** An entry whose `recipientId`
+equals its `actorId` is dropped without an insert or an error, including
+within a `recordMany` batch, so no producer needs its own check.
+
+**Writes are idempotent.** Every insert ends in
+`ON DUPLICATE KEY UPDATE id = id`, so repeating an event hits the unique key on
+`(recipient_id, type, subject_type, subject_id)` and leaves the existing row,
+including its metadata and `read_at`, unchanged. A retried action cannot fail
+on, or duplicate, its notification.
+
+**Transaction policy.** Producers pass their own connection, so a notification
+commits with the action that caused it, and a comment can never exist while
+its notification was lost. The cost is that a failed notification write rolls
+back the user's action. That is accepted because the write is one bounded
+insert whose only contention is its unique key, while writing after commit
+would silently drop notifications from an inbox whose purpose is not to lose
+them. This is the opposite of `AuthService.logoutAll`, which deliberately runs
+outside its transaction: token revocation has an independent enforcement
+backstop, and a notification has none. The same reasoning is recorded at the
+service; do not move notification writes after commit without revisiting it.
 
 ## Project setup
 
