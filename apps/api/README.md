@@ -1251,6 +1251,67 @@ No edit, lock, ban, or other moderator-only operations are exposed by this API
 yet; future such routes must enforce the same server-side, community-scoped
 checks.
 
+### Community rules
+
+Community rules are stored as immutable, versioned documents (migration
+`009_create_community_rule_documents`). No endpoint reads or writes them yet.
+
+- `community_rule_documents` holds one row per published version of a
+  community's rules: `version`, `content_hash`, `published_at`, and
+  `published_by`. `version` is a per-community counter starting at `1`, so a
+  community's history reads v1, v2, v3; the unique key on
+  `(community_id, version)` makes two concurrent publishes of the same version
+  impossible. The current document is the one with the highest `version` for
+  that community; there is deliberately no "current document" column on
+  `communities` that could disagree with these rows.
+- `community_rules` holds the ordered rule items of one document: `position`
+  (unique within the document), `title` (up to 200 characters), and an
+  optional `body`.
+
+Published documents and their rules are never updated. Changing a community's
+rules inserts a new document with the next `version`, so a future acceptance
+record that points at a document always resolves to exactly the rules that
+were accepted. Deleting a community deletes its documents and rules; deleting
+the publishing account keeps the document and sets `published_by` to `NULL`.
+
+`content_hash` is the lowercase hex SHA-256 of a canonical serialisation of
+the rule items. A publish whose hash equals the current document's hash leaves
+the effective rules unchanged, so it reuses that version instead of forcing
+every member to accept again. Only rule items are hashed: community name,
+description, and other metadata are outside the document, and editing them
+never requires reacceptance. The canonical form, implemented by
+`hashCommunityRules()` in `src/communities/community-rules-hash.ts`, is:
+
+- items sorted by ascending `position`, each serialised as
+  `position LF len(title) ":" title LF len(body) ":" body`, where `len` is the
+  UTF-8 byte length in decimal and a `NULL` body is the empty string;
+- items joined by a single LF, the result UTF-8 encoded and hashed.
+
+The byte-length prefixes keep the form unambiguous, so a body containing line
+breaks cannot hash the same as several separate rules. Values are hashed
+exactly as stored, without trimming; code that publishes rules must normalise
+input before both storing and hashing it. The migration backfill computes the
+same form in SQL with `SHA2()`, and a unit test pins both to a fixture digest
+produced by MySQL.
+
+The migration backfills one `version = 1` document for every community whose
+legacy `communities.rules` contains a non-whitespace character. The document is
+dated `communities.created_at`, attributed to the community creator, and has
+one rule at position `1` titled `Community rules` whose body is the legacy text
+verbatim. Communities with `NULL`, empty, or whitespace-only rules get no
+document and have no rules to accept.
+
+Existing members are grandfathered for the backfilled version only: once rule
+acceptance is introduced, the migration that creates the acceptance table must
+record an acceptance of each backfilled v1 document for every current
+subscriber and the community creator (an implicit member), because members were never shown those rules as a condition of
+joining. Every version published after migration `009` requires explicit
+acceptance.
+
+`communities.rules` is retained for now: `POST /communities` still writes it and
+the community DTO still returns it, unchanged. The column and the DTO field are
+retired separately.
+
 ## Posts
 
 `GET /posts` is public and returns `{ "items", "page", "limit", "total",

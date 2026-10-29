@@ -79,6 +79,29 @@ CREATE TABLE community_moderators (
     FOREIGN KEY (assigned_by) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE community_rule_documents (
+    id VARCHAR(36) PRIMARY KEY,
+    community_id VARCHAR(36) NOT NULL,
+    version INT UNSIGNED NOT NULL,
+    content_hash CHAR(64) NOT NULL,
+    published_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    published_by VARCHAR(36) NULL,
+    UNIQUE KEY unique_community_rule_version (community_id, version),
+    INDEX idx_community_rule_documents_published_by (published_by),
+    FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE,
+    FOREIGN KEY (published_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE community_rules (
+    id VARCHAR(36) PRIMARY KEY,
+    document_id VARCHAR(36) NOT NULL,
+    position SMALLINT UNSIGNED NOT NULL,
+    title VARCHAR(200) NOT NULL,
+    body TEXT NULL,
+    UNIQUE KEY unique_document_position (document_id, position),
+    FOREIGN KEY (document_id) REFERENCES community_rule_documents(id) ON DELETE CASCADE
+);
+
 CREATE TABLE posts (
     id VARCHAR(36) PRIMARY KEY,
     title VARCHAR(300) NOT NULL,
@@ -214,4 +237,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('005_add_user_last_seen_at'),
     ('006_add_admin_actions_actor_username_index'),
     ('007_add_analytics_indexes'),
-    ('008_add_report_analytics_indexes');
+    ('008_add_report_analytics_indexes'),
+    ('009_create_community_rule_documents');

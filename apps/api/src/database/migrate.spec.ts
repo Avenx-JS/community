@@ -1,6 +1,8 @@
 import { describe, expect, it, jest } from '@jest/globals';
+import { resolve } from 'node:path';
 import {
   filterPendingMigrations,
+  loadMigrations,
   Migration,
   MigrationConnection,
   orderMigrations,
@@ -21,6 +23,18 @@ describe('migration ordering and application', () => {
         migration('009_add_email', 9),
       ]).map(({ version }) => version),
     ).toEqual(['009_add_email', '010_add_role']);
+  });
+
+  it('loads repository migrations in ascending order with 009 after 008', async () => {
+    const versions = (
+      await loadMigrations(resolve(__dirname, '../../../../data/migrations'))
+    ).map(({ version }) => version);
+
+    expect(versions.slice(-2)).toEqual([
+      '008_add_report_analytics_indexes',
+      '009_create_community_rule_documents',
+    ]);
+    expect(new Set(versions).size).toBe(versions.length);
   });
 
   it('rejects migration files that do not follow the naming convention', () => {

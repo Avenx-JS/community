@@ -48,7 +48,7 @@ export function filterPendingMigrations(
   );
 }
 
-async function loadMigrations(directory: string): Promise<Migration[]> {
+export async function loadMigrations(directory: string): Promise<Migration[]> {
   const filenames = await readdir(directory);
   const migrations = await Promise.all(
     filenames
@@ -156,7 +156,7 @@ async function main(): Promise<void> {
 
   try {
     const migrations = await loadMigrations(
-      resolve(__dirname, '../../../data/migrations'),
+      resolve(__dirname, '../../../../data/migrations'),
     );
     await runMigrations(connection, migrations, console.log);
   } finally {
