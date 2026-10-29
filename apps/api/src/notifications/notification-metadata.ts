@@ -22,6 +22,15 @@ export const NOTIFICATION_SUBJECT_TYPES = [
 export type NotificationSubjectType =
   (typeof NOTIFICATION_SUBJECT_TYPES)[number];
 
+// Types caused by a moderator or administrator, whose identity is never
+// stored or returned.
+export const MODERATION_NOTIFICATION_TYPES: readonly NotificationType[] = [
+  'report_resolved',
+  'restriction_applied',
+  'restriction_lifted',
+  'content_removed',
+];
+
 // Optional snapshot of the actor and community, kept so a row stays readable
 // after either is deleted or renamed.
 interface CommunitySnapshot {

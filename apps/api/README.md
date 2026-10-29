@@ -1743,8 +1743,9 @@ Success returns HTTP `201`:
 
 Notifications are stored in the `notifications` table (migration
 `010_create_notifications`) and written only through `NotificationsService`
-(see [Writing notifications](#writing-notifications)). No endpoint reads them
-and no producer calls the service yet; the inbox endpoints and producers are
+(see [Writing notifications](#writing-notifications)), and read through the
+routes in [Inbox API](#inbox-api). No producer calls the service yet, and the
+state-changing inbox routes (mark read or unread, mark all read, delete) are
 added separately. Each row belongs
 to one `recipient_id` and records one event: `type`, the optional `actor_id`,
 the triggering `subject_type`/`subject_id`, an optional `community_id`, a
@@ -1902,6 +1903,118 @@ them. This is the opposite of `AuthService.logoutAll`, which deliberately runs
 outside its transaction: token revocation has an independent enforcement
 backstop, and a notification has none. The same reasoning is recorded at the
 service; do not move notification writes after commit without revisiting it.
+
+### Inbox API
+
+`NotificationsController` and `NotificationInboxService` serve the read side
+of the inbox under `/notifications`, not `/me/notifications`: like
+`POST /reports` and `POST /votes`, the authenticated user's own resource lives
+at the resource root and its owner comes from the token. Nothing in the API
+uses a `/me` namespace.
+
+**Ownership.** `recipient_id` is always bound from `request.user.id`. No route
+accepts a recipient in its path, query, or body; sending `recipient_id` or any
+other unknown query parameter returns `400`. Another user's notification is
+reported as `404`, never `403`, so a probe cannot confirm that an ID exists,
+matching the admin-route convention. All three routes require a bearer token
+and return `401` without one.
+
+`GET /notifications` returns the standard collection envelope:
+
+```json
+{
+  "items": [
+    {
+      "id": "notification-id",
+      "type": "comment_reply",
+      "actor_username": "someone",
+      "subject_type": "comment",
+      "subject_id": "comment-id",
+      "community_id": "community-id",
+      "community_name": "gardening",
+      "metadata": {
+        "post_id": "post-id",
+        "parent_comment_id": "comment-id",
+        "excerpt": "Same here."
+      },
+      "read_at": null,
+      "created_at": "2026-10-22T08:00:00.000Z"
+    }
+  ],
+  "page": 1,
+  "limit": 20,
+  "total": 1
+}
+```
+
+It accepts:
+
+- `read`: optional `true` (read only) or `false` (unread only, `read_at IS
+  NULL`); omitted returns both. Any other value returns `400`.
+- `type`: optional, one of `NOTIFICATION_TYPES`, the exported list that mirrors
+  the column enum (a unit test pins it to migration `010`).
+- `community_id`: optional, 1-36 letters, digits, `_` or `-`.
+- `page` (`1-10000`, default `1`), `limit` (`1-100`, default `20`), and `sort`
+  (`new`, the default, or `oldest`).
+
+Results are ordered by `created_at` then `id`, both descending for `new` and
+both ascending for `oldest`, so offset paging returns each notification
+exactly once. An empty inbox returns `200` with `items: []` and `total: 0`.
+
+**Rows render from the notification alone.** The queries select only the
+notification's own columns and never join to posts, comments, users, or
+communities. A deleted subject therefore never drops a row or breaks it, and
+`subject_id` may point at something that no longer exists. `actor_username`
+and `community_name` come from the metadata snapshot, so a deleted actor
+(`actor_id` set to `NULL`) or a renamed community still renders as it was when
+the notification was created. `actor_id` is never returned, and
+`actor_username` is always `null` for the moderation types, so no response
+names the moderator or administrator who acted. `metadata` returns only the
+documented snapshot keys other than those two, or `null`.
+
+`GET /notifications/unread-count` returns `{ "unread": 7 }`, counting the
+caller's rows with `read_at IS NULL`; an empty inbox returns
+`{ "unread": 0 }`. It is a separate route rather than a field on the listing on
+purpose: clients poll the badge far more often than they open the inbox, and
+this query reads one index range without fetching rows or computing an offset.
+Do not fold it into the listing. Clients should poll this route, not the
+listing. It is declared before `GET /notifications/:id` because
+`unread-count` also matches the ID pattern; a controller test fails if the
+order is reversed.
+
+`GET /notifications/:id` returns one notification in the same item shape. An
+invalid ID returns `400`; an unknown ID, or one belonging to another user,
+returns `404`. **Reading a notification does not mark it read.** Marking read
+is an explicit client action owned by the state-changing routes, which keeps
+the badge truthful when a client prefetches.
+
+**Restricted accounts can read their inbox.** All three routes are marked
+`@AllowRestricted()`, so an account under an active suspension or ban can
+reach them. Otherwise the user who most needs "your account was suspended,
+here is the type and expiry" would be the one user who cannot read it. This
+discloses nothing new: `AuthGuard`'s own `403` already returns the restriction
+type and expiry, and moderation notifications carry no moderator identity.
+State-changing notification routes must not be marked `@AllowRestricted()`.
+
+**Indexes.** Each query keeps a prefix of one of migration `010`'s indexes:
+the listing uses `idx_notifications_recipient_created`, the unread filter and
+unread count use `idx_notifications_recipient_unread`, and the type filter
+uses `idx_notifications_recipient_type`. The `community_id` filter, and `read`
+combined with `type`, are served by the recipient prefix and filtered from
+there. `src/notifications/notification-inbox.mysql.spec.ts` checks the plans
+with `EXPLAIN` against migration `010`; it runs with
+`MYSQL_INTEGRATION_TEST=true` and `MYSQL_*` credentials that may create a
+scratch database.
+
+**Rate limits.** The routes use the global read buckets (120 reads and 300
+requests per IP per minute) and are not exempt. Polling `unread-count` every
+30 seconds costs two requests a minute; if a dashboard pattern later exceeds
+the bucket, add an explicit documented override rather than a bypass.
+
+**Real-time delivery is a non-goal.** There is no WebSocket, SSE, or event-bus
+support in the API, and adding a transport would be a new architectural
+dependency nothing here requires. Polling `unread-count` is the delivery
+mechanism.
 
 ## Project setup
 
