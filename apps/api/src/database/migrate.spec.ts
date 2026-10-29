@@ -46,6 +46,17 @@ describe('migration ordering and application', () => {
     expect(position('012_create_community_rule_acceptances')).toBe(
       position('011_create_community_notification_preferences') + 1,
     );
+    // The column drop must sort after both rule backfills, or it would
+    // destroy legacy rules before they are copied.
+    expect(position('013_backfill_late_community_rules')).toBe(
+      position('012_create_community_rule_acceptances') + 1,
+    );
+    expect(position('014_drop_communities_rules')).toBe(
+      position('013_backfill_late_community_rules') + 1,
+    );
+    expect(position('014_drop_communities_rules')).toBeGreaterThan(
+      position('009_create_community_rule_documents'),
+    );
     expect(new Set(versions).size).toBe(versions.length);
   });
 

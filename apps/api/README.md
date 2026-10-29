@@ -1043,10 +1043,10 @@ Pagination and search values have explicit bounds. User-controlled query
 values are passed as MySQL parameters; the vote target table is selected only
 from the fixed `post`/`comment` allowlist, never from arbitrary input.
 
-Post titles, post bodies, community descriptions/rules, and comments are
-plain-text data. The API does not interpret user text as HTML and returns it in
-JSON as text; it is intentionally not HTML-escaped or stripped on input, so
-clients must encode it at the output context. In the web client, render content
+Post titles, post bodies, community descriptions, community rule titles and
+bodies, and comments are plain-text data. The API does not interpret user text
+as HTML and returns it in JSON as text; it is intentionally not HTML-escaped or
+stripped on input, so clients must encode it at the output context. In the web client, render content
 using Angular interpolation or DOM `textContent`; never use `[innerHTML]`,
 `innerHTML`, or a bypass/trust-HTML API for user content. Any future rich-text
 feature requires a separately reviewed, narrowly allowlisted sanitizer and
@@ -1246,13 +1246,12 @@ The response contains `items`, `page`, `limit`, and the matching `total`. An
 empty result is returned as HTTP `200` with an empty `items` array.
 
 `POST /communities` requires a bearer token and accepts a `name` (1-50
-characters containing only letters, numbers, underscores, or hyphens), plus
-optional `description` and `rules` (up to 16,383 characters each, keeping values
-within MySQL's `TEXT` limit with UTF-8 storage). The creator
-is taken from the authenticated user, never from the request
-body. A duplicate name returns `409`; invalid input returns `400`.
-`GET /communities/:name` retrieves a community by its exact name and returns
-`404` if it does not exist.
+characters containing only letters, numbers, underscores, or hyphens), plus an
+optional `description` (up to 16,383 characters, keeping values within MySQL's
+`TEXT` limit with UTF-8 storage). The creator is taken from the authenticated
+user, never from the request body. A duplicate name returns `409`; invalid
+input returns `400`. `GET /communities/:name` retrieves a community by its
+exact name and returns `404` if it does not exist.
 
 All community endpoints return the same community DTO:
 
@@ -1262,10 +1261,33 @@ All community endpoints return the same community DTO:
   "creator_id": "user-id",
   "name": "sample",
   "description": null,
-  "rules": null,
   "created_at": "2026-10-22T08:00:00.000Z"
 }
 ```
+
+**Breaking change: rules are no longer part of a community.** `POST
+/communities` no longer accepts `rules`; sending it, even as `null` or an
+empty string, returns `400` and creates nothing. No community response
+(`GET /communities`, `GET /communities/:name`, `POST /communities`) contains a
+`rules` key any more. Creating a community with rules is now two calls:
+`POST /communities`, then `PUT /communities/:name/rules`. Read rules from
+`GET /communities/:name/rules` (see [Community rules](#community-rules)). A
+community created without publishing rules has no rule document and requires
+no acceptance.
+
+The legacy free-text field was removed rather than kept in sync because two
+copies of the rules disagreed: the field kept serving text after a publish
+replaced it, and text set only at creation never became a document, so it was
+invisible to acceptance. Two alternatives were rejected:
+
+- Having `POST /communities` publish a version 1 document from the field would
+  add a second publishing path with different validation (one free-text blob
+  versus 1-50 validated items), which is how the two sources of truth arose.
+  If creation should ever publish rules, it must call the rules service and
+  its validation, never insert directly.
+- Keeping `rules` as a deprecated response field built from the current
+  document would add a join or subquery to every row of the hottest community
+  read, for a field nothing should use.
 
 `POST /communities/:name/subscribe` subscribes the authenticated user to the
 community. `DELETE /communities/:name/subscribe` removes that user's
@@ -1304,7 +1326,7 @@ standard collection envelope, and an account with no subscriptions receives
 ```
 
 Each item carries only the community fields a list view needs; `creator_id`
-and `rules` belong to the community detail response.
+belongs to the community detail response.
 
 `GET /communities/:name/subscription` requires a bearer token and reports
 whether the authenticated user is subscribed to that community:
@@ -1467,7 +1489,9 @@ legacy `communities.rules` contains a non-whitespace character. The document is
 dated `communities.created_at`, attributed to the community creator, and has
 one rule at position `1` titled `Community rules` whose body is the legacy text
 verbatim. Communities with `NULL`, empty, or whitespace-only rules get no
-document and have no rules to accept.
+document and have no rules to accept. Migration `013` repeats this for
+communities created after `009`, and `014` then drops the legacy column (see
+[Retiring the legacy `communities.rules` column](#retiring-the-legacy-communitiesrules-column)).
 
 #### Rules API
 
@@ -1747,9 +1771,76 @@ Accepting writes no `admin_actions` entry: the audit log is for
 platform-administrative actions, and the acceptance row is itself the durable,
 timestamped record.
 
-`communities.rules` is retained for now: `POST /communities` still writes it and
-the community DTO still returns it, unchanged. The column and the DTO field are
-retired separately.
+#### Retiring the legacy `communities.rules` column
+
+The API no longer reads or writes `communities.rules` (see the breaking-change
+note under [Communities](#communities)). Two migrations then remove it:
+
+- `013_backfill_late_community_rules` repeats migration `009`'s backfill, and
+  `012`'s grandfathering of current subscribers and the creator, for
+  communities created after `009` ran but before `POST /communities` stopped
+  accepting `rules`. Their text would otherwise never have become a document.
+  It touches only communities with non-blank legacy rules and no rule document
+  at all, uses the same hash expression as `009` (a unit test pins both to the
+  MySQL fixture digest), and is safe to re-run.
+- `014_drop_communities_rules` runs `ALTER TABLE communities DROP COLUMN
+  rules`. **It is irreversible**: afterwards the legacy text exists only in the
+  version 1 documents from `009` and `013`, so take a backup first. It is not
+  re-runnable after success.
+
+**Ordering.** `014` must run after `009` and `013`, which the runner's
+ascending numeric order enforces and a unit test in `migrate.spec.ts` pins.
+Never renumber it to sort earlier: that would destroy the legacy rules before
+they are copied. Prefer releasing the API change and `013` first, and merging
+`014` once `009` and `013` have been applied and verified in the target
+environment.
+
+**Pre-drop verification.** This query counts communities whose non-blank
+legacy rules do not appear, byte for byte, as the single rule of their
+version 1 document. Zero means the column can be dropped; anything else means
+do not drop yet:
+
+```sql
+SELECT COUNT(*) AS unmigrated
+FROM communities c
+WHERE c.rules REGEXP '[^[:space:]]'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM community_rule_documents d
+      JOIN community_rules r ON r.document_id = d.id
+      WHERE d.community_id = c.id
+        AND d.version = 1
+        AND r.position = 1
+        AND CAST(CONVERT(r.body USING utf8mb4) AS BINARY)
+            = CAST(CONVERT(c.rules USING utf8mb4) AS BINARY)
+        AND NOT EXISTS (
+            SELECT 1 FROM community_rules other
+            WHERE other.document_id = d.id AND other.position <> 1
+        )
+  )
+```
+
+`014` runs the same check itself and refuses to drop while it is non-zero: it
+inserts the count into a temporary table with `CHECK (unmigrated = 0)`, so the
+migration fails with a `legacy_rules_have_documents` check-constraint error
+(MySQL 8.0.16 or later), the `ALTER` never runs, and the version is not
+recorded. A unit test keeps the query above identical to the one in the
+migration.
+
+After `013`, the only communities the check can report are ones created with
+legacy rules after `009` that then published through `PUT
+/communities/:name/rules`, so their version 1 is the published document rather
+than the legacy text. Replace `COUNT(*) AS unmigrated` with `c.id, c.name` to
+list them. Each needs a decision before the drop: the creator republishes rules
+that include the legacy text, or an operator who has reviewed it confirms that
+the text is superseded with
+`UPDATE communities SET rules = NULL WHERE id = ?`. Then run the migration
+again.
+
+`src/database/drop-communities-rules.mysql.spec.ts` runs `009`, `012`, `013`
+and `014` over a fixture and covers the catch-up backfill, both guard failures,
+and the drop. It runs with `MYSQL_INTEGRATION_TEST=true` and `MYSQL_*`
+credentials that may create a scratch database.
 
 ## Posts
 

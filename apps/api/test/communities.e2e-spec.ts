@@ -12,9 +12,13 @@ interface TestCommunity {
   creator_id: string;
   name: string;
   description: string | null;
-  rules: string | null;
   created_at: Date;
 }
+
+// A database that has not yet run migration 014 still has the column. Every
+// community row the fake returns carries it, so the tests prove the API never
+// maps it into a response.
+const staleRulesColumn = { rules: 'stale legacy rules' };
 
 const tokenUsers: Record<string, string> = {
   'valid-token': 'authenticated-user',
@@ -49,7 +53,6 @@ describe('Community endpoints (e2e)', () => {
         creator_id: 'user-a',
         name: 'gardening',
         description: 'Growing plants',
-        rules: null,
         created_at: new Date('2026-10-20T12:00:00.000Z'),
       },
       {
@@ -57,7 +60,6 @@ describe('Community endpoints (e2e)', () => {
         creator_id: 'user-b',
         name: 'garden-tools',
         description: 'Tools for gardening',
-        rules: 'Be kind',
         created_at: new Date('2026-10-20T12:00:00.000Z'),
       },
       {
@@ -65,7 +67,6 @@ describe('Community endpoints (e2e)', () => {
         creator_id: 'user-c',
         name: 'cooking',
         description: null,
-        rules: null,
         created_at: new Date('2026-10-19T12:00:00.000Z'),
       },
     ];
@@ -79,11 +80,11 @@ describe('Community endpoints (e2e)', () => {
         queryCalls.push({ sql, values });
 
         if (sql.startsWith('INSERT INTO communities')) {
-          const [id, creatorId, name, description, rules] = values as [
+          expect(sql).not.toMatch(/\brules\b/);
+          const [id, creatorId, name, description] = values as [
             string,
             string,
             string,
-            string | null,
             string | null,
           ];
           if (communities.some((community) => community.name === name)) {
@@ -96,7 +97,6 @@ describe('Community endpoints (e2e)', () => {
             creator_id: creatorId,
             name,
             description,
-            rules,
             created_at: new Date('2026-10-22T08:00:00.000Z'),
           });
           return [{ affectedRows: 1 }, []];
@@ -196,18 +196,30 @@ describe('Community endpoints (e2e)', () => {
           );
           const limit = values[values.length - 2] as number;
           const offset = values[values.length - 1] as number;
-          return [rows.slice(offset, offset + limit), []];
+          return [
+            rows
+              .slice(offset, offset + limit)
+              .map((community) => ({ ...community, ...staleRulesColumn })),
+            [],
+          ];
         }
 
         if (sql.includes('WHERE id = ?')) {
           const [id] = values as [string];
-          return [communities.filter((community) => community.id === id), []];
+          return [
+            communities
+              .filter((community) => community.id === id)
+              .map((community) => ({ ...community, ...staleRulesColumn })),
+            [],
+          ];
         }
 
         if (sql.includes('WHERE name = ?')) {
           const [name] = values as [string];
           return [
-            communities.filter((community) => community.name === name),
+            communities
+              .filter((community) => community.name === name)
+              .map((community) => ({ ...community, ...staleRulesColumn })),
             [],
           ];
         }
@@ -327,7 +339,6 @@ describe('Community endpoints (e2e)', () => {
       .send({
         name: '  board-games  ',
         description: 'Games and friends',
-        rules: 'Have fun',
       })
       .expect(201);
 
@@ -335,7 +346,6 @@ describe('Community endpoints (e2e)', () => {
       creator_id: 'authenticated-user',
       name: 'board-games',
       description: 'Games and friends',
-      rules: 'Have fun',
     });
     expect(response.body).not.toHaveProperty('email');
     expect(response.body).not.toHaveProperty('password_hash');
@@ -369,11 +379,6 @@ describe('Community endpoints (e2e)', () => {
     await request(app.getHttpServer())
       .post('/communities')
       .set('Authorization', authorization)
-      .send({ name: 'valid', rules: 'x'.repeat(16384) })
-      .expect(400);
-    await request(app.getHttpServer())
-      .post('/communities')
-      .set('Authorization', authorization)
       .send({ name: 'attempt', creator_id: 'attacker' })
       .expect(400);
     await request(app.getHttpServer())
@@ -381,6 +386,47 @@ describe('Community endpoints (e2e)', () => {
       .set('Authorization', authorization)
       .send({ name: "board' OR 1=1 --" })
       .expect(400);
+  });
+
+  it('rejects a legacy rules property with 400 and creates nothing', async () => {
+    const before = communities.length;
+
+    for (const rules of ['Have fun', '', null]) {
+      const response = await request(app.getHttpServer())
+        .post('/communities')
+        .set('Authorization', 'Bearer valid-token')
+        .send({ name: 'board-games', rules })
+        .expect(400);
+      expect((response.body as { message: string[] }).message).toEqual([
+        'property rules should not exist',
+      ]);
+    }
+
+    expect(communities).toHaveLength(before);
+    expect(
+      queryCalls.some((call) => call.sql.startsWith('INSERT INTO communities')),
+    ).toBe(false);
+  });
+
+  it('returns no rules key from any community response', async () => {
+    // Serialised bodies, so a reintroduced field fails regardless of where it
+    // appears. The fake rows still carry a stale rules column.
+    const created = await request(app.getHttpServer())
+      .post('/communities')
+      .set('Authorization', 'Bearer valid-token')
+      .send({ name: 'board-games' })
+      .expect(201);
+    const listed = await request(app.getHttpServer())
+      .get('/communities?limit=100')
+      .expect(200);
+    const found = await request(app.getHttpServer())
+      .get('/communities/garden-tools')
+      .expect(200);
+
+    expect((listed.body as { items: unknown[] }).items).toHaveLength(4);
+    for (const response of [created, listed, found]) {
+      expect(response.text).not.toMatch(/"rules"|stale legacy rules/);
+    }
   });
 
   it('requires authentication to create and returns 404 for unknown names', async () => {
@@ -398,7 +444,6 @@ describe('Community endpoints (e2e)', () => {
       'description',
       'id',
       'name',
-      'rules',
     ]);
 
     const response = await request(app.getHttpServer())

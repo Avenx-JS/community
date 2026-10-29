@@ -92,17 +92,22 @@ describe('migration 009 backfill hash', () => {
   const mysqlDigest =
     '5caa4dbf1c4933a85604c7daf488685690286cc31c2f581a2590216038e579d4';
 
-  it('uses the expression the fixture digest was produced with', () => {
-    const migration = readFileSync(
-      resolve(
-        __dirname,
-        '../../../../data/migrations/009_create_community_rule_documents.sql',
-      ),
-      'utf8',
-    );
+  // 013 repeats 009's backfill for communities created in between, so it must
+  // hash identically.
+  it.each([
+    '009_create_community_rule_documents.sql',
+    '013_backfill_late_community_rules.sql',
+  ])(
+    'uses the expression the fixture digest was produced with in %s',
+    (file) => {
+      const migration = readFileSync(
+        resolve(__dirname, '../../../../data/migrations', file),
+        'utf8',
+      );
 
-    expect(migration.replace(/\s+/g, ' ')).toContain(backfillHashExpression);
-  });
+      expect(migration.replace(/\s+/g, ' ')).toContain(backfillHashExpression);
+    },
+  );
 
   it('matches the application hash for a backfilled community', () => {
     expect(

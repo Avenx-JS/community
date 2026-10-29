@@ -24,9 +24,7 @@ export class CreateCommunityDto {
   @Validate(PlainTextConstraint)
   description?: string;
 
-  @IsOptional()
-  @IsString()
-  @MaxLength(16383)
-  @Validate(PlainTextConstraint)
-  rules?: string;
+  // No rules field: rules are published only through
+  // PUT /communities/:name/rules, and the global ValidationPipe rejects a
+  // body that still sends one.
 }

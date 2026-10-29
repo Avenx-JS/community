@@ -18,7 +18,6 @@ interface CommunityRow extends RowDataPacket {
   creator_id: string;
   name: string;
   description: string | null;
-  rules: string | null;
   created_at: Date | string;
 }
 
@@ -27,7 +26,6 @@ export interface CommunityDto {
   creator_id: string;
   name: string;
   description: string | null;
-  rules: string | null;
   created_at: string;
 }
 
@@ -82,7 +80,7 @@ export class CommunitiesService {
     }
 
     const [communities] = await this.pool.execute<CommunityRow[]>(
-      `SELECT id, creator_id, name, description, rules, created_at FROM communities${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+      `SELECT id, creator_id, name, description, created_at FROM communities${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
       [...values, limit, offset],
     );
     const [countRows] = await this.pool.execute<
@@ -105,14 +103,8 @@ export class CommunitiesService {
 
     try {
       await this.pool.execute<ResultSetHeader>(
-        'INSERT INTO communities (id, creator_id, name, description, rules) VALUES (?, ?, ?, ?, ?)',
-        [
-          id,
-          creatorId,
-          input.name.trim(),
-          input.description ?? null,
-          input.rules ?? null,
-        ],
+        'INSERT INTO communities (id, creator_id, name, description) VALUES (?, ?, ?, ?)',
+        [id, creatorId, input.name.trim(), input.description ?? null],
       );
     } catch (error) {
       if (this.isDuplicateEntry(error)) {
@@ -122,7 +114,7 @@ export class CommunitiesService {
     }
 
     const [communities] = await this.pool.execute<CommunityRow[]>(
-      'SELECT id, creator_id, name, description, rules, created_at FROM communities WHERE id = ? LIMIT 1',
+      'SELECT id, creator_id, name, description, created_at FROM communities WHERE id = ? LIMIT 1',
       [id],
     );
     const community = communities[0];
@@ -136,7 +128,7 @@ export class CommunitiesService {
 
   async findOne(name: string): Promise<CommunityDto> {
     const [communities] = await this.pool.execute<CommunityRow[]>(
-      'SELECT id, creator_id, name, description, rules, created_at FROM communities WHERE name = ? LIMIT 1',
+      'SELECT id, creator_id, name, description, created_at FROM communities WHERE name = ? LIMIT 1',
       [name],
     );
     const community = communities[0];
@@ -307,7 +299,6 @@ export class CommunitiesService {
       creator_id: community.creator_id,
       name: community.name,
       description: community.description,
-      rules: community.rules,
       created_at: new Date(community.created_at).toISOString(),
     };
   }

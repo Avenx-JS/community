@@ -28,14 +28,6 @@ export class CommunityResponse implements CommunityDto {
   @ApiProperty({ type: String, nullable: true })
   description!: string | null;
 
-  @ApiProperty({
-    type: String,
-    nullable: true,
-    description:
-      'Legacy free-text rules, retained until versioned rules replace them.',
-  })
-  rules!: string | null;
-
   @ApiProperty({ format: 'date-time' })
   created_at!: string;
 }

@@ -52,7 +52,6 @@ CREATE TABLE communities (
     creator_id VARCHAR(36) NOT NULL,
     name VARCHAR(50) NOT NULL UNIQUE,
     description TEXT,
-    rules TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_communities_creator_id (creator_id),
     FOREIGN KEY (creator_id) REFERENCES users(id) ON DELETE CASCADE
@@ -293,4 +292,6 @@ INSERT INTO schema_migrations (version) VALUES
     ('009_create_community_rule_documents'),
     ('010_create_notifications'),
     ('011_create_community_notification_preferences'),
-    ('012_create_community_rule_acceptances');
+    ('012_create_community_rule_acceptances'),
+    ('013_backfill_late_community_rules'),
+    ('014_drop_communities_rules');

@@ -36,7 +36,6 @@ describe('CommunitiesService', () => {
           creator_id: 'user-1',
           name: 'gardening',
           description: null,
-          rules: null,
           created_at: new Date('2026-10-20T12:00:00.000Z'),
         },
       ],
@@ -84,7 +83,6 @@ describe('CommunitiesService', () => {
           creator_id: 'authenticated-user',
           name: 'gardening',
           description: null,
-          rules: null,
           created_at: new Date('2026-10-20T12:00:00.000Z'),
         },
       ],
@@ -96,13 +94,12 @@ describe('CommunitiesService', () => {
     );
 
     expect(queries[0].sql).toContain(
-      'INSERT INTO communities (id, creator_id, name, description, rules)',
+      'INSERT INTO communities (id, creator_id, name, description) VALUES (?, ?, ?, ?)',
     );
     expect(queries[0].values).toEqual([
       expect.any(String),
       'authenticated-user',
       'gardening',
-      null,
       null,
     ]);
     expect(queries[1].values).toEqual([queries[0].values[0]]);
@@ -111,6 +108,37 @@ describe('CommunitiesService', () => {
       creator_id: 'authenticated-user',
       name: 'gardening',
     });
+  });
+
+  it('never reads, writes or returns the dropped rules column', async () => {
+    // A row carrying a stray rules value, as an un-migrated database would
+    // return to SELECT *, proves the DTO maps only its documented fields.
+    const row = {
+      id: 'community-1',
+      creator_id: 'user-1',
+      name: 'gardening',
+      description: null,
+      rules: 'stale legacy text',
+      created_at: new Date('2026-10-20T12:00:00.000Z'),
+    };
+    results = [[row], [{ total: 1 }], [], [row], [row]];
+
+    const listed = await service.findAll({});
+    const created = await service.create({ name: 'gardening' }, 'user-1');
+    const found = await service.findOne('gardening');
+
+    for (const community of [listed.items[0], created, found]) {
+      expect(Object.keys(community).sort()).toEqual([
+        'created_at',
+        'creator_id',
+        'description',
+        'id',
+        'name',
+      ]);
+    }
+    for (const { sql } of queries) {
+      expect(sql).not.toMatch(/\brules\b/);
+    }
   });
 
   it('maps duplicate names to conflict and missing details to not found', async () => {
