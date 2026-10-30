@@ -5,7 +5,22 @@ import { Test, TestingModule } from '@nestjs/testing';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
+import { AuthRateLimitService } from '../src/auth/auth-rate-limit.service';
 import { AuthService, MYSQL_POOL } from '../src/auth/auth.service';
+import {
+  eligibleRecipients,
+  recipientFixture,
+} from './fakes/community-notification-recipients';
+
+interface TestNotification {
+  id: string;
+  recipient_id: string;
+  type: string;
+  actor_id: string;
+  subject_id: string;
+  community_id: string;
+  metadata: string | null;
+}
 
 interface TestPost {
   id: string;
@@ -21,7 +36,14 @@ describe('Post endpoints (e2e)', () => {
   let app: INestApplication<App>;
   let posts: TestPost[];
   let queryCalls: Array<{ sql: string; values: unknown[] }>;
-  const communities = ['community-1', 'community-2'];
+  let notifications: TestNotification[];
+  let failNotificationWrite: boolean;
+  let openConnections: number;
+  const communities = [
+    'community-1',
+    'community-2',
+    ...recipientFixture.communities,
+  ];
   const communityCreators = new Map([['community-1', 'creator-1']]);
   const moderatorAssignments = new Set(['community-1:user-mod']);
 
@@ -56,10 +78,60 @@ describe('Post endpoints (e2e)', () => {
       },
     ];
     queryCalls = [];
+    notifications = [];
+    failNotificationWrite = false;
+    openConnections = 0;
+
+    // Evaluates the fan-out's recipient selection over the shared fixture;
+    // the bound values are community id, then author id.
+    const fanOutRecipients = (communityId: unknown, authorId: unknown) =>
+      eligibleRecipients(
+        recipientFixture.subscriptions,
+        recipientFixture.preferences,
+        communityId as string,
+      ).filter((userId) => userId !== authorId);
 
     const pool = {
       execute: async (sql: string, values: unknown[]) => {
         queryCalls.push({ sql, values });
+
+        if (sql.startsWith('SELECT COUNT(*) AS recipients')) {
+          return [
+            [{ recipients: fanOutRecipients(values[0], values[1]).length }],
+            [],
+          ];
+        }
+        if (sql.startsWith('INSERT INTO notifications')) {
+          if (failNotificationWrite) {
+            throw new Error('notification write failed');
+          }
+          const [actorId, subjectId, communityId, metadata] = values as [
+            string,
+            string,
+            string,
+            string | null,
+          ];
+          for (const recipientId of fanOutRecipients(values[4], values[5])) {
+            if (
+              !notifications.some(
+                (row) =>
+                  row.recipient_id === recipientId &&
+                  row.subject_id === subjectId,
+              )
+            ) {
+              notifications.push({
+                id: `notification-${notifications.length + 1}`,
+                recipient_id: recipientId,
+                type: 'community_post',
+                actor_id: actorId,
+                subject_id: subjectId,
+                community_id: communityId,
+                metadata,
+              });
+            }
+          }
+          return [{ affectedRows: 1 }, []];
+        }
 
         if (sql.startsWith('SELECT id FROM communities')) {
           const [id] = values as [string];
@@ -137,20 +209,58 @@ describe('Post endpoints (e2e)', () => {
         }
         throw new Error(`Unexpected SQL query: ${sql}`);
       },
+      // A transaction snapshots the stored rows and restores them on
+      // rollback, so a failed request leaves nothing behind.
+      getConnection: () => {
+        openConnections += 1;
+        let snapshot: {
+          posts: TestPost[];
+          notifications: TestNotification[];
+        } | null = null;
+        return Promise.resolve({
+          execute: (sql: string, values: unknown[]): Promise<unknown> =>
+            pool.execute(sql, values),
+          beginTransaction: () => {
+            snapshot = { posts: [...posts], notifications: [...notifications] };
+            return Promise.resolve();
+          },
+          commit: () => {
+            snapshot = null;
+            return Promise.resolve();
+          },
+          rollback: () => {
+            if (snapshot) {
+              posts = snapshot.posts;
+              notifications = snapshot.notifications;
+            }
+            return Promise.resolve();
+          },
+          release: () => {
+            openConnections -= 1;
+          },
+        });
+      },
+    };
+    const userIds: Record<string, string> = {
+      'valid-token': 'user-1',
+      'moderator-token': 'user-mod',
+      'fixture-author-token': recipientFixture.author,
     };
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     })
       .overrideProvider(MYSQL_POOL)
       .useValue(pool)
+      .overrideProvider(AuthRateLimitService)
+      .useValue({ enforceApiRequest: () => Promise.resolve(null) })
       .overrideProvider(AuthService)
       .useValue({
-        validateAccessToken: async (token: string) =>
-          token === 'valid-token'
-            ? 'user-1'
-            : token === 'moderator-token'
-              ? 'user-mod'
-              : null,
+        validateAccessTokenState: (token: string) =>
+          Promise.resolve(
+            token in userIds
+              ? { kind: 'valid', userId: userIds[token] }
+              : { kind: 'invalid' },
+          ),
       })
       .compile();
 
@@ -426,5 +536,74 @@ describe('Post endpoints (e2e)', () => {
       .set('Authorization', 'Bearer valid-token')
       .expect(404);
     await request(app.getHttpServer()).delete('/posts/post-1').expect(401);
+  });
+
+  describe('community_post notifications', () => {
+    const post = {
+      title: 'Harvest day',
+      type: 'text',
+      content: 'Bring baskets',
+      community_id: recipientFixture.communityId,
+    };
+
+    it('notifies unmuted members and members without a row, never muted members, non-members or the author', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/posts')
+        .set('Authorization', 'Bearer fixture-author-token')
+        .send(post)
+        .expect(201);
+
+      expect(notifications.map((row) => row.recipient_id).sort()).toEqual(
+        recipientFixture.notified,
+      );
+      for (const row of notifications) {
+        expect(row).toMatchObject({
+          type: 'community_post',
+          actor_id: recipientFixture.author,
+          subject_id: (response.body as { id: string }).id,
+          community_id: recipientFixture.communityId,
+        });
+        expect(JSON.parse(row.metadata as string)).toEqual({
+          post_title: 'Harvest day',
+        });
+      }
+      expect(
+        queryCalls.filter((call) =>
+          call.sql.startsWith('INSERT INTO notifications'),
+        ),
+      ).toHaveLength(1);
+      expect(openConnections).toBe(0);
+    });
+
+    it('writes nothing in a community without eligible members', async () => {
+      await request(app.getHttpServer())
+        .post('/posts')
+        .set('Authorization', 'Bearer valid-token')
+        .send({ ...post, community_id: 'community-1' })
+        .expect(201);
+
+      expect(notifications).toEqual([]);
+      expect(
+        queryCalls.some((call) =>
+          call.sql.startsWith('INSERT INTO notifications'),
+        ),
+      ).toBe(false);
+    });
+
+    it('leaves no post behind when the notification write fails', async () => {
+      failNotificationWrite = true;
+      const before = posts.length;
+
+      await request(app.getHttpServer())
+        .post('/posts')
+        .set('Authorization', 'Bearer fixture-author-token')
+        .send(post)
+        .expect(500);
+
+      expect(posts).toHaveLength(before);
+      expect(posts.some((entry) => entry.title === 'Harvest day')).toBe(false);
+      expect(notifications).toEqual([]);
+      expect(openConnections).toBe(0);
+    });
   });
 });

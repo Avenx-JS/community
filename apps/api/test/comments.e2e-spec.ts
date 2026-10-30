@@ -5,7 +5,21 @@ import { Test, TestingModule } from '@nestjs/testing';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
+import { AuthRateLimitService } from '../src/auth/auth-rate-limit.service';
 import { AuthService, MYSQL_POOL } from '../src/auth/auth.service';
+
+interface TestNotification {
+  id: string;
+  recipient_id: string;
+  type: string;
+  actor_id: string | null;
+  subject_type: string;
+  subject_id: string;
+  community_id: string | null;
+  metadata: string | null;
+  read_at: Date | null;
+  created_at: Date;
+}
 
 interface TestComment {
   id: string;
@@ -20,7 +34,14 @@ describe('Comment endpoints (e2e)', () => {
   let app: INestApplication<App>;
   let comments: TestComment[];
   let queryCalls: Array<{ sql: string; values: unknown[] }>;
+  let notifications: TestNotification[];
+  let failNotificationWrite: boolean;
+  let openConnections: number;
   const postIds = ['post-1', 'post-2'];
+  const postAuthors = new Map([
+    ['post-1', 'user-2'],
+    ['post-2', 'user-1'],
+  ]);
   const communityCreators = new Map([['community-1', 'creator-1']]);
   const moderatorAssignments = new Set(['community-1:user-mod']);
 
@@ -68,10 +89,91 @@ describe('Comment endpoints (e2e)', () => {
       },
     ];
     queryCalls = [];
+    notifications = [];
+    failNotificationWrite = false;
+    openConnections = 0;
 
     const pool = {
       execute: async (sql: string, values: unknown[]) => {
         queryCalls.push({ sql, values });
+        if (sql.startsWith('SELECT id, author_id, community_id, title')) {
+          const [postId] = values as [string];
+          return [
+            postIds.includes(postId)
+              ? [
+                  {
+                    id: postId,
+                    author_id: postAuthors.get(postId),
+                    community_id: 'community-1',
+                    title: `Title of ${postId}`,
+                  },
+                ]
+              : [],
+            [],
+          ];
+        }
+        if (sql.startsWith('INSERT INTO notifications')) {
+          if (failNotificationWrite) {
+            throw new Error('notification write failed');
+          }
+          for (let index = 0; index < values.length; index += 8) {
+            const [
+              id,
+              recipientId,
+              type,
+              actorId,
+              subjectType,
+              subjectId,
+              communityId,
+              metadata,
+            ] = values.slice(index, index + 8) as Array<string | null>;
+            const duplicate = notifications.some(
+              (row) =>
+                row.recipient_id === recipientId &&
+                row.type === type &&
+                row.subject_type === subjectType &&
+                row.subject_id === subjectId,
+            );
+            if (!duplicate) {
+              notifications.push({
+                id: id as string,
+                recipient_id: recipientId as string,
+                type: type as string,
+                actor_id: actorId,
+                subject_type: subjectType as string,
+                subject_id: subjectId as string,
+                community_id: communityId,
+                metadata,
+                read_at: null,
+                created_at: new Date('2026-10-23T08:00:00.000Z'),
+              });
+            }
+          }
+          return [{ affectedRows: 1 }, []];
+        }
+        if (sql.startsWith('SELECT COUNT(*) AS total FROM notifications')) {
+          const [recipientId] = values as [string];
+          return [
+            [
+              {
+                total: notifications.filter(
+                  (row) => row.recipient_id === recipientId,
+                ).length,
+              },
+            ],
+            [],
+          ];
+        }
+        if (
+          sql.startsWith('SELECT id, type, subject_type') &&
+          sql.includes('FROM notifications WHERE recipient_id = ?')
+        ) {
+          const [recipientId] = values as [string];
+          return [
+            notifications.filter((row) => row.recipient_id === recipientId),
+            [],
+          ];
+        }
         if (sql.startsWith('SELECT id FROM posts')) {
           const [postId] = values as [string];
           return [postIds.includes(postId) ? [{ id: postId }] : [], []];
@@ -94,15 +196,17 @@ describe('Comment endpoints (e2e)', () => {
           ];
         }
         if (
-          sql.startsWith('SELECT id FROM comments WHERE id = ? AND post_id')
+          sql.startsWith(
+            'SELECT id, author_id FROM comments WHERE id = ? AND post_id',
+          )
         ) {
           const [id, postId] = values as [string, string];
           return [
-            comments.some(
-              (comment) => comment.id === id && comment.post_id === postId,
-            )
-              ? [{ id }]
-              : [],
+            comments
+              .filter(
+                (comment) => comment.id === id && comment.post_id === postId,
+              )
+              .map((comment) => ({ id, author_id: comment.author_id })),
             [],
           ];
         }
@@ -170,20 +274,61 @@ describe('Comment endpoints (e2e)', () => {
         }
         throw new Error(`Unexpected SQL query: ${sql}`);
       },
+      // A transaction snapshots the stored rows and restores them on
+      // rollback, so a failed request leaves nothing behind.
+      getConnection: () => {
+        openConnections += 1;
+        let snapshot: {
+          comments: TestComment[];
+          notifications: TestNotification[];
+        } | null = null;
+        return Promise.resolve({
+          execute: (sql: string, values: unknown[]): Promise<unknown> =>
+            pool.execute(sql, values),
+          beginTransaction: () => {
+            snapshot = {
+              comments: [...comments],
+              notifications: [...notifications],
+            };
+            return Promise.resolve();
+          },
+          commit: () => {
+            snapshot = null;
+            return Promise.resolve();
+          },
+          rollback: () => {
+            if (snapshot) {
+              comments = snapshot.comments;
+              notifications = snapshot.notifications;
+            }
+            return Promise.resolve();
+          },
+          release: () => {
+            openConnections -= 1;
+          },
+        });
+      },
+    };
+    const userIds: Record<string, string> = {
+      'valid-token': 'user-1',
+      'moderator-token': 'user-mod',
+      'post-author-token': 'user-2',
     };
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     })
       .overrideProvider(MYSQL_POOL)
       .useValue(pool)
+      .overrideProvider(AuthRateLimitService)
+      .useValue({ enforceApiRequest: () => Promise.resolve(null) })
       .overrideProvider(AuthService)
       .useValue({
-        validateAccessToken: async (token: string) =>
-          token === 'valid-token'
-            ? 'user-1'
-            : token === 'moderator-token'
-              ? 'user-mod'
-              : null,
+        validateAccessTokenState: (token: string) =>
+          Promise.resolve(
+            token in userIds
+              ? { kind: 'valid', userId: userIds[token] }
+              : { kind: 'invalid' },
+          ),
       })
       .compile();
 
@@ -379,5 +524,119 @@ describe('Comment endpoints (e2e)', () => {
     expect(
       comments.some((comment) => comment.id === 'other-post-comment'),
     ).toBe(true);
+  });
+
+  describe('notifications', () => {
+    it('notifies the post author exactly once about a top-level comment', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/posts/post-1/comments')
+        .set('Authorization', 'Bearer valid-token')
+        .send({ content: ' Nice harvest ' })
+        .expect(201);
+      const { id } = response.body as { id: string };
+
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0]).toMatchObject({
+        recipient_id: 'user-2',
+        type: 'post_comment',
+        actor_id: 'user-1',
+        subject_type: 'comment',
+        subject_id: id,
+        community_id: 'community-1',
+      });
+      expect(JSON.parse(notifications[0].metadata as string)).toEqual({
+        post_id: 'post-1',
+        post_title: 'Title of post-1',
+        excerpt: 'Nice harvest',
+      });
+      expect(openConnections).toBe(0);
+    });
+
+    it('notifies only the parent comment author about a reply', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/posts/post-1/comments')
+        .set('Authorization', 'Bearer valid-token')
+        .send({ content: 'Agreed', parent_id: 'root-2' })
+        .expect(201);
+      const { id } = response.body as { id: string };
+
+      expect(notifications).toEqual([
+        expect.objectContaining({
+          recipient_id: 'user-3',
+          type: 'comment_reply',
+          subject_type: 'comment',
+          subject_id: id,
+        }),
+      ]);
+      expect(JSON.parse(notifications[0].metadata as string)).toEqual({
+        post_id: 'post-1',
+        parent_comment_id: 'root-2',
+        excerpt: 'Agreed',
+      });
+    });
+
+    it('writes nothing for your own post or your own comment', async () => {
+      await request(app.getHttpServer())
+        .post('/posts/post-2/comments')
+        .set('Authorization', 'Bearer valid-token')
+        .send({ content: 'On my own post' })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post('/posts/post-1/comments')
+        .set('Authorization', 'Bearer valid-token')
+        .send({ content: 'On my own comment', parent_id: 'root-1' })
+        .expect(201);
+
+      expect(notifications).toEqual([]);
+    });
+
+    it('rolls the comment back when the notification write fails', async () => {
+      failNotificationWrite = true;
+      const before = comments.length;
+
+      await request(app.getHttpServer())
+        .post('/posts/post-1/comments')
+        .set('Authorization', 'Bearer valid-token')
+        .send({ content: 'Lost' })
+        .expect(500);
+
+      expect(comments).toHaveLength(before);
+      expect(comments.some((comment) => comment.content === 'Lost')).toBe(
+        false,
+      );
+      expect(notifications).toEqual([]);
+      expect(openConnections).toBe(0);
+    });
+
+    it('still renders in the inbox after the comment is deleted', async () => {
+      const created = await request(app.getHttpServer())
+        .post('/posts/post-1/comments')
+        .set('Authorization', 'Bearer valid-token')
+        .send({ content: 'Soon gone' })
+        .expect(201);
+      const { id } = created.body as { id: string };
+      await request(app.getHttpServer())
+        .delete(`/comments/${id}`)
+        .set('Authorization', 'Bearer valid-token')
+        .expect(204);
+      expect(comments.some((comment) => comment.id === id)).toBe(false);
+
+      const inbox = await request(app.getHttpServer())
+        .get('/notifications')
+        .set('Authorization', 'Bearer post-author-token')
+        .expect(200);
+      const body = inbox.body as { total: number; items: unknown[] };
+
+      expect(body.total).toBe(1);
+      expect(body.items[0]).toMatchObject({
+        type: 'post_comment',
+        subject_id: id,
+        metadata: {
+          post_id: 'post-1',
+          post_title: 'Title of post-1',
+          excerpt: 'Soon gone',
+        },
+      });
+    });
   });
 });

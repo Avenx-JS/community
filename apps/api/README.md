@@ -1934,7 +1934,9 @@ Notifications are stored in the `notifications` table (migration
 `010_create_notifications`) and written only through `NotificationsService`
 (see [Writing notifications](#writing-notifications)), and read through the
 routes in [Inbox API](#inbox-api), which also mark notifications read or
-unread and dismiss them. No producer calls the service yet. Each row belongs
+unread and dismiss them. Comments, replies and new posts produce
+notifications (see [Content notifications](#content-notifications)); the
+moderation types are not produced yet. Each row belongs
 to one `recipient_id` and records one event: `type`, the optional `actor_id`,
 the triggering `subject_type`/`subject_id`, an optional `community_id`, a
 `metadata` snapshot, `read_at`, and `created_at`.
@@ -2091,6 +2093,76 @@ them. This is the opposite of `AuthService.logoutAll`, which deliberately runs
 outside its transaction: token revocation has an independent enforcement
 backstop, and a notification has none. The same reasoning is recorded at the
 service; do not move notification writes after commit without revisiting it.
+
+### Content notifications
+
+Three content events write notifications:
+
+| Event                                       | Producer                 | Recipient                                                       | `type`           | Subject         | Metadata                                  |
+| ------------------------------------------- | ------------------------ | --------------------------------------------------------------- | ---------------- | --------------- | ----------------------------------------- |
+| A top-level comment (`parent_id` is `null`) | `CommentsService.create` | the post's author                                               | `post_comment`   | the new comment | `post_id`, `post_title`, `excerpt`        |
+| A reply (`parent_id` is set)                | `CommentsService.create` | the parent comment's author                                     | `comment_reply`  | the new comment | `post_id`, `parent_comment_id`, `excerpt` |
+| A new post                                  | `PostsService.create`    | every eligible member of the post's community except its author | `community_post` | the new post    | `post_title`                              |
+
+`excerpt` is the start of the comment body and `post_title` the post's title,
+both capped by the metadata allowlist. Because the subject is the new comment,
+two comments on one post are two notifications, while a retried write of the
+same comment hits the unique key and stays one. Commenting on your own post
+and replying to your own comment write nothing: `NotificationsService` drops
+self-notifications, so the producers do not check for them.
+
+**Exactly one notification per comment.** A top-level comment notifies only
+the post author; a reply notifies only the parent comment's author, never the
+post author as well, even when the two are different people. The reply is
+addressed to the person replied to, and the post author already sees the
+thread through the post. Notifying both was considered and rejected: it either
+notifies one person twice for one event (when the post author wrote the parent
+comment) or needs a recipient-deduplication step whose answer to "which type
+wins?" is arbitrary. This is deliberate, not an omission.
+
+**Community fan-out honours the preference contract.** `community_post`
+recipients are selected with the
+[community new-post recipient contract](#community-notification-preferences)
+above, which `NotificationsService.recordCommunityPost` wraps unchanged and
+extends only with `s.user_id <> ?` to exclude the author. A muted member
+(`new_posts = FALSE`) receives nothing, a member without a preference row
+receives one, and a non-member never does, whatever their preference row says.
+The fan-out is a single `INSERT ... SELECT` over that query, ending in
+`ON DUPLICATE KEY UPDATE id = id`, so the number of round trips does not grow
+with the member count and a retry is safe. It uses MySQL's `UUID()` for row
+ids rather than reading the recipient list into the application for
+`recordMany`, which would cost one statement per 500 members. `UUID()` yields
+the same 36-character form as `randomUUID()` and fits `VARCHAR(36)`, though
+as a version 1 rather than a version 4 UUID; nothing reads meaning into an id,
+and inbox ownership is enforced by `recipient_id`, not by unguessable ids.
+
+**Fan-out ceiling.** One post in a large community becomes one row per member
+inside the post's transaction. `PostsService.create` therefore counts the
+eligible recipients first, and when there are more than
+`NOTIFICATION_FANOUT_MAX` (default `5000`), it writes no `community_post`
+notifications, logs a warning with the community id and the count, and still
+creates the post. A post must never fail because its community is popular.
+Skipping is deliberate where truncating is not: notifying an arbitrary subset
+would leave nobody able to tell who was told. `NOTIFICATION_FANOUT_MAX` is read
+through `readPositiveInteger`, so it accepts an integer from 1 through 86400;
+that helper bound is kept on purpose, because a synchronous fan-out larger
+than that inside one request's transaction is exactly what the ceiling
+exists to prevent. The proper fix for large communities is a queue or a
+batched background fan-out, which is deliberately out of scope for now.
+
+**Written inside the content action's transaction.** `CommentsService.create`
+and `PostsService.create` acquire a connection, run their reads, the insert,
+and the notification write in one transaction, commit on success, roll back on
+error, and release the connection in `finally` on every path, including the
+ceiling skip. Following the [transaction policy](#writing-notifications), a
+failed notification write therefore rolls back the comment or post, and the
+request fails with `500`. Their routes keep their status codes, response
+bodies, and validation otherwise unchanged.
+
+A notification whose post or comment is later deleted still renders in the
+inbox from its metadata snapshot. **Votes never produce notifications**, as
+recorded above, and there is no real-time delivery: clients poll
+`GET /notifications/unread-count`.
 
 ### Inbox API
 

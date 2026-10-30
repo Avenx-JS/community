@@ -5,6 +5,9 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { MYSQL_POOL } from '../auth/auth.service';
 import type { NotificationEntry } from './notification-metadata';
 import {
+  COMMUNITY_POST_FAN_OUT_SQL,
+  COMMUNITY_POST_RECIPIENT_COUNT_SQL,
+  type CommunityPostFanOut,
   NOTIFICATION_BATCH_SIZE,
   NotificationsService,
 } from './notifications.service';
@@ -438,5 +441,89 @@ describe('NotificationsService', () => {
 
       expect(table.statements).toHaveLength(0);
     });
+  });
+});
+
+describe('NotificationsService.recordCommunityPost', () => {
+  const fanOut: CommunityPostFanOut = {
+    type: 'community_post',
+    actorId: 'poster',
+    subjectType: 'post',
+    subjectId: 'post-1',
+    communityId: 'community-1',
+    metadata: { post_title: 'First tomatoes' },
+  };
+  let statements: Array<{ sql: string; values: unknown[] }>;
+  let eligible: number;
+  let connection: PoolConnection;
+  let service: NotificationsService;
+
+  beforeEach(async () => {
+    statements = [];
+    eligible = 3;
+    connection = {
+      execute: (sql: string, values: unknown[]) => {
+        statements.push({ sql, values });
+        return Promise.resolve([
+          sql.startsWith('SELECT COUNT(*)') ? [{ recipients: eligible }] : {},
+          [],
+        ]);
+      },
+    } as unknown as PoolConnection;
+    service = await createService();
+  });
+
+  it('counts, then writes every eligible member with one INSERT ... SELECT', async () => {
+    await expect(
+      service.recordCommunityPost(connection, fanOut, 3),
+    ).resolves.toEqual({ recipients: 3, written: true });
+
+    expect(statements.map((statement) => statement.sql)).toEqual([
+      COMMUNITY_POST_RECIPIENT_COUNT_SQL,
+      COMMUNITY_POST_FAN_OUT_SQL,
+    ]);
+    expect(statements[0].values).toEqual(['community-1', 'poster']);
+    expect(statements[1].values).toEqual([
+      'poster',
+      'post-1',
+      'community-1',
+      JSON.stringify({ post_title: 'First tomatoes' }),
+      'community-1',
+      'poster',
+    ]);
+  });
+
+  it('writes nothing above the ceiling or with no eligible member', async () => {
+    eligible = 4;
+    await expect(
+      service.recordCommunityPost(connection, fanOut, 3),
+    ).resolves.toEqual({ recipients: 4, written: false });
+    eligible = 0;
+    await expect(
+      service.recordCommunityPost(connection, fanOut, 3),
+    ).resolves.toEqual({ recipients: 0, written: false });
+
+    expect(
+      statements.every((statement) => statement.sql.startsWith('SELECT')),
+    ).toBe(true);
+  });
+
+  it('validates the entry before any statement', async () => {
+    await expect(
+      service.recordCommunityPost(
+        connection,
+        { ...fanOut, type: 'post_comment' } as never,
+        3,
+      ),
+    ).rejects.toThrow(TypeError);
+    await expect(
+      service.recordCommunityPost(
+        connection,
+        { ...fanOut, communityId: "c' OR 1=1" },
+        3,
+      ),
+    ).rejects.toThrow('Invalid notification community for community_post');
+
+    expect(statements).toEqual([]);
   });
 });

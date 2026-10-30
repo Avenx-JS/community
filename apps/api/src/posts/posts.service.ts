@@ -2,11 +2,14 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { readPositiveInteger } from '../common/read-positive-integer';
+import { NotificationsService } from '../notifications/notifications.service';
 import { CreatePostDto } from './dto/create-post.dto';
 import { ListPostsDto } from './dto/list-posts.dto';
 
@@ -40,7 +43,18 @@ export interface PostListDto {
 
 @Injectable()
 export class PostsService {
-  constructor(@Inject(MYSQL_POOL) private readonly pool: Pool) {}
+  private readonly logger = new Logger(PostsService.name);
+  // The most community_post rows one post may write inside its request's
+  // transaction. Above it the fan-out is skipped, never truncated.
+  private readonly fanOutMax = readPositiveInteger(
+    'NOTIFICATION_FANOUT_MAX',
+    5000,
+  );
+
+  constructor(
+    @Inject(MYSQL_POOL) private readonly pool: Pool,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   async findAll(query: ListPostsDto): Promise<PostListDto> {
     const page = query.page ?? 1;
@@ -67,39 +81,77 @@ export class PostsService {
     };
   }
 
+  // The post and its community_post fan-out commit together: a failed
+  // notification write rolls the post back (see NotificationsService).
   async create(input: CreatePostDto, authorId: string): Promise<PostDto> {
-    const [communities] = await this.pool.execute<
-      (RowDataPacket & { id: string })[]
-    >('SELECT id FROM communities WHERE id = ? LIMIT 1', [input.community_id]);
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
 
-    if (!communities[0]) {
-      throw new NotFoundException('Community not found');
-    }
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
 
-    const id = randomUUID();
-    await this.pool.execute<ResultSetHeader>(
-      'INSERT INTO posts (id, title, content, type, author_id, community_id) VALUES (?, ?, ?, ?, ?, ?)',
-      [
-        id,
-        input.title.trim(),
-        input.content.trim(),
-        input.type,
-        authorId,
+      const [communities] = await connection.execute<
+        (RowDataPacket & { id: string })[]
+      >('SELECT id FROM communities WHERE id = ? LIMIT 1', [
         input.community_id,
-      ],
-    );
+      ]);
 
-    const [posts] = await this.pool.execute<PostRow[]>(
-      'SELECT id, title, content, type, author_id, community_id, created_at FROM posts WHERE id = ? LIMIT 1',
-      [id],
-    );
-    const post = posts[0];
+      if (!communities[0]) {
+        throw new NotFoundException('Community not found');
+      }
 
-    if (!post) {
-      throw new Error('Created post could not be retrieved');
+      const id = randomUUID();
+      await connection.execute<ResultSetHeader>(
+        'INSERT INTO posts (id, title, content, type, author_id, community_id) VALUES (?, ?, ?, ?, ?, ?)',
+        [
+          id,
+          input.title.trim(),
+          input.content.trim(),
+          input.type,
+          authorId,
+          input.community_id,
+        ],
+      );
+
+      const [posts] = await connection.execute<PostRow[]>(
+        'SELECT id, title, content, type, author_id, community_id, created_at FROM posts WHERE id = ? LIMIT 1',
+        [id],
+      );
+      const post = posts[0];
+
+      if (!post) {
+        throw new Error('Created post could not be retrieved');
+      }
+
+      const fanOut = await this.notifications.recordCommunityPost(
+        connection,
+        {
+          type: 'community_post',
+          actorId: authorId,
+          subjectType: 'post',
+          subjectId: post.id,
+          communityId: post.community_id,
+          metadata: { post_title: post.title },
+        },
+        this.fanOutMax,
+      );
+      if (!fanOut.written && fanOut.recipients > this.fanOutMax) {
+        this.logger.warn(
+          `Skipped community_post notifications for community ${post.community_id}: ${fanOut.recipients} eligible recipients exceed NOTIFICATION_FANOUT_MAX (${this.fanOutMax})`,
+        );
+      }
+
+      await connection.commit();
+      return this.toDto(post);
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
     }
-
-    return this.toDto(post);
   }
 
   async findOne(id: string): Promise<PostDto> {

@@ -1,7 +1,8 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import type { Pool, PoolConnection } from 'mysql2/promise';
+import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { COMMUNITY_NEW_POST_RECIPIENTS_SQL } from '../communities/community-notification-recipients';
 import {
   assertNotificationEntry,
   buildNotificationMetadata,
@@ -18,6 +19,30 @@ const ROW_PLACEHOLDERS = '(?, ?, ?, ?, ?, ?, ?, ?)';
 // A repeated write of the same event hits the unique key on
 // (recipient_id, type, subject_type, subject_id) and leaves the row untouched.
 const ON_DUPLICATE = ' ON DUPLICATE KEY UPDATE id = id';
+
+// A community_post entry before its recipients are known: the fan-out selects
+// them from the community's eligible members.
+export type CommunityPostFanOut = Omit<
+  Extract<NotificationEntry, { type: 'community_post' }>,
+  'recipientId'
+>;
+
+export interface CommunityPostFanOutResult {
+  recipients: number;
+  written: boolean;
+}
+
+// Both statements wrap the community new-post recipient contract unchanged and
+// only add the author exclusion. Bound values: community id, author id.
+const ELIGIBLE_RECIPIENTS = `(${COMMUNITY_NEW_POST_RECIPIENTS_SQL} AND s.user_id <> ?) eligible`;
+
+export const COMMUNITY_POST_RECIPIENT_COUNT_SQL = `SELECT COUNT(*) AS recipients FROM ${ELIGIBLE_RECIPIENTS}`;
+
+// One statement however many members are notified. MySQL's UUID() yields the
+// same 36-character 8-4-4-4-12 lowercase form as randomUUID(), though as a
+// version 1 rather than a version 4 UUID; nothing reads meaning into an id,
+// and inbox ownership is enforced by recipient_id, not by unguessable ids.
+export const COMMUNITY_POST_FAN_OUT_SQL = `INSERT INTO notifications (id, recipient_id, type, actor_id, subject_type, subject_id, community_id, metadata) SELECT UUID(), eligible.user_id, 'community_post', ?, 'post', ?, ?, ? FROM ${ELIGIBLE_RECIPIENTS}${ON_DUPLICATE}`;
 
 function isNotificationEntry(
   value: PoolConnection | NotificationEntry,
@@ -86,6 +111,47 @@ export class NotificationsService {
       );
     }
     await this.insert(connection, entries);
+  }
+
+  // community_post fan-out: counts the eligible members (excluding the
+  // author) and, unless there are more than maxRecipients, writes one row per
+  // member with a single INSERT ... SELECT on the caller's connection. At most
+  // two round trips, whatever the member count. Above the ceiling nothing is
+  // written; the producer owns the ceiling and how a skip is reported.
+  async recordCommunityPost(
+    connection: PoolConnection,
+    entry: CommunityPostFanOut,
+    maxRecipients: number,
+  ): Promise<CommunityPostFanOutResult> {
+    // Validated as if addressed to the author: every row shares this shape
+    // and metadata, and the recipients themselves come from the database.
+    const template = {
+      ...entry,
+      recipientId: entry.actorId,
+    } as NotificationEntry;
+    if (template.type !== 'community_post') {
+      throw new TypeError('Expected a community_post notification');
+    }
+    assertNotificationEntry(template);
+    const metadata = buildNotificationMetadata(template);
+
+    const recipientValues = [entry.communityId, entry.actorId];
+    const [counts] = await connection.execute<
+      (RowDataPacket & { recipients: number | string })[]
+    >(COMMUNITY_POST_RECIPIENT_COUNT_SQL, recipientValues);
+    const recipients = Number(counts[0]?.recipients ?? 0);
+    if (recipients === 0 || recipients > maxRecipients) {
+      return { recipients, written: false };
+    }
+
+    await connection.execute(COMMUNITY_POST_FAN_OUT_SQL, [
+      entry.actorId,
+      entry.subjectId,
+      entry.communityId,
+      metadata === null ? null : JSON.stringify(metadata),
+      ...recipientValues,
+    ]);
+    return { recipients, written: true };
   }
 
   private async insert(
