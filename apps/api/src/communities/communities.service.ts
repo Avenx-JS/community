@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { escapeLikeSearch } from '../common/like-search';
+import { CommunityRuleAcceptanceService } from './community-rule-acceptance.service';
 import { CreateCommunityDto } from './dto/create-community.dto';
 import { ListCommunitiesDto } from './dto/list-communities.dto';
 import { ListSubscriptionsDto } from './dto/list-subscriptions.dto';
@@ -62,7 +63,10 @@ export interface SubscriptionStatusDto {
 
 @Injectable()
 export class CommunitiesService {
-  constructor(@Inject(MYSQL_POOL) private readonly pool: Pool) {}
+  constructor(
+    @Inject(MYSQL_POOL) private readonly pool: Pool,
+    private readonly ruleAcceptance: CommunityRuleAcceptanceService,
+  ) {}
 
   async findAll(query: ListCommunitiesDto): Promise<CommunityListDto> {
     const page = query.page ?? 1;
@@ -140,8 +144,12 @@ export class CommunitiesService {
     return this.toDto(community);
   }
 
+  // Joining is participation, so it requires the current rules to be
+  // accepted. Leaving (unsubscribe) deliberately does not: a user who
+  // declines the rules must not be trapped in the community.
   async subscribe(name: string, userId: string): Promise<void> {
     const communityId = await this.getCommunityId(name);
+    await this.ruleAcceptance.assertAcceptedOrThrow(userId, communityId);
     await this.pool.execute<ResultSetHeader>(
       'INSERT INTO community_subscriptions (user_id, community_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE created_at = created_at',
       [userId, communityId],

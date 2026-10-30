@@ -6,11 +6,13 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { CommunitiesService } from './communities.service';
+import { CommunityRuleAcceptanceService } from './community-rule-acceptance.service';
 
 describe('CommunitiesService', () => {
   let service: CommunitiesService;
   let queries: Array<{ sql: string; values: unknown[] }>;
   let results: unknown[][];
+  let ruleAcceptance: { assertAcceptedOrThrow: jest.Mock };
 
   beforeEach(async () => {
     queries = [];
@@ -21,8 +23,16 @@ describe('CommunitiesService', () => {
         return Promise.resolve([results.shift() ?? [], []]);
       },
     };
+    // Every community's rules count as accepted unless a test says otherwise.
+    ruleAcceptance = {
+      assertAcceptedOrThrow: jest.fn().mockResolvedValue(undefined),
+    };
     const module: TestingModule = await Test.createTestingModule({
-      providers: [CommunitiesService, { provide: MYSQL_POOL, useValue: pool }],
+      providers: [
+        CommunitiesService,
+        { provide: MYSQL_POOL, useValue: pool },
+        { provide: CommunityRuleAcceptanceService, useValue: ruleAcceptance },
+      ],
     }).compile();
     service = module.get<CommunitiesService>(CommunitiesService);
     service = module.get<CommunitiesService>(CommunitiesService);
@@ -152,6 +162,7 @@ describe('CommunitiesService', () => {
       providers: [
         CommunitiesService,
         { provide: MYSQL_POOL, useValue: duplicatePool },
+        { provide: CommunityRuleAcceptanceService, useValue: ruleAcceptance },
       ],
     }).compile();
     const duplicateService = duplicateModule.get(CommunitiesService);

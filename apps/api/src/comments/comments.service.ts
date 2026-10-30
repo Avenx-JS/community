@@ -13,6 +13,7 @@ import {
   isSqlTrue,
 } from '../common/community-moderation';
 import type { NotificationEntry } from '../notifications/notification-metadata';
+import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreateCommentDto } from './dto/create-comment.dto';
 
@@ -55,6 +56,7 @@ export class CommentsService {
   constructor(
     @Inject(MYSQL_POOL) private readonly pool: Pool,
     private readonly notifications: NotificationsService,
+    private readonly ruleAcceptance: CommunityRuleAcceptanceService,
   ) {}
 
   async findThread(postId: string): Promise<CommentThreadDto> {
@@ -153,6 +155,11 @@ export class CommentsService {
         }
         parentAuthorId = parents[0].author_id;
       }
+      await this.ruleAcceptance.assertAcceptedOrThrow(
+        authorId,
+        post.community_id,
+        connection,
+      );
 
       const id = randomUUID();
       await connection.execute<ResultSetHeader>(

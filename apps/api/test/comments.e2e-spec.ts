@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  jest,
+} from '@jest/globals';
 import { ValidationPipe } from '@nestjs/common';
 import type { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -7,6 +14,11 @@ import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 import { AuthRateLimitService } from '../src/auth/auth-rate-limit.service';
 import { AuthService, MYSQL_POOL } from '../src/auth/auth.service';
+import { CommunityRuleAcceptanceService } from '../src/communities/community-rule-acceptance.service';
+import {
+  createRulesStore,
+  type RulesStore,
+} from './fakes/community-rules-store';
 
 interface TestNotification {
   id: string;
@@ -37,6 +49,7 @@ describe('Comment endpoints (e2e)', () => {
   let notifications: TestNotification[];
   let failNotificationWrite: boolean;
   let openConnections: number;
+  let rules: RulesStore;
   const postIds = ['post-1', 'post-2'];
   const postAuthors = new Map([
     ['post-1', 'user-2'],
@@ -96,10 +109,19 @@ describe('Comment endpoints (e2e)', () => {
     notifications = [];
     failNotificationWrite = false;
     openConnections = 0;
+    // No community has published rules unless a test publishes some.
+    rules = createRulesStore({
+      'community-1': { name: 'general', creator_id: 'creator-1' },
+      'community-2': { name: 'other', creator_id: 'creator-2' },
+    });
 
     const pool = {
       execute: async (sql: string, values: unknown[]) => {
         queryCalls.push({ sql, values });
+        const ruleAnswer = rules.handle(sql, values);
+        if (ruleAnswer) {
+          return ruleAnswer;
+        }
         if (sql.startsWith('SELECT id, author_id, community_id, title')) {
           const [postId] = values as [string];
           return [
@@ -712,6 +734,86 @@ describe('Comment endpoints (e2e)', () => {
         true,
       );
       expect(openConnections).toBe(0);
+    });
+  });
+
+  describe('rule acceptance', () => {
+    const as = (token: string) => ({
+      post: (path: string) =>
+        request(app.getHttpServer())
+          .post(path)
+          .set('Authorization', `Bearer ${token}`),
+      get: (path: string) =>
+        request(app.getHttpServer())
+          .get(path)
+          .set('Authorization', `Bearer ${token}`),
+      delete: (path: string) =>
+        request(app.getHttpServer())
+          .delete(path)
+          .set('Authorization', `Bearer ${token}`),
+    });
+
+    it('refuses comments and replies until the rules are accepted, then creates them', async () => {
+      rules.publish('community-1');
+      const before = comments.length;
+
+      for (const body of [
+        { content: 'Top level' },
+        { content: 'Reply', parent_id: 'root-1' },
+      ]) {
+        const refused = await as('valid-token')
+          .post('/posts/post-1/comments')
+          .send(body)
+          .expect(403);
+        expect(refused.body).toEqual({
+          reason: 'community_rules_not_accepted',
+          community: 'general',
+          current_version: 1,
+        });
+        expect(JSON.stringify(refused.body)).not.toMatch(
+          /user-1|community-1|rules-v|creator/,
+        );
+      }
+      expect(comments).toHaveLength(before);
+      expect(notifications).toEqual([]);
+      expect(openConnections).toBe(0);
+
+      await as('valid-token')
+        .post('/communities/general/rules/acceptance')
+        .send({ version: 1 })
+        .expect(201);
+      await as('valid-token')
+        .post('/posts/post-1/comments')
+        .send({ content: 'Reply', parent_id: 'root-1' })
+        .expect(201);
+      expect(comments).toHaveLength(before + 1);
+    });
+
+    it('returns 404, not 403, for an unknown post or parent', async () => {
+      rules.publish('community-1');
+
+      await as('valid-token')
+        .post('/posts/missing-post/comments')
+        .send({ content: 'Comment' })
+        .expect(404);
+      await as('valid-token')
+        .post('/posts/post-1/comments')
+        .send({ content: 'Comment', parent_id: 'unknown-parent' })
+        .expect(404);
+    });
+
+    it('lets authors and moderators delete, and anyone read, without accepting', async () => {
+      rules.publish('community-1');
+      const check = jest.spyOn(
+        app.get(CommunityRuleAcceptanceService),
+        'assertAcceptedOrThrow',
+      );
+
+      await as('valid-token').get('/posts/post-1/comments').expect(200);
+      await as('valid-token').delete('/comments/root-1').expect(204);
+      await as('moderator-token').delete('/comments/root-2').expect(204);
+
+      expect(check).not.toHaveBeenCalled();
     });
   });
 });

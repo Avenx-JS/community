@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  jest,
+} from '@jest/globals';
 import { ValidationPipe } from '@nestjs/common';
 import type { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -11,6 +18,11 @@ import {
   eligibleRecipients,
   recipientFixture,
 } from './fakes/community-notification-recipients';
+import {
+  createRulesStore,
+  type RulesStore,
+} from './fakes/community-rules-store';
+import { CommunityRuleAcceptanceService } from '../src/communities/community-rule-acceptance.service';
 
 interface TestNotification {
   id: string;
@@ -39,6 +51,7 @@ describe('Post endpoints (e2e)', () => {
   let queryCalls: Array<{ sql: string; values: unknown[] }>;
   let notifications: TestNotification[];
   let failNotificationWrite: boolean;
+  let rules: RulesStore;
   let openConnections: number;
   const communities = [
     'community-1',
@@ -81,6 +94,11 @@ describe('Post endpoints (e2e)', () => {
     queryCalls = [];
     notifications = [];
     failNotificationWrite = false;
+    // No community has published rules unless a test publishes some.
+    rules = createRulesStore({
+      'community-1': { name: 'general', creator_id: 'creator-1' },
+      'community-2': { name: 'other', creator_id: 'creator-2' },
+    });
     openConnections = 0;
 
     // Evaluates the fan-out's recipient selection over the shared fixture;
@@ -95,6 +113,10 @@ describe('Post endpoints (e2e)', () => {
     const pool = {
       execute: async (sql: string, values: unknown[]) => {
         queryCalls.push({ sql, values });
+        const ruleAnswer = rules.handle(sql, values);
+        if (ruleAnswer) {
+          return ruleAnswer;
+        }
 
         if (sql.startsWith('SELECT COUNT(*) AS recipients')) {
           return [
@@ -689,6 +711,82 @@ describe('Post endpoints (e2e)', () => {
       expect(posts.some((post) => post.id === 'post-1')).toBe(true);
       expect(notifications).toEqual([]);
       expect(openConnections).toBe(0);
+    });
+  });
+
+  describe('rule acceptance', () => {
+    const post = {
+      title: 'Hello',
+      type: 'text',
+      content: 'World',
+      community_id: 'community-1',
+    };
+    const as = (token: string) => ({
+      post: (path: string) =>
+        request(app.getHttpServer())
+          .post(path)
+          .set('Authorization', `Bearer ${token}`),
+      get: (path: string) =>
+        request(app.getHttpServer())
+          .get(path)
+          .set('Authorization', `Bearer ${token}`),
+      delete: (path: string) =>
+        request(app.getHttpServer())
+          .delete(path)
+          .set('Authorization', `Bearer ${token}`),
+    });
+
+    it('refuses a post until the rules are accepted, then creates it', async () => {
+      rules.publish('community-1');
+      const before = posts.length;
+
+      const refused = await as('valid-token')
+        .post('/posts')
+        .send(post)
+        .expect(403);
+      expect(refused.body).toEqual({
+        reason: 'community_rules_not_accepted',
+        community: 'general',
+        current_version: 1,
+      });
+      expect(JSON.stringify(refused.body)).not.toMatch(
+        /user-1|community-1|rules-v|creator/,
+      );
+      expect(posts).toHaveLength(before);
+      expect(openConnections).toBe(0);
+
+      await as('valid-token')
+        .post('/communities/general/rules/acceptance')
+        .send({ version: 1 })
+        .expect(201);
+      await as('valid-token').post('/posts').send(post).expect(201);
+      expect(posts).toHaveLength(before + 1);
+    });
+
+    it('returns 404, not 403, for an unknown community', async () => {
+      rules.publish('community-1');
+
+      await as('valid-token')
+        .post('/posts')
+        .send({ ...post, community_id: 'missing-community' })
+        .expect(404);
+    });
+
+    it('lets authors and moderators delete, and anyone read, without accepting', async () => {
+      rules.publish('community-1');
+      const check = jest.spyOn(
+        app.get(CommunityRuleAcceptanceService),
+        'assertAcceptedOrThrow',
+      );
+
+      await as('valid-token')
+        .get('/posts?community_id=community-1')
+        .expect(200);
+      await as('valid-token').get('/posts/post-1').expect(200);
+      await as('valid-token').delete('/posts/post-1').expect(204);
+      await as('moderator-token').delete('/posts/post-2').expect(204);
+
+      expect(check).not.toHaveBeenCalled();
     });
   });
 });

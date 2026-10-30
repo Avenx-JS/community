@@ -1,5 +1,10 @@
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import type { PoolConnection } from 'mysql2/promise';
+import {
+  createRulesStore,
+  type RulesStore,
+} from '../../test/fakes/community-rules-store';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { CommunityRuleAcceptanceService } from './community-rule-acceptance.service';
 
@@ -165,5 +170,134 @@ describe('CommunityRuleAcceptanceService', () => {
     await expect(
       service.getLatestAcceptance('user-1', 'community-1'),
     ).resolves.toBeNull();
+  });
+});
+
+describe('CommunityRuleAcceptanceService.assertAcceptedOrThrow', () => {
+  let service: CommunityRuleAcceptanceService;
+  let store: RulesStore;
+  let poolStatements: string[];
+
+  beforeEach(async () => {
+    store = createRulesStore({
+      'community-1': { name: 'gardening', creator_id: 'creator' },
+    });
+    poolStatements = [];
+    const pool = {
+      execute: (sql: string, values: unknown[]) => {
+        poolStatements.push(sql);
+        const answer = store.handle(sql, values);
+        return answer
+          ? Promise.resolve(answer)
+          : Promise.reject(new Error(`Unexpected SQL: ${sql}`));
+      },
+    };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        CommunityRuleAcceptanceService,
+        { provide: MYSQL_POOL, useValue: pool },
+      ],
+    }).compile();
+    service = module.get(CommunityRuleAcceptanceService);
+  });
+
+  const assert = (userId: string) =>
+    service.assertAcceptedOrThrow(userId, 'community-1');
+
+  async function refusal(userId: string): Promise<ForbiddenException> {
+    const error: unknown = await assert(userId).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(ForbiddenException);
+    return error as ForbiddenException;
+  }
+
+  it('permits anyone, in one lookup, when the community has no published rules', async () => {
+    await expect(assert('member')).resolves.toBeUndefined();
+
+    expect(store.statements).toHaveLength(1);
+    expect(store.acceptances).toEqual([]);
+  });
+
+  it('refuses an unaccepted current version with only the documented payload', async () => {
+    store.publish('community-1');
+
+    const error = await refusal('member');
+
+    expect(error.getStatus()).toBe(403);
+    expect(error.getResponse()).toEqual({
+      reason: 'community_rules_not_accepted',
+      community: 'gardening',
+      current_version: 1,
+    });
+    const serialised = JSON.stringify(error.getResponse());
+    for (const leaked of ['member', 'creator', 'community-1-rules', 'id']) {
+      expect(serialised).not.toContain(leaked);
+    }
+  });
+
+  it('permits once the current version is accepted', async () => {
+    store.publish('community-1');
+    store.accept('member', 'community-1');
+
+    await expect(assert('member')).resolves.toBeUndefined();
+  });
+
+  it('refuses after a new version, until that version is accepted', async () => {
+    store.publish('community-1');
+    store.accept('member', 'community-1');
+    await expect(assert('member')).resolves.toBeUndefined();
+
+    store.publish('community-1');
+    expect((await refusal('member')).getResponse()).toMatchObject({
+      current_version: 2,
+    });
+
+    store.accept('member', 'community-1');
+    await expect(assert('member')).resolves.toBeUndefined();
+  });
+
+  it('exempts the community creator, even right after publishing', async () => {
+    store.publish('community-1');
+    store.publish('community-1');
+
+    await expect(assert('creator')).resolves.toBeUndefined();
+  });
+
+  it('does not exempt moderators or platform admins: no role is consulted', async () => {
+    store.publish('community-1');
+
+    await refusal('moderator');
+    expect(
+      store.statements.some((sql) =>
+        /community_moderators|users|role/.test(sql),
+      ),
+    ).toBe(false);
+  });
+
+  it('runs every lookup on the supplied connection', async () => {
+    store.publish('community-1');
+    const used: string[] = [];
+    const connection = {
+      execute: (sql: string, values: unknown[]) => {
+        used.push(sql);
+        return Promise.resolve(store.handle(sql, values));
+      },
+    } as unknown as PoolConnection;
+
+    await expect(
+      service.assertAcceptedOrThrow('member', 'community-1', connection),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+
+    expect(used).toHaveLength(2);
+    expect(poolStatements).toEqual([]);
+  });
+
+  it('reports a community that vanished as not found, not forbidden', async () => {
+    store.publish('community-1');
+    store.communities.delete('community-1');
+
+    await expect(assert('member')).rejects.toBeInstanceOf(NotFoundException);
   });
 });

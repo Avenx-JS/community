@@ -1,7 +1,14 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { VotesService } from './votes.service';
+
+// Every community's rules count as accepted unless a test says otherwise.
+const acceptingRuleAcceptance = {
+  provide: CommunityRuleAcceptanceService,
+  useValue: { assertAcceptedOrThrow: () => Promise.resolve() },
+};
 
 describe('VotesService', () => {
   let service: VotesService;
@@ -68,7 +75,11 @@ describe('VotesService', () => {
     };
     const pool = { getConnection: async () => connection };
     const module: TestingModule = await Test.createTestingModule({
-      providers: [VotesService, { provide: MYSQL_POOL, useValue: pool }],
+      providers: [
+        VotesService,
+        acceptingRuleAcceptance,
+        { provide: MYSQL_POOL, useValue: pool },
+      ],
     }).compile();
 
     service = module.get<VotesService>(VotesService);

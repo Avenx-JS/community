@@ -5,7 +5,12 @@ import { Test, TestingModule } from '@nestjs/testing';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
+import { AuthRateLimitService } from '../src/auth/auth-rate-limit.service';
 import { AuthService, MYSQL_POOL } from '../src/auth/auth.service';
+import {
+  createRulesStore,
+  type RulesStore,
+} from './fakes/community-rules-store';
 
 interface StoredVote {
   id: string;
@@ -22,15 +27,25 @@ describe('Vote endpoint (e2e)', () => {
   let queryCalls: Array<{ sql: string; values: unknown[] }>;
   let commits: number;
   let rollbacks: number;
+  let releases: number;
+  let rules: RulesStore;
 
   beforeEach(async () => {
     votes = new Map();
     queryCalls = [];
     commits = 0;
     rollbacks = 0;
+    releases = 0;
+    // No community has published rules unless a test publishes some.
+    rules = createRulesStore({
+      'community-1': { name: 'general', creator_id: 'creator-1' },
+      'community-2': { name: 'orchards', creator_id: 'creator-2' },
+    });
+    // Each target's community. comment-1 sits on a post in community-2, so a
+    // comment vote is gated on the community reached through its post.
     const targets = {
-      post: new Set(['post-1']),
-      comment: new Set(['comment-1']),
+      post: new Map([['post-1', 'community-1']]),
+      comment: new Map([['comment-1', 'community-2']]),
     };
     const connection = {
       beginTransaction: async () => undefined,
@@ -40,14 +55,21 @@ describe('Vote endpoint (e2e)', () => {
       rollback: async () => {
         rollbacks += 1;
       },
-      release: () => undefined,
+      release: () => {
+        releases += 1;
+      },
       execute: async (sql: string, values: unknown[]) => {
         queryCalls.push({ sql, values });
+        const ruleAnswer = rules.handle(sql, values);
+        if (ruleAnswer) {
+          return ruleAnswer;
+        }
         if (sql.includes('FOR UPDATE')) {
           const [targetId] = values as [string];
           const targetType = sql.includes('FROM posts') ? 'post' : 'comment';
+          const communityId = targets[targetType].get(targetId);
           return [
-            targets[targetType].has(targetId) ? [{ id: targetId }] : [],
+            communityId ? [{ id: targetId, community_id: communityId }] : [],
             [],
           ];
         }
@@ -100,15 +122,27 @@ describe('Vote endpoint (e2e)', () => {
       imports: [AppModule],
     })
       .overrideProvider(MYSQL_POOL)
-      .useValue({ getConnection: async () => connection })
+      .useValue({
+        getConnection: () => Promise.resolve(connection),
+        // Only the rule acceptance routes use the pool directly.
+        execute: (sql: string, values: unknown[]) =>
+          rules.handle(sql, values) ??
+          Promise.reject(new Error(`Unexpected SQL query: ${sql}`)),
+      })
+      .overrideProvider(AuthRateLimitService)
+      .useValue({ enforceApiRequest: () => Promise.resolve(null) })
       .overrideProvider(AuthService)
       .useValue({
-        validateAccessToken: async (token: string) =>
-          token === 'valid-token'
-            ? 'user-1'
-            : token === 'another-token'
-              ? 'user-2'
-              : null,
+        validateAccessTokenState: (token: string) => {
+          const userId = {
+            'valid-token': 'user-1',
+            'another-token': 'user-2',
+            'creator-token': 'creator-2',
+          }[token];
+          return Promise.resolve(
+            userId ? { kind: 'valid', userId } : { kind: 'invalid' },
+          );
+        },
       })
       .compile();
 
@@ -246,5 +280,76 @@ describe('Vote endpoint (e2e)', () => {
       queryCalls.some((call) => call.sql.startsWith('INSERT INTO votes')),
     ).toBe(false);
     expect(rollbacks).toBe(2);
+  });
+
+  describe('rule acceptance', () => {
+    const vote = (token: string, body: Record<string, unknown>) =>
+      request(app.getHttpServer())
+        .post('/votes')
+        .set('Authorization', `Bearer ${token}`)
+        .send(body);
+    const postVote = { target_type: 'post', target_id: 'post-1', value: 1 };
+    const commentVote = {
+      target_type: 'comment',
+      target_id: 'comment-1',
+      value: 1,
+    };
+
+    it('refuses a post vote until the rules are accepted, then records it', async () => {
+      rules.publish('community-1');
+
+      const refused = await vote('valid-token', postVote).expect(403);
+      expect(refused.body).toEqual({
+        reason: 'community_rules_not_accepted',
+        community: 'general',
+        current_version: 1,
+      });
+      expect(JSON.stringify(refused.body)).not.toMatch(
+        /user-1|community-1|rules-v|creator/,
+      );
+      expect(votes.size).toBe(0);
+      expect({ commits, rollbacks, releases }).toEqual({
+        commits: 0,
+        rollbacks: 1,
+        releases: 1,
+      });
+
+      await request(app.getHttpServer())
+        .post('/communities/general/rules/acceptance')
+        .set('Authorization', 'Bearer valid-token')
+        .send({ version: 1 })
+        .expect(201);
+      await vote('valid-token', postVote).expect(201);
+      expect(votes.size).toBe(1);
+    });
+
+    it('gates a comment vote on the community of the comment’s post', async () => {
+      rules.publish('community-2');
+
+      await vote('valid-token', postVote).expect(201);
+      const refused = await vote('valid-token', commentVote).expect(403);
+      expect(refused.body).toMatchObject({ community: 'orchards' });
+      expect(votes.size).toBe(1);
+
+      await vote('creator-token', commentVote).expect(201);
+    });
+
+    it('returns 404, not 403, for an unknown target', async () => {
+      rules.publish('community-1');
+      rules.publish('community-2');
+
+      await vote('valid-token', { ...postVote, target_id: 'missing' }).expect(
+        404,
+      );
+      await vote('valid-token', {
+        ...commentVote,
+        target_id: 'missing',
+      }).expect(404);
+      expect(
+        rules.statements.some((sql) =>
+          sql.includes('community_rule_acceptances'),
+        ),
+      ).toBe(false);
+    });
   });
 });

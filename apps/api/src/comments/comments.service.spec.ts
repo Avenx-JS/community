@@ -5,8 +5,15 @@ import {
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CommentsService } from './comments.service';
+
+// Every community's rules count as accepted unless a test says otherwise.
+const acceptingRuleAcceptance = {
+  provide: CommunityRuleAcceptanceService,
+  useValue: { assertAcceptedOrThrow: () => Promise.resolve() },
+};
 
 describe('CommentsService', () => {
   let service: CommentsService;
@@ -44,6 +51,7 @@ describe('CommentsService', () => {
     };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
+        acceptingRuleAcceptance,
         CommentsService,
         { provide: MYSQL_POOL, useValue: pool },
         { provide: NotificationsService, useValue: notifications },
@@ -229,6 +237,7 @@ describe('CommentsService.create notifications', () => {
     };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
+        acceptingRuleAcceptance,
         CommentsService,
         { provide: MYSQL_POOL, useValue: pool },
         { provide: NotificationsService, useValue: notifications },
@@ -537,6 +546,7 @@ describe('CommentsService.create with NotificationsService', () => {
     const pool = { getConnection: () => Promise.resolve(connection) };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
+        acceptingRuleAcceptance,
         CommentsService,
         NotificationsService,
         { provide: MYSQL_POOL, useValue: pool },
@@ -639,6 +649,7 @@ describe('CommentsService.remove', () => {
     notifications = { record: jest.fn().mockResolvedValue(undefined) };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
+        acceptingRuleAcceptance,
         CommentsService,
         {
           provide: MYSQL_POOL,

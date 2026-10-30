@@ -1696,9 +1696,10 @@ dedicated bucket, because acceptance happens once per version. Like other
 routes without `@AllowRestricted()`, a suspended or banned account receives
 `403`.
 
-**Nothing is enforced yet.** A missing acceptance blocks nothing until the
-enforcement change lands. These routes ship first so clients can be built and
-exercised while enforcement is reviewed.
+**Acceptance is enforced.** Joining, posting, commenting and voting require
+the current version to be accepted; see
+[Rule acceptance and participation](#rule-acceptance-and-participation). Both
+routes stay reachable throughout, including for a member refused there.
 
 `GET /communities/:name/rules/acceptance` returns:
 
@@ -1758,9 +1759,9 @@ so a repeated submit never rewrites when the user agreed. `user_id` comes from
 the token, and `document_id` and `community_id` are derived by the insert,
 never taken from the request.
 
-**Acceptance neither requires nor creates membership.** Enforcement will make
-joining conditional on having accepted, so acceptance must be reachable by a
-non-member or joining becomes impossible. The intended client flow is two
+**Acceptance neither requires nor creates membership.** Joining is conditional
+on having accepted, so acceptance must be reachable by a non-member or joining
+becomes impossible. The intended client flow is two
 deliberate calls: accept the rules, then `POST /communities/:name/subscribe`.
 
 **Only real changes require reacceptance.** Publishing a new version makes
@@ -1772,6 +1773,111 @@ reacceptance.
 Accepting writes no `admin_actions` entry: the audit log is for
 platform-administrative actions, and the acceptance row is itself the durable,
 timestamped record.
+
+#### Rule acceptance and participation
+
+A user who has not accepted a community's current rules version cannot
+participate in it. **Enforcement is server-side**: every gated path below is
+reachable with a bearer token and `curl`, so a client-side check is a prompt
+for the user, never the enforcement.
+
+The check is one method,
+`CommunityRuleAcceptanceService.assertAcceptedOrThrow(userId, communityId,
+connection?)`, which decides from `getState()`. It is the only place the
+decision is made; no participation path restates the SQL or the rule. A
+`CanActivate` guard was rejected because each path derives its community
+differently (route parameter, body field, the post, or the comment's post), and
+two of them resolve the target inside a transaction that must also hold the
+check. A guard would repeat those lookups outside that transaction.
+
+**Gated paths.** Each checks after its existence checks and before writing.
+
+| Route                               | Community comes from                             | Checked                                                   |
+| ----------------------------------- | ------------------------------------------------ | --------------------------------------------------------- |
+| `POST /communities/:name/subscribe` | the route parameter                              | on the pool, before the insert                            |
+| `POST /posts`                       | `community_id` in the body                       | inside the post's transaction                             |
+| `POST /posts/:postId/comments`      | the post (top-level comments and replies alike)  | inside the comment's transaction                          |
+| `POST /votes`                       | the post, or for a comment, `comments` → `posts` | inside the vote's transaction, after the target is locked |
+
+**Exempt paths, each deliberately:**
+
+- **`POST /reports` is never gated.** Reporting is a safety mechanism. A user
+  who has not accepted a community's rules, perhaps because of what they just
+  saw there, must still be able to report it. Gating it would make the rules a
+  shield for the content they exist to prohibit. This is the most important
+  exemption; `reports.e2e-spec.ts` asserts the check is never consulted.
+- **All reads**: `GET /communities`, `GET /communities/:name`, `GET /posts`,
+  `GET /posts/:id`, `GET /posts/:postId/comments`, `GET /users/:username`, the
+  [Rules API](#rules-api) and the [Rule acceptance API](#rule-acceptance-api).
+  A user must be able to read the community and its rules before deciding to
+  accept, and gating reads would hide public content.
+- **`DELETE /posts/:id` and `DELETE /comments/:id`.** Removing content is not
+  participation. An author who declines new rules can still withdraw what they
+  wrote under the old ones, and a moderator can still remove content.
+- **`DELETE /communities/:name/subscribe`.** Leaving must never require
+  acceptance, or a user who declines the rules is trapped in the community.
+- **`POST /auth/*`** is outside any community, and **`POST /communities`** has
+  no community yet (its creator is exempt once it exists).
+- **`POST`/`DELETE /communities/:name/moderators`** are creator-only, and the
+  creator is exempt, so a check there could never refuse anyone. It is
+  deliberately not added.
+
+Unit and e2e tests assert that these exempt paths never call the check, so a
+later change cannot "complete" the coverage by gating them.
+
+**Who is exempt within a gated path.** The community creator is never refused:
+they author the rules, and refusing them between publishing and accepting
+helps no one. Community moderators are **not** exempt; they are members bound
+by the rules like anyone else, and their deletion powers are unaffected because
+deletion is not gated. Platform administrators are not exempt either: the
+`/admin` surface is separate, and gated paths are member actions.
+
+**The refusal** is `403` with this body, following `AuthGuard`'s structured
+`403` for a restriction:
+
+```json
+{
+  "reason": "community_rules_not_accepted",
+  "community": "gardening",
+  "current_version": 2
+}
+```
+
+It is `403`, not `409`: the request is well formed and the user authenticated,
+but not permitted. The body lets a client prompt for acceptance instead of
+showing an opaque refusal, and contains only the community name and current
+version, both already public through `GET /communities/:name/rules`. It never
+contains a user id, document id or rule text. Nothing is written on a refusal,
+and the post, comment and vote transactions roll back and release their
+connection.
+
+**Existing members when the rules change** keep their `community_subscriptions`
+row; membership is never revoked. Their participation is refused until they
+accept the new version, and the acceptance routes are reachable throughout.
+This is the intended behaviour of the version-aware `getState()`, not a side
+effect. A no-op republish creates no version (see [Rules API](#rules-api)), so
+it refuses no one. Members grandfathered onto the backfilled `version = 1` by
+migration `012` (see [Rule acceptances](#rule-acceptances)) have a real
+acceptance row and are not refused, so enabling enforcement does not lock out
+the existing user base.
+
+**Communities without published rules are unaffected.** `getState()` reports
+`acceptanceRequired = false` when no document exists, so every gated path
+succeeds with no acceptance row. Each of the four paths has a test for this,
+because a regression here would block every write in the product.
+
+**404 before 403.** An unknown community, post, parent comment or vote target
+returns `404` before the rules are consulted, matching
+`CommunitiesService.getCommunityForRoleChange`, so the error code never says
+whether a community the caller cannot act in exists.
+
+**No caching.** Each gated write costs one indexed lookup, served by the
+documents' `unique_community_rule_version (community_id, version)` key and the
+acceptances' primary key, plus one primary-key read of the community only when
+acceptance is required (for the creator exemption and the refusal body). Writes are already rate-limited far below
+where that matters. A cached decision would let a user participate under rules
+they have not accepted for the cache's lifetime, which is exactly what this
+enforcement exists to prevent.
 
 #### Retiring the legacy `communities.rules` column
 

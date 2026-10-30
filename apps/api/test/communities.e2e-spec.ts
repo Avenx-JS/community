@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  jest,
+} from '@jest/globals';
 import { ValidationPipe } from '@nestjs/common';
 import type { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -6,6 +13,11 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 import { AuthService, MYSQL_POOL } from '../src/auth/auth.service';
+import { CommunityRuleAcceptanceService } from '../src/communities/community-rule-acceptance.service';
+import {
+  createRulesStore,
+  type RulesStore,
+} from './fakes/community-rules-store';
 
 interface TestCommunity {
   id: string;
@@ -45,6 +57,7 @@ describe('Community endpoints (e2e)', () => {
   let subscribedAt: Map<string, Date>;
   let preferences: Map<string, number>;
   let queryCalls: Array<{ sql: string; values: unknown[] }>;
+  let rules: RulesStore;
 
   beforeEach(async () => {
     communities = [
@@ -74,10 +87,23 @@ describe('Community endpoints (e2e)', () => {
     subscribedAt = new Map();
     preferences = new Map();
     queryCalls = [];
+    // No community has published rules unless a test publishes some.
+    rules = createRulesStore(
+      Object.fromEntries(
+        communities.map((community) => [
+          community.id,
+          { name: community.name, creator_id: community.creator_id },
+        ]),
+      ),
+    );
 
     const pool = {
       execute: async (sql: string, values: unknown[]) => {
         queryCalls.push({ sql, values });
+        const ruleAnswer = rules.handle(sql, values);
+        if (ruleAnswer) {
+          return ruleAnswer;
+        }
 
         if (sql.startsWith('INSERT INTO communities')) {
           expect(sql).not.toMatch(/\brules\b/);
@@ -811,6 +837,80 @@ describe('Community endpoints (e2e)', () => {
           )
           .map((call) => call.values[0]),
       ).toEqual(['authenticated-user', 'user-b']);
+    });
+  });
+
+  describe('rule acceptance', () => {
+    const as = (token: string) => ({
+      post: (path: string) =>
+        request(app.getHttpServer())
+          .post(path)
+          .set('Authorization', `Bearer ${token}`),
+      get: (path: string) =>
+        request(app.getHttpServer())
+          .get(path)
+          .set('Authorization', `Bearer ${token}`),
+      delete: (path: string) =>
+        request(app.getHttpServer())
+          .delete(path)
+          .set('Authorization', `Bearer ${token}`),
+    });
+    const member = as('valid-token');
+    const subscribePath = '/communities/gardening/subscribe';
+
+    it('refuses to join until the rules are accepted, then joins', async () => {
+      rules.publish('community-a');
+
+      const refused = await member.post(subscribePath).expect(403);
+      expect(refused.body).toEqual({
+        reason: 'community_rules_not_accepted',
+        community: 'gardening',
+        current_version: 1,
+      });
+      expect(JSON.stringify(refused.body)).not.toMatch(
+        /authenticated-user|community-a|rules-v|user-a/,
+      );
+      expect(subscriptions.size).toBe(0);
+
+      await member
+        .post('/communities/gardening/rules/acceptance')
+        .send({ version: 1 })
+        .expect(201);
+      await member.post(subscribePath).expect(204);
+      expect(subscriptions).toEqual(
+        new Set(['authenticated-user:community-a']),
+      );
+    });
+
+    it('lets a member who has not accepted new rules leave and read', async () => {
+      await member.post(subscribePath).expect(204);
+      rules.publish('community-a');
+      const check = jest.spyOn(
+        app.get(CommunityRuleAcceptanceService),
+        'assertAcceptedOrThrow',
+      );
+
+      await member.get('/communities/gardening').expect(200);
+      await member.get('/communities').expect(200);
+      await member.get('/communities/gardening/rules/acceptance').expect(200);
+      await member.delete(subscribePath).expect(204);
+
+      expect(subscriptions.size).toBe(0);
+      expect(check).not.toHaveBeenCalled();
+    });
+
+    it('never refuses the community creator', async () => {
+      rules.publish('community-b');
+
+      await as('other-token')
+        .post('/communities/garden-tools/subscribe')
+        .expect(204);
+    });
+
+    it('returns 404, not 403, for an unknown community', async () => {
+      rules.publish('community-a');
+
+      await member.post('/communities/unknown/subscribe').expect(404);
     });
   });
 });

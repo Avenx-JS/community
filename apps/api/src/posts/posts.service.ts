@@ -13,6 +13,7 @@ import {
   isSqlTrue,
 } from '../common/community-moderation';
 import { readPositiveInteger } from '../common/read-positive-integer';
+import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreatePostDto } from './dto/create-post.dto';
 import { ListPostsDto } from './dto/list-posts.dto';
@@ -66,6 +67,7 @@ export class PostsService {
   constructor(
     @Inject(MYSQL_POOL) private readonly pool: Pool,
     private readonly notifications: NotificationsService,
+    private readonly ruleAcceptance: CommunityRuleAcceptanceService,
   ) {}
 
   async findAll(query: ListPostsDto): Promise<PostListDto> {
@@ -112,6 +114,11 @@ export class PostsService {
       if (!communities[0]) {
         throw new NotFoundException('Community not found');
       }
+      await this.ruleAcceptance.assertAcceptedOrThrow(
+        authorId,
+        input.community_id,
+        connection,
+      );
 
       const id = randomUUID();
       await connection.execute<ResultSetHeader>(

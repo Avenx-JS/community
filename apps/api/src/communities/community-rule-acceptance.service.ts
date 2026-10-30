@@ -1,4 +1,9 @@
-import { Inject, Injectable } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import type {
   Pool,
   PoolConnection,
@@ -16,6 +21,21 @@ interface CurrentDocumentRow extends RowDataPacket {
 interface LatestAcceptanceRow extends RowDataPacket {
   version: number;
   accepted_at: Date | string;
+}
+
+interface CommunityIdentityRow extends RowDataPacket {
+  name: string;
+  creator_id: string;
+}
+
+export const RULES_NOT_ACCEPTED_REASON = 'community_rules_not_accepted';
+
+// The 403 body for a participation write refused for unaccepted rules. It
+// names only what GET /communities/:name/rules already makes public.
+export interface RulesNotAcceptedPayload {
+  reason: typeof RULES_NOT_ACCEPTED_REASON;
+  community: string;
+  current_version: number;
 }
 
 export interface RuleAcceptanceState {
@@ -69,6 +89,44 @@ export class CommunityRuleAcceptanceService {
           : new Date(current.accepted_at).toISOString(),
       acceptanceRequired: current.accepted_at === null,
     };
+  }
+
+  // The single participation gate. Subscribing, posting, commenting and
+  // voting call it after their existence checks and before writing, so an
+  // unknown target is still a 404; reads, reports, deletions and leaving
+  // never call it (see "Rule acceptance and participation" in README.md).
+  // Pass the caller's connection to check inside its transaction. The
+  // community creator is exempt; moderators and platform admins are not.
+  // Never cached: a cached answer would let someone participate under rules
+  // they have not accepted.
+  async assertAcceptedOrThrow(
+    userId: string,
+    communityId: string,
+    connection: Pool | PoolConnection = this.pool,
+  ): Promise<void> {
+    const state = await this.getState(userId, communityId, connection);
+    if (!state.acceptanceRequired || state.currentVersion === null) {
+      return;
+    }
+
+    const [communities] = await connection.execute<CommunityIdentityRow[]>(
+      'SELECT name, creator_id FROM communities WHERE id = ? LIMIT 1',
+      [communityId],
+    );
+    const community = communities[0];
+    if (!community) {
+      throw new NotFoundException('Community not found');
+    }
+    if (community.creator_id === userId) {
+      return;
+    }
+
+    const payload: RulesNotAcceptedPayload = {
+      reason: RULES_NOT_ACCEPTED_REASON,
+      community: community.name,
+      current_version: state.currentVersion,
+    };
+    throw new ForbiddenException(payload);
   }
 
   // The highest version this user has accepted for the community, which may

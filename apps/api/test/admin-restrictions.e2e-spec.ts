@@ -18,6 +18,7 @@ import { AppModule } from '../src/app.module';
 import { MYSQL_POOL } from '../src/auth/auth.service';
 import { AuthRateLimitService } from '../src/auth/auth-rate-limit.service';
 import { SafeApiExceptionFilter } from '../src/common/safe-api-exception.filter';
+import { createRulesStore } from './fakes/community-rules-store';
 import type { PlatformRole } from '../src/users/users.service';
 
 interface UserFixture {
@@ -147,7 +148,13 @@ describe('Admin restrictions API (e2e)', () => {
     const result = (value: unknown) =>
       Promise.resolve([value, []] as [unknown, unknown]);
 
+    // No community here has published rules, so subscribing is never refused.
+    const rules = createRulesStore();
     const execute = (sql: string, values: unknown[]) => {
+      const ruleAnswer = rules.handle(sql, values);
+      if (ruleAnswer) {
+        return Promise.resolve(ruleAnswer);
+      }
       // Authentication (Draft 10 enforcement path) and admin role lookup.
       if (sql.startsWith('SELECT auth_sessions.user_id AS id')) {
         const userId = sessions.get(String(values[0]));

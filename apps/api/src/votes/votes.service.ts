@@ -7,6 +7,7 @@ import type {
   RowDataPacket,
 } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { CreateVoteDto } from './dto/create-vote.dto';
 
 interface VoteRow extends RowDataPacket {
@@ -30,7 +31,10 @@ export interface VoteResponseDto {
 
 @Injectable()
 export class VotesService {
-  constructor(@Inject(MYSQL_POOL) private readonly pool: Pool) {}
+  constructor(
+    @Inject(MYSQL_POOL) private readonly pool: Pool,
+    private readonly ruleAcceptance: CommunityRuleAcceptanceService,
+  ) {}
 
   async vote(input: CreateVoteDto, userId: string): Promise<VoteResponseDto> {
     const connection = await this.pool.getConnection();
@@ -39,7 +43,18 @@ export class VotesService {
     try {
       await connection.beginTransaction();
       transactionStarted = true;
-      await this.lockTarget(connection, input.target_type, input.target_id);
+      const communityId = await this.lockTarget(
+        connection,
+        input.target_type,
+        input.target_id,
+      );
+      // Voting is participation: gated on the target's community rules,
+      // after the 404 for an unknown target, on the transaction's connection.
+      await this.ruleAcceptance.assertAcceptedOrThrow(
+        userId,
+        communityId,
+        connection,
+      );
 
       await connection.execute<ResultSetHeader>(
         'INSERT INTO votes (id, user_id, target_type, target_id, value) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
@@ -83,20 +98,31 @@ export class VotesService {
     }
   }
 
+  // Locks the target row and returns its community. A comment's community is
+  // its post's; only the comment row is locked, not the post.
   private async lockTarget(
     connection: PoolConnection,
     targetType: CreateVoteDto['target_type'],
     targetId: string,
-  ): Promise<void> {
-    const table = targetType === 'post' ? 'posts' : 'comments';
+  ): Promise<string> {
     const [targets] = await connection.execute<
-      (RowDataPacket & { id: string })[]
-    >(`SELECT id FROM ${table} WHERE id = ? FOR UPDATE`, [targetId]);
+      (RowDataPacket & { id: string; community_id: string })[]
+    >(
+      targetType === 'post'
+        ? 'SELECT id, community_id FROM posts WHERE id = ? FOR UPDATE'
+        : `SELECT comments.id, posts.community_id
+           FROM comments
+           INNER JOIN posts ON posts.id = comments.post_id
+           WHERE comments.id = ? FOR UPDATE OF comments`,
+      [targetId],
+    );
 
-    if (!targets[0]) {
+    const target = targets[0];
+    if (!target) {
       throw new NotFoundException(
         targetType === 'post' ? 'Post not found' : 'Comment not found',
       );
     }
+    return target.community_id;
   }
 }

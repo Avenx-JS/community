@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  jest,
+} from '@jest/globals';
 import { ValidationPipe } from '@nestjs/common';
 import type { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -9,6 +16,7 @@ import { AppModule } from '../src/app.module';
 import { AuthRateLimitService } from '../src/auth/auth-rate-limit.service';
 import { AuthService, MYSQL_POOL } from '../src/auth/auth.service';
 import { ApiRateLimitInterceptor } from '../src/common/api-rate-limit.interceptor';
+import { CommunityRuleAcceptanceService } from '../src/communities/community-rule-acceptance.service';
 import { SafeApiExceptionFilter } from '../src/common/safe-api-exception.filter';
 
 describe('Report endpoint (e2e)', () => {
@@ -124,8 +132,12 @@ describe('Report endpoint (e2e)', () => {
       .useValue(pool)
       .overrideProvider(AuthService)
       .useValue({
-        validateAccessToken: (token: string) =>
-          Promise.resolve(token === 'valid-token' ? 'token-user-id' : null),
+        validateAccessTokenState: (token: string) =>
+          Promise.resolve(
+            token === 'valid-token'
+              ? { kind: 'valid', userId: 'token-user-id' }
+              : { kind: 'invalid' },
+          ),
       })
       .overrideProvider(AuthRateLimitService)
       .useValue({
@@ -266,5 +278,26 @@ describe('Report endpoint (e2e)', () => {
 
     expect(response.headers['retry-after']).toBe('75');
     expect(insertedReports).toHaveLength(0);
+  });
+
+  // Reporting is a safety mechanism: a user who has not accepted a
+  // community's rules, perhaps because of what they just saw there, must
+  // still be able to report it. Never gate this route on rule acceptance.
+  it('accepts reports of community content without consulting rule acceptance', async () => {
+    const check = jest.spyOn(
+      app.get(CommunityRuleAcceptanceService),
+      'assertAcceptedOrThrow',
+    );
+
+    await submit({
+      username: 'target',
+      reason: 'harassment',
+      context_type: 'post',
+      context_id: 'post-1',
+    }).expect(201);
+    await submit({ username: 'target', reason: 'spam' }).expect(201);
+
+    expect(insertedReports).toHaveLength(2);
+    expect(check).not.toHaveBeenCalled();
   });
 });

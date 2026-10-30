@@ -1,9 +1,16 @@
 import { ForbiddenException, Logger, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { COMMUNITY_NEW_POST_RECIPIENTS_SQL } from '../communities/community-notification-recipients';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PostsService } from './posts.service';
+
+// Every community's rules count as accepted unless a test says otherwise.
+const acceptingRuleAcceptance = {
+  provide: CommunityRuleAcceptanceService,
+  useValue: { assertAcceptedOrThrow: () => Promise.resolve() },
+};
 
 describe('PostsService', () => {
   let service: PostsService;
@@ -32,6 +39,7 @@ describe('PostsService', () => {
     };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
+        acceptingRuleAcceptance,
         PostsService,
         { provide: MYSQL_POOL, useValue: pool },
         {
@@ -182,6 +190,7 @@ describe('PostsService.create notifications', () => {
     };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
+        acceptingRuleAcceptance,
         PostsService,
         NotificationsService,
         { provide: MYSQL_POOL, useValue: pool },
@@ -402,6 +411,7 @@ describe('PostsService.remove', () => {
     };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
+        acceptingRuleAcceptance,
         PostsService,
         {
           provide: MYSQL_POOL,
