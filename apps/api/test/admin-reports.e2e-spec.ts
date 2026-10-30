@@ -6,6 +6,7 @@ import { HttpAdapterHost } from '@nestjs/core';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
+import { AuthRateLimitService } from '../src/auth/auth-rate-limit.service';
 import { AuthService, MYSQL_POOL } from '../src/auth/auth.service';
 import { SafeApiExceptionFilter } from '../src/common/safe-api-exception.filter';
 import { UsersService } from '../src/users/users.service';
@@ -56,6 +57,9 @@ describe('Admin reports API (e2e)', () => {
     releases: number;
   };
   let failAuditInsert: boolean;
+  let notificationRows: Array<Record<string, unknown>>;
+  let failNotificationInsert: boolean;
+  let transactionNotificationStart: number;
   let previousReportState:
     | {
         report: ReportFixture;
@@ -89,6 +93,9 @@ describe('Admin reports API (e2e)', () => {
     auditRows = [];
     transactionCounts = { commits: 0, rollbacks: 0, releases: 0 };
     failAuditInsert = false;
+    notificationRows = [];
+    failNotificationInsert = false;
+    transactionNotificationStart = 0;
     previousReportState = undefined;
 
     const matchingReports = (sql: string, values: unknown[]) => {
@@ -147,6 +154,28 @@ describe('Admin reports API (e2e)', () => {
 
     const execute = (sql: string, values: unknown[]) => {
       poolCalls.push({ sql, values });
+      // The inbox's listing and count, scoped to the recipient.
+      if (sql.startsWith('SELECT COUNT(*) AS total FROM notifications')) {
+        return Promise.resolve([
+          [
+            {
+              total: notificationRows.filter(
+                (row) => row.recipient_id === values[0],
+              ).length,
+            },
+          ],
+          [],
+        ] as [unknown, unknown]);
+      }
+      if (
+        sql.startsWith('SELECT id, type, subject_type') &&
+        sql.includes('FROM notifications WHERE recipient_id = ?')
+      ) {
+        return Promise.resolve([
+          notificationRows.filter((row) => row.recipient_id === values[0]),
+          [],
+        ] as [unknown, unknown]);
+      }
       if (
         sql.startsWith('SELECT ur.id, reporter_user.username') &&
         !sql.includes('ur.description')
@@ -222,13 +251,20 @@ describe('Admin reports API (e2e)', () => {
       return Promise.reject(new Error(`Unexpected SQL query: ${sql}`));
     };
     const connection = {
-      beginTransaction: () => Promise.resolve(),
+      beginTransaction: () => {
+        transactionNotificationStart = notificationRows.length;
+        return Promise.resolve();
+      },
       commit: () => {
         transactionCounts.commits += 1;
         return Promise.resolve();
       },
       rollback: () => {
         transactionCounts.rollbacks += 1;
+        notificationRows = notificationRows.slice(
+          0,
+          transactionNotificationStart,
+        );
         if (previousReportState) {
           previousReportState.report.status = previousReportState.status;
           previousReportState.report.resolution =
@@ -296,6 +332,26 @@ describe('Admin reports API (e2e)', () => {
           auditRows.push(values);
           return Promise.resolve([{ affectedRows: 1 }, []]);
         }
+        if (sql.startsWith('INSERT INTO notifications')) {
+          if (failNotificationInsert) {
+            return Promise.reject(new Error('Notification insert failed'));
+          }
+          const [id, recipientId, type, actorId, subjectType, subjectId] =
+            values as Array<string | null>;
+          notificationRows.push({
+            id,
+            recipient_id: recipientId,
+            type,
+            actor_id: actorId,
+            subject_type: subjectType,
+            subject_id: subjectId,
+            community_id: values[6],
+            metadata: values[7],
+            read_at: null,
+            created_at: new Date('2026-10-26T12:00:00.000Z'),
+          });
+          return Promise.resolve([{ affectedRows: 1 }, []]);
+        }
         return Promise.reject(new Error(`Unexpected transaction SQL: ${sql}`));
       },
     };
@@ -308,18 +364,21 @@ describe('Admin reports API (e2e)', () => {
         execute,
         getConnection: () => Promise.resolve(connection),
       })
+      .overrideProvider(AuthRateLimitService)
+      .useValue({ enforceApiRequest: () => Promise.resolve(null) })
       .overrideProvider(AuthService)
       .useValue({
-        validateAccessToken: (token: string) =>
-          Promise.resolve(
-            token === 'admin-token'
-              ? 'admin-id'
-              : token === 'target-token'
-                ? 'target-id'
-                : token === 'user-token'
-                  ? 'user-id'
-                  : null,
-          ),
+        validateAccessTokenState: (token: string) => {
+          const userId = {
+            'admin-token': 'admin-id',
+            'target-token': 'target-id',
+            'user-token': 'user-id',
+            'reporter-token': 'reporter-id',
+          }[token];
+          return Promise.resolve(
+            userId ? { kind: 'valid', userId } : { kind: 'invalid' },
+          );
+        },
       })
       .overrideProvider(UsersService)
       .useValue({
@@ -570,6 +629,90 @@ describe('Admin reports API (e2e)', () => {
       commits: 0,
       rollbacks: 1,
       releases: 1,
+    });
+  });
+
+  describe('reporter notifications', () => {
+    const reporterInbox = () =>
+      request(app.getHttpServer())
+        .get('/notifications')
+        .set('Authorization', 'Bearer reporter-token')
+        .expect(200);
+
+    it('tells the reporter the outcome and nothing else', async () => {
+      await adminPatch('/admin/reports/report-02')
+        .send({
+          status: 'resolved',
+          resolution: 'user_banned',
+          resolution_note: 'internal: repeat offender',
+        })
+        .expect(200);
+
+      expect(notificationRows).toHaveLength(1);
+      expect(notificationRows[0]).toMatchObject({
+        recipient_id: 'reporter-id',
+        type: 'report_resolved',
+        actor_id: null,
+        subject_type: 'report',
+        subject_id: 'report-02',
+        community_id: null,
+      });
+      expect(JSON.parse(String(notificationRows[0].metadata))).toEqual({
+        status: 'resolved',
+      });
+
+      const inbox = await reporterInbox();
+      const body = inbox.body as { total: number; items: unknown[] };
+      expect(body.total).toBe(1);
+      expect(body.items[0]).toMatchObject({
+        type: 'report_resolved',
+        actor_username: null,
+        subject_id: 'report-02',
+        metadata: { status: 'resolved' },
+      });
+      const serialised = JSON.stringify(inbox.body);
+      for (const leaked of [
+        'resolution',
+        'user_banned',
+        'repeat offender',
+        'reviewed_by',
+        'admin',
+        'target',
+        'other_target',
+      ]) {
+        expect(serialised).not.toContain(leaked);
+      }
+    });
+
+    it('writes nothing for under_review, a refused repeat, or a deleted reporter', async () => {
+      await adminPatch('/admin/reports/report-02')
+        .send({ status: 'under_review' })
+        .expect(200);
+      await adminPatch('/admin/reports/report-02')
+        .send({ status: 'under_review' })
+        .expect(409);
+      await adminPatch('/admin/reports/report-01')
+        .send({ status: 'rejected' })
+        .expect(200);
+
+      expect(notificationRows).toEqual([]);
+      expect(auditRows).toHaveLength(2);
+    });
+
+    it('rolls the status change back if the notification cannot be written', async () => {
+      failNotificationInsert = true;
+
+      await adminPatch('/admin/reports/report-02')
+        .send({ status: 'rejected' })
+        .expect(500);
+
+      expect(reports[1].status).toBe('open');
+      expect(notificationRows).toEqual([]);
+      expect(transactionCounts).toEqual({
+        commits: 0,
+        rollbacks: 1,
+        releases: 1,
+      });
     });
   });
 });

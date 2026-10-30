@@ -6,6 +6,7 @@ import {
 import { beforeEach, describe, expect, it } from '@jest/globals';
 import { Test, TestingModule } from '@nestjs/testing';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { AuditLogService } from './audit-log.service';
 import { ListReportsDto } from './dto/list-reports.dto';
 import { UpdateReportStatusDto } from './dto/update-report-status.dto';
@@ -31,6 +32,9 @@ describe('AdminReportsService', () => {
   let transaction: { commits: number; rollbacks: number; releases: number };
   let auditEntries: Array<{ connection: unknown; entry: unknown }>;
   let failAudit: boolean;
+  let notificationEntries: Array<{ connection: unknown; entry: unknown }>;
+  let failNotification: boolean;
+  let usedConnection: unknown;
 
   beforeEach(async () => {
     calls = [];
@@ -49,6 +53,8 @@ describe('AdminReportsService', () => {
     transaction = { commits: 0, rollbacks: 0, releases: 0 };
     auditEntries = [];
     failAudit = false;
+    notificationEntries = [];
+    failNotification = false;
     const pool = {
       execute: (sql: string, values: unknown[]) => {
         calls.push({ sql, values });
@@ -137,7 +143,21 @@ describe('AdminReportsService', () => {
           provide: MYSQL_POOL,
           useValue: {
             ...pool,
-            getConnection: () => Promise.resolve(connection),
+            getConnection: () => {
+              usedConnection = connection;
+              return Promise.resolve(connection);
+            },
+          },
+        },
+        {
+          provide: NotificationsService,
+          useValue: {
+            record: (onConnection: unknown, entry: unknown) => {
+              notificationEntries.push({ connection: onConnection, entry });
+              return failNotification
+                ? Promise.reject(new Error('Notification insert failed'))
+                : Promise.resolve();
+            },
           },
         },
         {
@@ -496,5 +516,115 @@ describe('AdminReportsService', () => {
 
     expect(transaction).toEqual({ commits: 0, rollbacks: 1, releases: 1 });
     expect(auditEntries).toHaveLength(0);
+  });
+
+  describe('reporter notifications', () => {
+    beforeEach(() => {
+      detailRow = {
+        id: 'report-1',
+        reporter_username: 'reporter',
+        reported_username: 'target',
+        reported_user_id: 'target-id',
+        reason: 'spam',
+        status: 'open',
+        resolution: null,
+        context_type: null,
+        context_id: null,
+        description: 'detail',
+        resolution_note: null,
+        reviewed_by_username: null,
+        created_at: '2026-10-25T10:00:00Z',
+        reviewed_at: null,
+      };
+    });
+
+    it.each(['resolved', 'rejected'] as const)(
+      'tells the reporter only that the report was %s, on the transaction connection',
+      async (status) => {
+        await service.updateStatus(
+          'report-1',
+          {
+            status,
+            resolution: status === 'resolved' ? 'user_banned' : undefined,
+            resolution_note: 'internal: repeat offender',
+          },
+          'admin-id',
+        );
+
+        expect(notificationEntries).toHaveLength(1);
+        expect(notificationEntries[0].connection).toBe(usedConnection);
+        expect(notificationEntries[0].entry).toEqual({
+          recipientId: 'reporter-id',
+          type: 'report_resolved',
+          actorId: null,
+          subjectType: 'report',
+          subjectId: 'report-1',
+          communityId: null,
+          metadata: { status },
+        });
+        const serialised = JSON.stringify(notificationEntries[0].entry);
+        for (const leaked of [
+          'resolution',
+          'user_banned',
+          'internal',
+          'admin-id',
+          'target-id',
+        ]) {
+          expect(serialised).not.toContain(leaked);
+        }
+        expect(transaction).toEqual({ commits: 1, rollbacks: 0, releases: 1 });
+        expect(auditEntries).toHaveLength(1);
+      },
+    );
+
+    it('writes nothing for under_review', async () => {
+      await service.updateStatus(
+        'report-1',
+        { status: 'under_review' },
+        'admin-id',
+      );
+
+      expect(notificationEntries).toEqual([]);
+      expect(auditEntries).toHaveLength(1);
+    });
+
+    it('writes nothing, and does not throw, when the reporter was deleted', async () => {
+      transitionRow = { ...transitionRow!, reporter_id: null };
+
+      await expect(
+        service.updateStatus('report-1', { status: 'rejected' }, 'admin-id'),
+      ).resolves.toMatchObject({ status: 'rejected' });
+
+      expect(notificationEntries).toEqual([]);
+      expect(transaction).toEqual({ commits: 1, rollbacks: 0, releases: 1 });
+    });
+
+    it('writes nothing for an update that would not change the status', async () => {
+      transitionRow = { ...transitionRow!, status: 'resolved' };
+
+      await expect(
+        service.updateStatus('report-1', { status: 'resolved' }, 'admin-id'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      await expect(
+        service.updateStatus(
+          'report-1',
+          { status: 'under_review' },
+          'admin-id',
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+
+      expect(notificationEntries).toEqual([]);
+      expect(auditEntries).toEqual([]);
+    });
+
+    it('rolls the status change back when the notification write fails', async () => {
+      failNotification = true;
+
+      await expect(
+        service.updateStatus('report-1', { status: 'rejected' }, 'admin-id'),
+      ).rejects.toThrow('Notification insert failed');
+
+      expect(transaction).toEqual({ commits: 0, rollbacks: 1, releases: 1 });
+    });
   });
 });

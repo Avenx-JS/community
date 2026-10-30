@@ -8,6 +8,10 @@ import {
 import { randomUUID } from 'node:crypto';
 import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import {
+  canModerateCommunitySql,
+  isSqlTrue,
+} from '../common/community-moderation';
 import { readPositiveInteger } from '../common/read-positive-integer';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreatePostDto } from './dto/create-post.dto';
@@ -21,6 +25,14 @@ interface PostRow extends RowDataPacket {
   author_id: string;
   community_id: string;
   created_at: Date | string;
+}
+
+interface RemovablePostRow extends RowDataPacket {
+  id: string;
+  author_id: string;
+  community_id: string;
+  title: string;
+  can_moderate: number | string | boolean;
 }
 
 export interface PostDto {
@@ -168,34 +180,61 @@ export class PostsService {
     return this.toDto(post);
   }
 
-  async remove(id: string, authorId: string): Promise<void> {
-    const [result] = await this.pool.execute<ResultSetHeader>(
-      `DELETE FROM posts
-       WHERE id = ? AND (
-         author_id = ? OR EXISTS (
-           SELECT 1 FROM communities
-           WHERE communities.id = posts.community_id
-             AND (
-               communities.creator_id = ? OR EXISTS (
-                 SELECT 1 FROM community_moderators
-                 WHERE community_id = communities.id AND user_id = ?
-               )
-             )
-         )
-       )`,
-      [id, authorId, authorId, authorId],
-    );
+  // The author, the community creator or a community moderator may delete a
+  // post. The row is locked and read first so the service, not a WHERE
+  // clause, decides which of those applies: a removal by anyone but the
+  // author notifies the author (content_removed) inside the same
+  // transaction, from a snapshot taken before the row is gone.
+  async remove(id: string, actorId: string): Promise<void> {
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
 
-    if (result.affectedRows === 0) {
-      const [posts] = await this.pool.execute<
-        (RowDataPacket & { id: string })[]
-      >('SELECT id FROM posts WHERE id = ? LIMIT 1', [id]);
-      if (!posts[0]) {
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+
+      const [posts] = await connection.execute<RemovablePostRow[]>(
+        `SELECT posts.id, posts.author_id, posts.community_id, posts.title,
+           ${canModerateCommunitySql('posts.community_id')} AS can_moderate
+         FROM posts
+         WHERE posts.id = ? LIMIT 1 FOR UPDATE`,
+        [actorId, actorId, id],
+      );
+      const post = posts[0];
+      if (!post) {
         throw new NotFoundException('Post not found');
       }
-      throw new ForbiddenException(
-        'You can only delete your own posts or moderate this community',
+      const isAuthor = post.author_id === actorId;
+      if (!isAuthor && !isSqlTrue(post.can_moderate)) {
+        throw new ForbiddenException(
+          'You can only delete your own posts or moderate this community',
+        );
+      }
+
+      await connection.execute<ResultSetHeader>(
+        'DELETE FROM posts WHERE id = ?',
+        [id],
       );
+      if (!isAuthor) {
+        await this.notifications.record(connection, {
+          recipientId: post.author_id,
+          type: 'content_removed',
+          actorId: null,
+          subjectType: 'post',
+          subjectId: post.id,
+          communityId: post.community_id,
+          metadata: { post_title: post.title },
+        });
+      }
+
+      await connection.commit();
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
     }
   }
 

@@ -16,7 +16,8 @@ interface TestNotification {
   id: string;
   recipient_id: string;
   type: string;
-  actor_id: string;
+  actor_id: string | null;
+  subject_type: string;
   subject_id: string;
   community_id: string;
   metadata: string | null;
@@ -101,6 +102,27 @@ describe('Post endpoints (e2e)', () => {
             [],
           ];
         }
+        if (
+          sql.startsWith('INSERT INTO notifications') &&
+          !sql.includes('SELECT UUID()')
+        ) {
+          if (failNotificationWrite) {
+            throw new Error('notification write failed');
+          }
+          const [id, recipientId, type, actorId, subjectType, subjectId] =
+            values as Array<string | null>;
+          notifications.push({
+            id: id as string,
+            recipient_id: recipientId as string,
+            type: type as string,
+            actor_id: actorId,
+            subject_type: subjectType as string,
+            subject_id: subjectId as string,
+            community_id: values[6] as string,
+            metadata: values[7] as string | null,
+          });
+          return [{ affectedRows: 1 }, []];
+        }
         if (sql.startsWith('INSERT INTO notifications')) {
           if (failNotificationWrite) {
             throw new Error('notification write failed');
@@ -124,6 +146,7 @@ describe('Post endpoints (e2e)', () => {
                 recipient_id: recipientId,
                 type: 'community_post',
                 actor_id: actorId,
+                subject_type: 'post',
                 subject_id: subjectId,
                 community_id: communityId,
                 metadata,
@@ -178,18 +201,33 @@ describe('Post endpoints (e2e)', () => {
           const [id] = values as [string];
           return [posts.some((post) => post.id === id) ? [{ id }] : [], []];
         }
-        if (sql.startsWith('DELETE FROM posts')) {
-          const [id, authorId, creatorId, moderatorId] = values as string[];
+        if (sql.startsWith('SELECT posts.id, posts.author_id')) {
+          const [creatorId, moderatorId, id] = values as string[];
           const post = posts.find((entry) => entry.id === id);
-          const authorized =
-            post !== undefined &&
-            (post.author_id === authorId ||
-              communityCreators.get(post.community_id) === creatorId ||
-              moderatorAssignments.has(`${post.community_id}:${moderatorId}`));
-          if (!authorized) {
-            return [{ affectedRows: 0 }, []];
-          }
-          posts.splice(posts.indexOf(post), 1);
+          return [
+            post
+              ? [
+                  {
+                    id: post.id,
+                    author_id: post.author_id,
+                    community_id: post.community_id,
+                    title: post.title,
+                    can_moderate:
+                      communityCreators.get(post.community_id) === creatorId ||
+                      moderatorAssignments.has(
+                        `${post.community_id}:${moderatorId}`,
+                      )
+                        ? 1
+                        : 0,
+                  },
+                ]
+              : [],
+            [],
+          ];
+        }
+        if (sql === 'DELETE FROM posts WHERE id = ?') {
+          const [id] = values as [string];
+          posts = posts.filter((entry) => entry.id !== id);
           return [{ affectedRows: 1 }, []];
         }
         if (sql.startsWith('SELECT author_id, community_id FROM posts')) {
@@ -602,6 +640,53 @@ describe('Post endpoints (e2e)', () => {
 
       expect(posts).toHaveLength(before);
       expect(posts.some((entry) => entry.title === 'Harvest day')).toBe(false);
+      expect(notifications).toEqual([]);
+      expect(openConnections).toBe(0);
+    });
+  });
+
+  describe('content_removed notifications', () => {
+    it('notifies the author when a moderator removes their post, naming no moderator', async () => {
+      await request(app.getHttpServer())
+        .delete('/posts/post-1')
+        .set('Authorization', 'Bearer moderator-token')
+        .expect(204);
+
+      expect(posts.some((post) => post.id === 'post-1')).toBe(false);
+      expect(notifications).toEqual([
+        {
+          id: expect.any(String) as unknown as string,
+          recipient_id: 'user-1',
+          type: 'content_removed',
+          actor_id: null,
+          subject_type: 'post',
+          subject_id: 'post-1',
+          community_id: 'community-1',
+          metadata: JSON.stringify({ post_title: 'First' }),
+        },
+      ]);
+      expect(JSON.stringify(notifications)).not.toContain('user-mod');
+      expect(openConnections).toBe(0);
+    });
+
+    it('writes nothing when the author deletes their own post', async () => {
+      await request(app.getHttpServer())
+        .delete('/posts/post-1')
+        .set('Authorization', 'Bearer valid-token')
+        .expect(204);
+
+      expect(notifications).toEqual([]);
+    });
+
+    it('keeps the post when the notification cannot be written', async () => {
+      failNotificationWrite = true;
+
+      await request(app.getHttpServer())
+        .delete('/posts/post-1')
+        .set('Authorization', 'Bearer moderator-token')
+        .expect(500);
+
+      expect(posts.some((post) => post.id === 'post-1')).toBe(true);
       expect(notifications).toEqual([]);
       expect(openConnections).toBe(0);
     });

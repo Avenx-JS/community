@@ -267,6 +267,61 @@ describe('NotificationInboxService', () => {
       });
     });
 
+    it.each([
+      ['report_resolved', 'report', null, { status: 'resolved' }],
+      ['restriction_applied', 'restriction', null, { restriction_type: 'ban' }],
+      [
+        'restriction_lifted',
+        'restriction',
+        null,
+        { restriction_type: 'suspension' },
+      ],
+      ['content_removed', 'post', 'community-1', { post_title: 'Gone' }],
+    ])(
+      'never serialises admin-only moderation fields for %s, even if stored',
+      (type, subjectType, communityId, allowed) => {
+        const dto = toNotificationDto(
+          row({
+            type,
+            subject_type: subjectType,
+            community_id: communityId,
+            metadata: {
+              ...allowed,
+              resolution: 'user_banned',
+              resolution_note: 'internal note',
+              reviewed_by: 'admin-1',
+              reviewed_by_username: 'the_admin',
+              reported_user_id: 'target-1',
+              reason: 'Spam',
+              lift_reason: 'Appeal accepted',
+              created_by: 'admin-1',
+              lifted_by: 'admin-1',
+              report_id: 'report-1',
+              actor_username: 'the_admin',
+            },
+          }),
+        );
+
+        expect(dto.metadata).toEqual(allowed);
+        expect(dto.actor_username).toBeNull();
+        const serialised = JSON.stringify(dto);
+        for (const leaked of [
+          'resolution',
+          'reviewed_by',
+          'reason',
+          'created_by',
+          'lifted_by',
+          'report_id',
+          'admin',
+          'target-1',
+          'internal note',
+          'Appeal',
+        ]) {
+          expect(serialised).not.toContain(leaked);
+        }
+      },
+    );
+
     it('formats read_at when the notification has been read', () => {
       expect(
         toNotificationDto(row({ read_at: '2026-10-23T09:30:00.000Z' })).read_at,

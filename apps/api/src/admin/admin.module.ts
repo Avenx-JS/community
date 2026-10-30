@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { DatabaseModule } from '../database/database.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { UsersModule } from '../users/users.module';
 import { AdminAnalyticsController } from './admin-analytics.controller';
 import { AdminAnalyticsService } from './admin-analytics.service';
@@ -15,7 +16,7 @@ import { AdminUsersService } from './admin-users.service';
 import { AuditLogService } from './audit-log.service';
 
 @Module({
-  imports: [AuthModule, DatabaseModule, UsersModule],
+  imports: [AuthModule, DatabaseModule, NotificationsModule, UsersModule],
   controllers: [
     AdminReportsController,
     AdminUsersController,

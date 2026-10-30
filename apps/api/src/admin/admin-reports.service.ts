@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import type {
   ReportContextType,
   ReportReason,
@@ -155,6 +156,7 @@ export class AdminReportsService {
   constructor(
     @Inject(MYSQL_POOL) private readonly pool: Pool,
     private readonly auditLogService: AuditLogService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   async findAll(query: ListReportsDto): Promise<AdminReportList> {
@@ -378,6 +380,21 @@ export class AdminReportsService {
           resolution,
         },
       });
+      // Only outcomes reach the reporter, and only as { status }: never the
+      // resolution (it describes another person's account), the internal
+      // note, or the reviewer. under_review is a queue state, not an outcome.
+      // A reporter deleted since filing (reporter_id NULL) is told nothing.
+      if (input.status !== 'under_review' && report.reporter_id !== null) {
+        await this.notificationsService.record(connection, {
+          recipientId: report.reporter_id,
+          type: 'report_resolved',
+          actorId: null,
+          subjectType: 'report',
+          subjectId: id,
+          communityId: null,
+          metadata: { status: input.status },
+        });
+      }
       await connection.commit();
       transactionStarted = false;
     } catch (error) {

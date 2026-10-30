@@ -306,3 +306,121 @@ describe('notification enums', () => {
     expect(enumValues('subject_type')).toEqual([...NOTIFICATION_SUBJECT_TYPES]);
   });
 });
+
+// Field by field: a moderation notification stores what happened and never
+// who decided it or why, whatever a producer passes in.
+describe('moderation notification metadata allowlist', () => {
+  const adminOnly = {
+    resolution: 'user_banned',
+    resolution_note: 'internal note',
+    reviewed_by: 'admin-1',
+    reported_user_id: 'target-1',
+    reason: 'Spam',
+    lift_reason: 'Appeal accepted',
+    created_by: 'admin-1',
+    lifted_by: 'admin-1',
+    report_id: 'report-1',
+    actor_username: 'the_admin',
+  };
+  const cases: Array<[NotificationEntry, Record<string, string>]> = [
+    [
+      {
+        recipientId: 'reporter',
+        type: 'report_resolved',
+        actorId: null,
+        subjectType: 'report',
+        subjectId: 'report-1',
+        communityId: null,
+        metadata: { status: 'resolved' },
+      },
+      { status: 'resolved' },
+    ],
+    [
+      {
+        recipientId: 'target',
+        type: 'restriction_applied',
+        actorId: null,
+        subjectType: 'restriction',
+        subjectId: 'restriction-1',
+        communityId: null,
+        metadata: {
+          restriction_type: 'suspension',
+          expires_at: '2026-11-01T00:00:00.000Z',
+        },
+      },
+      {
+        restriction_type: 'suspension',
+        expires_at: '2026-11-01T00:00:00.000Z',
+      },
+    ],
+    [
+      {
+        recipientId: 'target',
+        type: 'restriction_applied',
+        actorId: null,
+        subjectType: 'restriction',
+        subjectId: 'restriction-1',
+        communityId: null,
+        metadata: { restriction_type: 'ban' },
+      },
+      { restriction_type: 'ban' },
+    ],
+    [
+      {
+        recipientId: 'target',
+        type: 'restriction_lifted',
+        actorId: null,
+        subjectType: 'restriction',
+        subjectId: 'restriction-1',
+        communityId: null,
+        metadata: { restriction_type: 'ban' },
+      },
+      { restriction_type: 'ban' },
+    ],
+    [
+      {
+        recipientId: 'author',
+        type: 'content_removed',
+        actorId: null,
+        subjectType: 'post',
+        subjectId: 'post-1',
+        communityId: 'community-1',
+        metadata: { post_title: 'Gone' },
+      },
+      { post_title: 'Gone' },
+    ],
+    [
+      {
+        recipientId: 'author',
+        type: 'content_removed',
+        actorId: null,
+        subjectType: 'comment',
+        subjectId: 'comment-1',
+        communityId: 'community-1',
+        metadata: { excerpt: 'Gone too' },
+      },
+      { excerpt: 'Gone too' },
+    ],
+  ];
+
+  it.each(cases)(
+    'stores only the allowlisted keys for $type',
+    (entry, expected) => {
+      const stuffed = {
+        ...entry,
+        metadata: { ...entry.metadata, ...adminOnly },
+      } as NotificationEntry;
+
+      expect(buildNotificationMetadata(stuffed)).toEqual(expected);
+    },
+  );
+
+  it.each(cases)('rejects an actor on $type', (entry) => {
+    expect(() =>
+      assertNotificationEntry({
+        ...entry,
+        actorId: 'admin-1',
+      } as unknown as NotificationEntry),
+    ).toThrow(TypeError);
+  });
+});

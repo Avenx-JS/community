@@ -1369,6 +1369,8 @@ community rules is likewise creator-only (see [Rules API](#rules-api)).
 Post and comment authors retain their existing ability to delete their own
 content. A moderator or creator can additionally delete content only within
 their own community. Other users receive `403`; missing content returns `404`.
+A deletion by a moderator or creator notifies the author without naming who
+removed it (see [Moderation notifications](#moderation-notifications)).
 No edit, lock, ban, or other moderator-only operations are exposed by this API
 yet; future such routes must enforce the same server-side, community-scoped
 checks.
@@ -1935,8 +1937,9 @@ Notifications are stored in the `notifications` table (migration
 (see [Writing notifications](#writing-notifications)), and read through the
 routes in [Inbox API](#inbox-api), which also mark notifications read or
 unread and dismiss them. Comments, replies and new posts produce
-notifications (see [Content notifications](#content-notifications)); the
-moderation types are not produced yet. Each row belongs
+notifications (see [Content notifications](#content-notifications)), and so do
+moderation decisions (see
+[Moderation notifications](#moderation-notifications)). Each row belongs
 to one `recipient_id` and records one event: `type`, the optional `actor_id`,
 the triggering `subject_type`/`subject_id`, an optional `community_id`, a
 `metadata` snapshot, `read_at`, and `created_at`.
@@ -2163,6 +2166,75 @@ A notification whose post or comment is later deleted still renders in the
 inbox from its metadata snapshot. **Votes never produce notifications**, as
 recorded above, and there is no real-time delivery: clients poll
 `GET /notifications/unread-count`.
+
+### Moderation notifications
+
+**A moderation notification tells the affected user what happened to them,
+never who decided it or why.** `actor_id` is always `NULL` for these types
+(the `NotificationEntry` type and `assertNotificationEntry()` reject an
+actor), and the metadata allowlist holds nothing a non-admin may not already
+see under [Account restrictions](#account-restrictions-suspensions-and-bans)
+and [Data classification](#data-classification-errors-and-logging). Do not add
+a field to these types unless the README already permits a non-admin to see
+it.
+
+| Event                                                      | Producer                                        | Recipient            | `type`                | Subject                     | Metadata                                               |
+| ---------------------------------------------------------- | ----------------------------------------------- | -------------------- | --------------------- | --------------------------- | ------------------------------------------------------ |
+| A report reaches `resolved` or `rejected`                  | `AdminReportsService.updateStatus`              | the reporter         | `report_resolved`     | the report                  | `status` only                                          |
+| A suspension or ban is applied                             | `AdminRestrictionsService.apply`                | the restricted user  | `restriction_applied` | the restriction             | `restriction_type`, plus `expires_at` for a suspension |
+| A restriction is lifted                                    | `AdminRestrictionsService.lift`                 | the user             | `restriction_lifted`  | the restriction             | `restriction_type` only                                |
+| A community moderator or creator deletes someone's content | `PostsService.remove`, `CommentsService.remove` | the content's author | `content_removed`     | the deleted post or comment | `post_title` for a post, `excerpt` for a comment       |
+
+- **Reports.** `{ status }` answers "was my report acted on?" and nothing more.
+  The notification never carries `resolution` (it describes what happened to
+  another person's account), `resolution_note` (an internal note),
+  `reviewed_by` or the reviewer's username, or the reported user. A move to
+  `under_review` writes nothing: it is a queue state, not an outcome. A repeated
+  or otherwise refused transition is a `409` and writes nothing. A report whose
+  reporter account was deleted (`reporter_id` is `NULL`) writes nothing and
+  still succeeds.
+- **Restrictions.** The metadata is exactly what `AuthGuard`'s `403` already
+  returns to the restricted user: the type and, for a suspension, `expires_at`.
+  Never `reason`, `lift_reason`, `created_by`, `lifted_by` or `report_id`. The
+  inbox read routes are `@AllowRestricted()` (see [Inbox API](#inbox-api)), so
+  a restricted user can read `restriction_applied` while the restriction is
+  active. Sessions are revoked when it is applied and a restricted account
+  cannot sign in, so in practice it is read with a token that survived a
+  failed revocation, or after the restriction ends. It is written either way: it becomes readable after a lift,
+  and the inbox should not have a gap where the most consequential event
+  belongs. `restriction_lifted` is the one the user can always read.
+- **Content removal.** Only a removal by a community moderator or the
+  community creator notifies; an author deleting their own content writes
+  nothing, even if they also moderate the community. Producers check this
+  themselves, because moderation types have no actor for central
+  self-suppression to compare. There is no removal reason, because the API has
+  no field for one. Only the author of the removed post or comment is told:
+  comments deleted with it by cascade do not notify their authors. The content
+  is gone by the time the inbox is read, so the row renders entirely from the
+  snapshot; this is why `subject_id` has no foreign key. Platform
+  administrators have no content-removal route, so they are not a case here.
+
+**Deletion decides authorisation in the service.** `PostsService.remove` and
+`CommentsService.remove` used to be one conditional `DELETE` whose `WHERE`
+clause admitted the author or a moderator, which could not say which of the
+two had acted. They now lock and read the row in a transaction
+(`SELECT ... FOR UPDATE`, or `FOR UPDATE OF comments` so the joined post is
+not locked), together with whether the actor created or moderates its
+community (`canModerateCommunitySql` in `src/common/community-moderation.ts`).
+They then decide in code, delete by id, and notify the author when the actor is
+not the author. The routes behave exactly as before: `204` for the author or a
+moderator or creator of that community, `403` for anyone else (including a
+moderator of a different community), and `404` for missing content.
+
+**Written inside the moderation transaction.** Every producer above records
+the notification on the connection it already holds, next to its
+`admin_actions` audit entry where there is one. A failed notification write
+therefore rolls back the report transition, restriction, lift or deletion.
+This is deliberately the opposite of `AuthService.logoutAll`, which
+`AdminRestrictionsService.apply` runs after the commit and allows to fail,
+because the restriction row is an independent enforcement backstop for
+revocation. A lost notification has no backstop. Do not move these writes after
+the commit without revisiting the [transaction policy](#writing-notifications).
 
 ### Inbox API
 

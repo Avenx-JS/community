@@ -8,6 +8,10 @@ import {
 import { randomUUID } from 'node:crypto';
 import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import {
+  canModerateCommunitySql,
+  isSqlTrue,
+} from '../common/community-moderation';
 import type { NotificationEntry } from '../notifications/notification-metadata';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreateCommentDto } from './dto/create-comment.dto';
@@ -19,6 +23,14 @@ interface CommentRow extends RowDataPacket {
   parent_id: string | null;
   content: string;
   created_at: Date | string;
+}
+
+interface RemovableCommentRow extends RowDataPacket {
+  id: string;
+  author_id: string;
+  content: string;
+  community_id: string;
+  can_moderate: number | string | boolean;
 }
 
 const MAX_COMMENTS_PER_THREAD = 500;
@@ -207,34 +219,63 @@ export class CommentsService {
     }
   }
 
-  async remove(id: string, authorId: string): Promise<void> {
-    const [result] = await this.pool.execute<ResultSetHeader>(
-      `DELETE comments FROM comments
-       INNER JOIN posts ON posts.id = comments.post_id
-       WHERE comments.id = ? AND (
-         comments.author_id = ? OR EXISTS (
-           SELECT 1 FROM communities
-           WHERE communities.id = posts.community_id
-             AND (
-               communities.creator_id = ? OR EXISTS (
-                 SELECT 1 FROM community_moderators
-                 WHERE community_id = communities.id AND user_id = ?
-               )
-             )
-         )
-       )`,
-      [id, authorId, authorId, authorId],
-    );
-    if (result.affectedRows === 0) {
-      const [comments] = await this.pool.execute<
-        (RowDataPacket & { id: string })[]
-      >('SELECT id FROM comments WHERE id = ? LIMIT 1', [id]);
-      if (!comments[0]) {
+  // The author, the community creator or a community moderator may delete a
+  // comment (its replies go with it by cascade). The comment row is locked
+  // and read first so the service decides which of those applies; a removal
+  // by anyone but the author notifies the author (content_removed) inside the
+  // same transaction. Authors of cascaded replies are not notified.
+  async remove(id: string, actorId: string): Promise<void> {
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+
+      const [comments] = await connection.execute<RemovableCommentRow[]>(
+        `SELECT comments.id, comments.author_id, comments.content,
+           posts.community_id,
+           ${canModerateCommunitySql('posts.community_id')} AS can_moderate
+         FROM comments
+         INNER JOIN posts ON posts.id = comments.post_id
+         WHERE comments.id = ? LIMIT 1 FOR UPDATE OF comments`,
+        [actorId, actorId, id],
+      );
+      const comment = comments[0];
+      if (!comment) {
         throw new NotFoundException('Comment not found');
       }
-      throw new ForbiddenException(
-        'You can only delete your own comments or moderate this community',
+      const isAuthor = comment.author_id === actorId;
+      if (!isAuthor && !isSqlTrue(comment.can_moderate)) {
+        throw new ForbiddenException(
+          'You can only delete your own comments or moderate this community',
+        );
+      }
+
+      await connection.execute<ResultSetHeader>(
+        'DELETE FROM comments WHERE id = ?',
+        [id],
       );
+      if (!isAuthor) {
+        await this.notifications.record(connection, {
+          recipientId: comment.author_id,
+          type: 'content_removed',
+          actorId: null,
+          subjectType: 'comment',
+          subjectId: comment.id,
+          communityId: comment.community_id,
+          metadata: { excerpt: comment.content },
+        });
+      }
+
+      await connection.commit();
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
     }
   }
 

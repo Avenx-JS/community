@@ -42,6 +42,10 @@ describe('Comment endpoints (e2e)', () => {
     ['post-1', 'user-2'],
     ['post-2', 'user-1'],
   ]);
+  const postCommunities = new Map([
+    ['post-1', 'community-1'],
+    ['post-2', 'community-2'],
+  ]);
   const communityCreators = new Map([['community-1', 'creator-1']]);
   const moderatorAssignments = new Set(['community-1:user-mod']);
 
@@ -104,7 +108,7 @@ describe('Comment endpoints (e2e)', () => {
                   {
                     id: postId,
                     author_id: postAuthors.get(postId),
-                    community_id: 'community-1',
+                    community_id: postCommunities.get(postId),
                     title: `Title of ${postId}`,
                   },
                 ]
@@ -239,21 +243,33 @@ describe('Comment endpoints (e2e)', () => {
             [],
           ];
         }
-        if (sql.startsWith('DELETE comments FROM comments')) {
-          const [id] = values as [string];
-          const [commentId, authorId, creatorId, moderatorId] =
-            values as string[];
-          const root = comments.find((comment) => comment.id === commentId);
-          const communityId =
-            root?.post_id === 'post-1' ? 'community-1' : 'community-2';
-          const authorized =
-            root !== undefined &&
-            (root.author_id === authorId ||
-              communityCreators.get(communityId) === creatorId ||
-              moderatorAssignments.has(`${communityId}:${moderatorId}`));
-          if (!authorized || !root) {
-            return [{ affectedRows: 0 }, []];
+        if (sql.startsWith('SELECT comments.id, comments.author_id')) {
+          const [creatorId, moderatorId, commentId] = values as string[];
+          const comment = comments.find((entry) => entry.id === commentId);
+          if (!comment) {
+            return [[], []];
           }
+          const communityId = postCommunities.get(comment.post_id) as string;
+          return [
+            [
+              {
+                id: comment.id,
+                author_id: comment.author_id,
+                content: comment.content,
+                community_id: communityId,
+                can_moderate:
+                  communityCreators.get(communityId) === creatorId ||
+                  moderatorAssignments.has(`${communityId}:${moderatorId}`)
+                    ? 1
+                    : 0,
+              },
+            ],
+            [],
+          ];
+        }
+        if (sql === 'DELETE FROM comments WHERE id = ?') {
+          const [commentId] = values as [string];
+          // ON DELETE CASCADE on comments.parent_id.
           const deletedIds = new Set([commentId]);
           let hasNewDescendants = true;
           while (hasNewDescendants) {
@@ -637,6 +653,65 @@ describe('Comment endpoints (e2e)', () => {
           excerpt: 'Soon gone',
         },
       });
+    });
+
+    it('notifies only the author of a comment a moderator removes, and renders it once gone', async () => {
+      await request(app.getHttpServer())
+        .delete('/comments/reply-1')
+        .set('Authorization', 'Bearer moderator-token')
+        .expect(204);
+
+      expect(comments.some((comment) => comment.id === 'reply-1')).toBe(false);
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0]).toMatchObject({
+        recipient_id: 'user-2',
+        type: 'content_removed',
+        actor_id: null,
+        subject_type: 'comment',
+        subject_id: 'reply-1',
+        community_id: 'community-1',
+      });
+      expect(JSON.parse(notifications[0].metadata as string)).toEqual({
+        excerpt: 'Reply',
+      });
+
+      const inbox = await request(app.getHttpServer())
+        .get('/notifications')
+        .set('Authorization', 'Bearer post-author-token')
+        .expect(200);
+      const body = inbox.body as { total: number; items: unknown[] };
+      expect(body.total).toBe(1);
+      expect(body.items[0]).toMatchObject({
+        type: 'content_removed',
+        actor_username: null,
+        subject_id: 'reply-1',
+        metadata: { excerpt: 'Reply' },
+      });
+      expect(JSON.stringify(inbox.body)).not.toContain('user-mod');
+    });
+
+    it('writes nothing when the author deletes their own comment', async () => {
+      await request(app.getHttpServer())
+        .delete('/comments/root-1')
+        .set('Authorization', 'Bearer valid-token')
+        .expect(204);
+
+      expect(notifications).toEqual([]);
+    });
+
+    it('keeps the comment when the removal notification cannot be written', async () => {
+      failNotificationWrite = true;
+
+      await request(app.getHttpServer())
+        .delete('/comments/reply-1')
+        .set('Authorization', 'Bearer moderator-token')
+        .expect(500);
+
+      expect(comments.some((comment) => comment.id === 'reply-1')).toBe(true);
+      expect(comments.some((comment) => comment.id === 'nested-reply')).toBe(
+        true,
+      );
+      expect(openConnections).toBe(0);
     });
   });
 });

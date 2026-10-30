@@ -177,38 +177,6 @@ describe('CommentsService', () => {
       'A comment',
     ]);
   });
-
-  it('only deletes comments belonging to the authenticated author', async () => {
-    results = [{ affectedRows: 0 }, [{ id: 'comment-1' }]];
-    await expect(service.remove('comment-1', 'user-1')).rejects.toBeInstanceOf(
-      ForbiddenException,
-    );
-
-    results = [{ affectedRows: 1 }];
-    await expect(
-      service.remove('comment-1', 'user-1'),
-    ).resolves.toBeUndefined();
-
-    results = [{ affectedRows: 0 }, []];
-    await expect(service.remove('missing', 'user-1')).rejects.toBeInstanceOf(
-      NotFoundException,
-    );
-  });
-
-  it('allows moderators to delete comments in their community', async () => {
-    results = [{ affectedRows: 1 }];
-
-    await expect(
-      service.remove('comment-1', 'community-moderator'),
-    ).resolves.toBeUndefined();
-    expect(queries[0].sql).toContain('community_moderators');
-    expect(queries[0].values).toEqual([
-      'comment-1',
-      'community-moderator',
-      'community-moderator',
-      'community-moderator',
-    ]);
-  });
 });
 
 describe('CommentsService.create notifications', () => {
@@ -627,5 +595,140 @@ describe('CommentsService.create with NotificationsService', () => {
         subject: `comment:${second.id}`,
       },
     ]);
+  });
+});
+
+describe('CommentsService.remove', () => {
+  let service: CommentsService;
+  let queries: Array<{ sql: string; values: unknown[] }>;
+  let comment: Record<string, unknown> | undefined;
+  let connection: {
+    beginTransaction: jest.Mock;
+    commit: jest.Mock;
+    rollback: jest.Mock;
+    release: jest.Mock;
+    execute: (sql: string, values: unknown[]) => Promise<[unknown, unknown]>;
+  };
+  let notifications: { record: jest.Mock };
+
+  beforeEach(async () => {
+    queries = [];
+    comment = {
+      id: 'comment-1',
+      author_id: 'author',
+      content: 'Mine ripened early.',
+      community_id: 'community-1',
+      can_moderate: 0,
+    };
+    connection = {
+      beginTransaction: jest.fn().mockResolvedValue(undefined),
+      commit: jest.fn().mockResolvedValue(undefined),
+      rollback: jest.fn().mockResolvedValue(undefined),
+      release: jest.fn(),
+      execute: (sql, values) => {
+        queries.push({ sql, values });
+        if (sql.startsWith('SELECT comments.id')) {
+          return Promise.resolve([comment ? [comment] : [], []]);
+        }
+        if (sql.startsWith('DELETE FROM comments')) {
+          return Promise.resolve([{ affectedRows: 1 }, []]);
+        }
+        return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
+      },
+    };
+    notifications = { record: jest.fn().mockResolvedValue(undefined) };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        CommentsService,
+        {
+          provide: MYSQL_POOL,
+          useValue: { getConnection: () => Promise.resolve(connection) },
+        },
+        { provide: NotificationsService, useValue: notifications },
+      ],
+    }).compile();
+    service = module.get(CommentsService);
+  });
+
+  const deletes = () =>
+    queries.filter((query) => query.sql.startsWith('DELETE FROM comments'));
+
+  function expectRolledBackAndReleased() {
+    expect(connection.commit).not.toHaveBeenCalled();
+    expect(connection.rollback).toHaveBeenCalledTimes(1);
+    expect(connection.release).toHaveBeenCalledTimes(1);
+  }
+
+  it('locks only the comment row and decides authorisation in the service', async () => {
+    await service.remove('comment-1', 'author');
+
+    expect(queries[0].sql).toContain('INNER JOIN posts');
+    expect(queries[0].sql).toContain('community_moderators');
+    expect(queries[0].sql).toMatch(/FOR UPDATE OF comments$/);
+    expect(queries[0].values).toEqual(['author', 'author', 'comment-1']);
+    expect(deletes()).toEqual([
+      { sql: 'DELETE FROM comments WHERE id = ?', values: ['comment-1'] },
+    ]);
+  });
+
+  it('lets the author delete without a notification, even as a moderator', async () => {
+    await service.remove('comment-1', 'author');
+    comment = { ...comment, can_moderate: 1 };
+    await service.remove('comment-1', 'author');
+
+    expect(deletes()).toHaveLength(2);
+    expect(notifications.record).not.toHaveBeenCalled();
+  });
+
+  it('lets a moderator or creator delete and notifies the author', async () => {
+    comment = { ...comment, can_moderate: 1 };
+
+    await expect(
+      service.remove('comment-1', 'moderator'),
+    ).resolves.toBeUndefined();
+
+    expect(notifications.record).toHaveBeenCalledTimes(1);
+    expect(notifications.record).toHaveBeenCalledWith(connection, {
+      recipientId: 'author',
+      type: 'content_removed',
+      actorId: null,
+      subjectType: 'comment',
+      subjectId: 'comment-1',
+      communityId: 'community-1',
+      metadata: { excerpt: 'Mine ripened early.' },
+    });
+    expect(connection.commit).toHaveBeenCalledTimes(1);
+    expect(connection.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns 403 to anyone else and 404 for a missing comment, deleting nothing', async () => {
+    await expect(service.remove('comment-1', 'stranger')).rejects.toThrow(
+      new ForbiddenException(
+        'You can only delete your own comments or moderate this community',
+      ),
+    );
+    expectRolledBackAndReleased();
+
+    connection.rollback.mockClear();
+    connection.release.mockClear();
+    comment = undefined;
+    await expect(service.remove('missing', 'stranger')).rejects.toThrow(
+      new NotFoundException('Comment not found'),
+    );
+    expectRolledBackAndReleased();
+
+    expect(deletes()).toEqual([]);
+    expect(notifications.record).not.toHaveBeenCalled();
+  });
+
+  it('rolls the deletion back when the notification write fails', async () => {
+    comment = { ...comment, can_moderate: 1 };
+    notifications.record.mockRejectedValueOnce(new Error('insert failed'));
+
+    await expect(service.remove('comment-1', 'moderator')).rejects.toThrow(
+      'insert failed',
+    );
+
+    expectRolledBackAndReleased();
   });
 });

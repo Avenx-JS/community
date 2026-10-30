@@ -15,6 +15,7 @@ import type {
 } from 'mysql2/promise';
 import { AuthService, MYSQL_POOL } from '../auth/auth.service';
 import { ACTIVE_USER_RESTRICTION_PREDICATE } from '../common/active-user-restriction';
+import { NotificationsService } from '../notifications/notifications.service';
 import type { PlatformRole } from '../users/users.service';
 import { AuditLogService } from './audit-log.service';
 import {
@@ -110,6 +111,7 @@ export class AdminRestrictionsService {
     @Inject(MYSQL_POOL) private readonly pool: Pool,
     private readonly auditLogService: AuditLogService,
     private readonly authService: AuthService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   async apply(
@@ -214,6 +216,25 @@ export class AdminRestrictionsService {
               metadata: { restriction_id: id, report_id: reportId },
             },
       );
+      // Exactly what AuthGuard's 403 already tells this user: the type and,
+      // for a suspension, the expiry. Never the reason, the administrator or
+      // the linked report. Unlike logoutAll below, this is inside the
+      // transaction: a notification has no backstop if it is lost.
+      await this.notificationsService.record(connection, {
+        recipientId: userId,
+        type: 'restriction_applied',
+        actorId: null,
+        subjectType: 'restriction',
+        subjectId: id,
+        communityId: null,
+        metadata:
+          restriction.expires_at === null
+            ? { restriction_type: restriction.type }
+            : {
+                restriction_type: restriction.type,
+                expires_at: restriction.expires_at,
+              },
+      });
       await connection.commit();
       transactionStarted = false;
     } catch (error) {
@@ -290,6 +311,17 @@ export class AdminRestrictionsService {
           restriction_id: restrictionId,
           restriction_type: restriction.type,
         },
+      });
+      // The type only; lift_reason and the lifting administrator are
+      // admin-only.
+      await this.notificationsService.record(connection, {
+        recipientId: userId,
+        type: 'restriction_lifted',
+        actorId: null,
+        subjectType: 'restriction',
+        subjectId: restrictionId,
+        communityId: null,
+        metadata: { restriction_type: restriction.type },
       });
       await connection.commit();
       transactionStarted = false;

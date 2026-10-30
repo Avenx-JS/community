@@ -78,6 +78,8 @@ describe('Admin restrictions API (e2e)', () => {
   let revokedUsers: string[];
   let failAuditInsert: boolean;
   let failRevocation: boolean;
+  let notificationRows: Array<Record<string, unknown>>;
+  let failNotificationInsert: boolean;
 
   beforeAll(async () => {
     passwordHash = await hash(PASSWORD, {
@@ -118,6 +120,8 @@ describe('Admin restrictions API (e2e)', () => {
     revokedUsers = [];
     failAuditInsert = false;
     failRevocation = false;
+    notificationRows = [];
+    failNotificationInsert = false;
 
     const activeRestriction = (userId: unknown) =>
       restrictions.find((row) => row.user_id === userId && isActive(row));
@@ -314,6 +318,47 @@ describe('Admin restrictions API (e2e)', () => {
       if (sql === 'SELECT username FROM users WHERE id = ? LIMIT 1') {
         const user = users.get(String(values[0]));
         return result(user ? [{ username: user.username }] : []);
+      }
+      if (sql.startsWith('INSERT INTO notifications')) {
+        if (failNotificationInsert) {
+          return Promise.reject(new Error('Notification insert failed'));
+        }
+        const row: Record<string, unknown> = {
+          id: values[0],
+          recipient_id: values[1],
+          type: values[2],
+          actor_id: values[3],
+          subject_type: values[4],
+          subject_id: values[5],
+          community_id: values[6],
+          metadata: values[7],
+          read_at: null,
+          created_at: new Date(),
+        };
+        notificationRows.push(row);
+        undo.push(() => {
+          notificationRows = notificationRows.filter(
+            (stored) => stored !== row,
+          );
+        });
+        return result({ affectedRows: 1 });
+      }
+      if (sql.startsWith('SELECT COUNT(*) AS total FROM notifications')) {
+        return result([
+          {
+            total: notificationRows.filter(
+              (row) => row.recipient_id === values[0],
+            ).length,
+          },
+        ]);
+      }
+      if (
+        sql.startsWith('SELECT id, type, subject_type') &&
+        sql.includes('FROM notifications WHERE recipient_id = ?')
+      ) {
+        return result(
+          notificationRows.filter((row) => row.recipient_id === values[0]),
+        );
       }
       if (sql.startsWith('INSERT INTO admin_actions')) {
         if (failAuditInsert) {
@@ -721,5 +766,113 @@ describe('Admin restrictions API (e2e)', () => {
 
     await admin.get(`${applyPath}?limit=101`).expect(400);
     await admin.get(`${applyPath}?page=0`).expect(400);
+  });
+
+  describe('notifications', () => {
+    const expectNoModerationLeaks = (body: unknown) => {
+      const serialised = JSON.stringify(body);
+      for (const leaked of [
+        'reason',
+        'lift_reason',
+        'created_by',
+        'lifted_by',
+        'report_id',
+        'admin',
+        'Spam',
+        'Appeal',
+        'report-1',
+      ]) {
+        expect(serialised).not.toContain(leaked);
+      }
+    };
+
+    it('tells the user they were suspended and then lifted, and never why or by whom', async () => {
+      const applied = await admin
+        .post(applyPath)
+        .send({
+          type: 'suspension',
+          reason: 'Spam',
+          duration_hours: 24,
+          report_id: 'report-1',
+        })
+        .expect(201);
+      const { id, expires_at } = applied.body as RestrictionResponse;
+      await admin
+        .post(`${applyPath}/${id}/lift`)
+        .send({ lift_reason: 'Appeal accepted' })
+        .expect(200);
+
+      expect(notificationRows).toHaveLength(2);
+      for (const row of notificationRows) {
+        expect(row).toMatchObject({
+          recipient_id: 'target-id',
+          actor_id: null,
+          subject_type: 'restriction',
+          subject_id: id,
+          community_id: null,
+        });
+      }
+      expect(
+        notificationRows.map((row) => [
+          row.type,
+          JSON.parse(String(row.metadata)) as unknown,
+        ]),
+      ).toEqual([
+        ['restriction_applied', { restriction_type: 'suspension', expires_at }],
+        ['restriction_lifted', { restriction_type: 'suspension' }],
+      ]);
+      expect(auditRows.map((row) => row[3])).toEqual([
+        'user_suspended',
+        'restriction_lifted',
+      ]);
+
+      const login = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ identifier: 'target', password: PASSWORD })
+        .expect(200);
+      const { accessToken } = login.body as { accessToken: string };
+      const inbox = await as(accessToken).get('/notifications').expect(200);
+      const body = inbox.body as {
+        total: number;
+        items: Array<Record<string, unknown>>;
+      };
+      expect(body.total).toBe(2);
+      expect(body.items.map((item) => item.type).sort()).toEqual([
+        'restriction_applied',
+        'restriction_lifted',
+      ]);
+      for (const item of body.items) {
+        expect(item.actor_username).toBeNull();
+      }
+      expectNoModerationLeaks(inbox.body);
+    });
+
+    it('tells a banned user the type only, readable while the ban is active', async () => {
+      failRevocation = true;
+      await admin
+        .post(applyPath)
+        .send({ type: 'ban', reason: 'Spam' })
+        .expect(201);
+
+      expect(JSON.parse(String(notificationRows[0].metadata))).toEqual({
+        restriction_type: 'ban',
+      });
+      const inbox = await as('target-token').get('/notifications').expect(200);
+      expect((inbox.body as { total: number }).total).toBe(1);
+      expectNoModerationLeaks(inbox.body);
+    });
+
+    it('rolls the restriction back if the notification cannot be written', async () => {
+      failNotificationInsert = true;
+
+      await admin
+        .post(applyPath)
+        .send({ type: 'ban', reason: 'Spam' })
+        .expect(500);
+
+      expect(restrictions).toEqual([]);
+      expect(notificationRows).toEqual([]);
+      expect(revokedUsers).toEqual([]);
+    });
   });
 });

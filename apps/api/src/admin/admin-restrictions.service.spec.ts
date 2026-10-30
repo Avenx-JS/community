@@ -14,6 +14,7 @@ import {
 } from '@jest/globals';
 import { Test, TestingModule } from '@nestjs/testing';
 import { AuthService, MYSQL_POOL } from '../auth/auth.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import type { PlatformRole } from '../users/users.service';
 import { AuditLogService } from './audit-log.service';
 import {
@@ -49,6 +50,18 @@ describe('AdminRestrictionsService', () => {
   let events: string[];
   let auditRows: unknown[][];
   let failAudit: boolean;
+  let notificationRows: Array<Record<string, unknown>>;
+  let failNotification: boolean;
+  const notificationColumns = [
+    'id',
+    'recipient_id',
+    'type',
+    'actor_id',
+    'subject_type',
+    'subject_id',
+    'community_id',
+    'metadata',
+  ];
   let logoutAll: jest.Mock<(userId: string) => Promise<void>>;
   let userLocks: Map<string, Promise<void>>;
   let transaction: { commits: number; rollbacks: number; releases: number };
@@ -211,6 +224,21 @@ describe('AdminRestrictionsService', () => {
           const user = users.get(String(values[0]));
           return [user ? [{ username: user.username }] : [], []];
         }
+        if (sql.startsWith('INSERT INTO notifications')) {
+          if (failNotification) {
+            throw new Error('Notification insert failed');
+          }
+          const row = Object.fromEntries(
+            notificationColumns.map((column, index) => [column, values[index]]),
+          );
+          notificationRows.push(row);
+          undo.push(() => {
+            notificationRows = notificationRows.filter(
+              (stored) => stored !== row,
+            );
+          });
+          return [{ affectedRows: 1 }, []];
+        }
         if (sql.startsWith('INSERT INTO admin_actions')) {
           if (failAudit) {
             throw new Error('Audit insert failed');
@@ -237,6 +265,8 @@ describe('AdminRestrictionsService', () => {
     events = [];
     auditRows = [];
     failAudit = false;
+    notificationRows = [];
+    failNotification = false;
     userLocks = new Map();
     transaction = { commits: 0, rollbacks: 0, releases: 0 };
     logoutAll = jest.fn((userId: string) => {
@@ -286,6 +316,7 @@ describe('AdminRestrictionsService', () => {
       providers: [
         AdminRestrictionsService,
         AuditLogService,
+        NotificationsService,
         { provide: MYSQL_POOL, useValue: pool },
         { provide: AuthService, useValue: { logoutAll } },
       ],
@@ -720,6 +751,148 @@ describe('AdminRestrictionsService', () => {
         lifted_by_username: null,
         lift_reason: 'Closed',
       });
+    });
+  });
+
+  describe('notifications', () => {
+    const forbidden = [
+      'reason',
+      'lift_reason',
+      'created_by',
+      'lifted_by',
+      'report_id',
+      'admin-id',
+    ];
+    const metadataOf = (row: Record<string, unknown>) =>
+      JSON.parse(String(row.metadata)) as Record<string, unknown>;
+    const expectNoLeaks = (row: Record<string, unknown>) => {
+      const serialised = JSON.stringify(row);
+      for (const value of [...forbidden, 'Spam', 'report-1', 'Appeal']) {
+        expect(serialised).not.toContain(value);
+      }
+    };
+
+    it('tells a suspended user the type and expiry, and nothing else', async () => {
+      const result = await service.apply(
+        'target-id',
+        { type: 'suspension', reason: 'Spam', duration_hours: 72 },
+        'admin-id',
+      );
+
+      expect(notificationRows).toHaveLength(1);
+      const [row] = notificationRows;
+      expect(row).toMatchObject({
+        recipient_id: 'target-id',
+        type: 'restriction_applied',
+        actor_id: null,
+        subject_type: 'restriction',
+        subject_id: result.id,
+        community_id: null,
+      });
+      expect(metadataOf(row)).toEqual({
+        restriction_type: 'suspension',
+        expires_at: result.expires_at,
+      });
+      expectNoLeaks(row);
+      expect(events.indexOf('commit')).toBeLessThan(
+        events.indexOf('logoutAll:target-id'),
+      );
+    });
+
+    it('tells a banned user the type only, never the linked report', async () => {
+      const result = await service.apply(
+        'target-id',
+        { type: 'ban', reason: 'Spam', report_id: 'report-1' },
+        'admin-id',
+      );
+
+      expect(notificationRows).toHaveLength(1);
+      expect(notificationRows[0]).toMatchObject({
+        type: 'restriction_applied',
+        actor_id: null,
+        subject_id: result.id,
+      });
+      expect(metadataOf(notificationRows[0])).toEqual({
+        restriction_type: 'ban',
+      });
+      expectNoLeaks(notificationRows[0]);
+    });
+
+    it('tells a user their restriction was lifted, without the lift reason', async () => {
+      restrictions.push(fixture());
+
+      await service.lift(
+        'target-id',
+        'restriction-1',
+        { lift_reason: 'Appeal accepted' },
+        'admin-id',
+      );
+
+      expect(notificationRows).toHaveLength(1);
+      expect(notificationRows[0]).toMatchObject({
+        recipient_id: 'target-id',
+        type: 'restriction_lifted',
+        actor_id: null,
+        subject_type: 'restriction',
+        subject_id: 'restriction-1',
+      });
+      expect(metadataOf(notificationRows[0])).toEqual({
+        restriction_type: 'suspension',
+      });
+      expectNoLeaks(notificationRows[0]);
+      expect(auditRows).toHaveLength(1);
+    });
+
+    it('writes nothing when the apply or lift is refused', async () => {
+      restrictions.push(fixture({ lifted_at: new Date() }));
+      restrictions.push(fixture({ id: 'restriction-2' }));
+
+      await expect(
+        service.apply('target-id', { type: 'ban', reason: 'Spam' }, 'admin-id'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      await expect(
+        service.lift(
+          'target-id',
+          'restriction-1',
+          { lift_reason: 'Again' },
+          'admin-id',
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+
+      expect(notificationRows).toEqual([]);
+    });
+
+    it('rolls the restriction back, and revokes nothing, when the notification write fails', async () => {
+      failNotification = true;
+
+      await expect(
+        service.apply('target-id', { type: 'ban', reason: 'Spam' }, 'admin-id'),
+      ).rejects.toThrow('Notification insert failed');
+
+      expect(restrictions).toEqual([]);
+      expect(notificationRows).toEqual([]);
+      expect(transaction).toEqual({ commits: 0, rollbacks: 1, releases: 1 });
+      expect(logoutAll).not.toHaveBeenCalled();
+    });
+
+    it('rolls the lift back when the notification write fails', async () => {
+      restrictions.push(fixture());
+      failNotification = true;
+
+      await expect(
+        service.lift(
+          'target-id',
+          'restriction-1',
+          { lift_reason: 'Appeal accepted' },
+          'admin-id',
+        ),
+      ).rejects.toThrow('Notification insert failed');
+
+      expect(restrictions[0]).toMatchObject({
+        lifted_at: null,
+        lift_reason: null,
+      });
+      expect(transaction).toEqual({ commits: 0, rollbacks: 1, releases: 1 });
     });
   });
 
