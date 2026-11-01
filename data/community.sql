@@ -167,7 +167,7 @@ CREATE TABLE votes (
 CREATE TABLE user_reports (
     id VARCHAR(36) PRIMARY KEY,
     reporter_id VARCHAR(36) NULL,
-    reported_user_id VARCHAR(36) NOT NULL,
+    reported_user_id VARCHAR(36) NULL,
     reason ENUM('spam', 'harassment', 'hate_speech', 'sexual_content', 'self_harm', 'impersonation', 'other') NOT NULL,
     description TEXT NULL,
     context_type ENUM('post', 'comment') NULL,
@@ -178,6 +178,9 @@ CREATE TABLE user_reports (
     reviewed_by VARCHAR(36) NULL,
     reviewed_at TIMESTAMP NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    target_type ENUM('user', 'post', 'comment', 'community') NOT NULL DEFAULT 'user',
+    target_id VARCHAR(36) NOT NULL,
+    target_author_id VARCHAR(36) NULL,
     INDEX idx_user_reports_status_created (status, created_at),
     INDEX idx_user_reports_reported_user (reported_user_id, status),
     INDEX idx_user_reports_reporter_created (reporter_id, created_at),
@@ -185,14 +188,19 @@ CREATE TABLE user_reports (
     INDEX idx_user_reports_reviewed_by (reviewed_by),
     INDEX idx_user_reports_created_reason (created_at, reason),
     INDEX idx_user_reports_reviewed (reviewed_at, status, resolution, created_at),
+    INDEX idx_user_reports_target (target_type, target_id, status),
+    INDEX idx_user_reports_target_type_created (target_type, created_at),
     CONSTRAINT chk_user_reports_not_self CHECK (reporter_id IS NULL OR reporter_id <> reported_user_id),
     CONSTRAINT chk_user_reports_context CHECK (
         (context_type IS NULL AND context_id IS NULL) OR
         (context_type IS NOT NULL AND context_id IS NOT NULL)
     ),
     FOREIGN KEY (reporter_id) REFERENCES users(id) ON DELETE SET NULL,
-    FOREIGN KEY (reported_user_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY (reviewed_by) REFERENCES users(id) ON DELETE SET NULL
+    CONSTRAINT fk_user_reports_reported_user
+        FOREIGN KEY (reported_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (reviewed_by) REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT fk_user_reports_target_author
+        FOREIGN KEY (target_author_id) REFERENCES users(id) ON DELETE SET NULL
 );
 
 CREATE TABLE user_restrictions (
@@ -299,4 +307,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('012_create_community_rule_acceptances'),
     ('013_backfill_late_community_rules'),
     ('014_drop_communities_rules'),
-    ('015_add_fulltext_search_indexes');
+    ('015_add_fulltext_search_indexes'),
+    ('016_generalise_report_targets');
