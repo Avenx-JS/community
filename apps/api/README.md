@@ -2137,6 +2137,41 @@ Post responses use this DTO:
 }
 ```
 
+### Post content state
+
+Migration `017_add_post_and_comment_content_state` adds edit, lock and
+moderative-removal state to `posts`. **No endpoint reads, writes or honours
+these columns yet.** Post responses, listings and `DELETE /posts/:id` (still a
+hard delete) behave exactly as described above. The endpoints that use the
+columns are separate work.
+
+| Column | Meaning when set |
+| --- | --- |
+| `edited_at` | When the author last edited the post |
+| `locked_at`, `locked_by` | When and by whom the post was locked against new comments |
+| `removed_at`, `removed_by`, `removal_reason` | When, by whom and why a moderator removed the post, keeping its content for restoration |
+
+Each state is a nullable timestamp, not a boolean: `NULL` means "not in this
+state" and a value also records when. This follows `user_restrictions.lifted_at`,
+`notifications.read_at` and `user_reports.reviewed_at`. Every existing row is
+unedited, unlocked and present, and once removal exists, `removed_at IS NULL`
+is the visibility predicate. `removal_reason` is optional in the schema;
+whether removing requires a reason is the removal endpoint's decision.
+
+`chk_posts_lock` and `chk_posts_removal` forbid an actor or reason without its
+timestamp. `locked_by` and `removed_by` are `ON DELETE SET NULL`, so a lock or
+removal survives deletion of the moderator's account. **Readers must tolerate
+a `NULL` actor on a locked or removed post.**
+
+There is no `edited_by`: only the author may edit, so the editor is always
+`author_id`, and a column would suggest that moderators can edit.
+
+`idx_posts_removed_at` lets the optimiser estimate the selectivity of a
+`removed_at` filter. It serves `removed_at IS NOT NULL` (the few removed
+posts) and covering lookups such as counts. A full listing where nearly every
+row is visible still reads the table rather than this index. The composite
+listing indexes that pair the filter with the sort order are separate work.
+
 ## Comments
 
 `GET /posts/:postId/comments` is public and returns
@@ -2159,6 +2194,21 @@ community to moderate it. Success returns HTTP `204` with no body; a user
 without permission returns `403`, and an unknown comment returns `404`.
 Deleting a comment also deletes all descendant replies because the comments
 table uses `ON DELETE CASCADE` for `parent_id`.
+
+### Comment content state
+
+Migration `017` adds the same six columns and the same rules to `comments` as
+to posts (see [Post content state](#post-content-state)): `edited_at`,
+`locked_at`/`locked_by`, and `removed_at`/`removed_by`/`removal_reason`. They
+are nullable timestamps with optional actors, coherent through
+`chk_comments_lock` and `chk_comments_removal`, and the actors are
+`ON DELETE SET NULL`, so readers must tolerate a `NULL` actor. There is no
+`edited_by`, because only the author edits. `idx_comments_removed_at` indexes
+the removal filter. **No endpoint reads, writes or honours these columns yet**:
+threads, comment creation and `DELETE /comments/:id` are unchanged.
+
+A comment's `locked_at` is meant to lock that comment's subtree, not the whole
+post. The schema supports either reading; the lock endpoint will define it.
 
 ## Votes
 

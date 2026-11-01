@@ -135,8 +135,19 @@ CREATE TABLE posts (
     author_id VARCHAR(36) NOT NULL,
     community_id VARCHAR(36) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    edited_at TIMESTAMP NULL DEFAULT NULL,
+    locked_at TIMESTAMP NULL DEFAULT NULL,
+    locked_by VARCHAR(36) NULL,
+    removed_at TIMESTAMP NULL DEFAULT NULL,
+    removed_by VARCHAR(36) NULL,
+    removal_reason TEXT NULL,
+    INDEX idx_posts_removed_at (removed_at),
+    CONSTRAINT chk_posts_lock CHECK ((locked_at IS NULL AND locked_by IS NULL) OR locked_at IS NOT NULL),
+    CONSTRAINT chk_posts_removal CHECK ((removed_at IS NULL AND removed_by IS NULL AND removal_reason IS NULL) OR removed_at IS NOT NULL),
     FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE
+    FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE,
+    CONSTRAINT fk_posts_locked_by FOREIGN KEY (locked_by) REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT fk_posts_removed_by FOREIGN KEY (removed_by) REFERENCES users(id) ON DELETE SET NULL
 );
 CREATE FULLTEXT INDEX ft_posts_title_content ON posts (title, content);
 
@@ -147,9 +158,20 @@ CREATE TABLE comments (
     parent_id VARCHAR(36) NULL,
     content TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    edited_at TIMESTAMP NULL DEFAULT NULL,
+    locked_at TIMESTAMP NULL DEFAULT NULL,
+    locked_by VARCHAR(36) NULL,
+    removed_at TIMESTAMP NULL DEFAULT NULL,
+    removed_by VARCHAR(36) NULL,
+    removal_reason TEXT NULL,
+    INDEX idx_comments_removed_at (removed_at),
+    CONSTRAINT chk_comments_lock CHECK ((locked_at IS NULL AND locked_by IS NULL) OR locked_at IS NOT NULL),
+    CONSTRAINT chk_comments_removal CHECK ((removed_at IS NULL AND removed_by IS NULL AND removal_reason IS NULL) OR removed_at IS NOT NULL),
     FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE,
     FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY (parent_id) REFERENCES comments(id) ON DELETE CASCADE
+    FOREIGN KEY (parent_id) REFERENCES comments(id) ON DELETE CASCADE,
+    CONSTRAINT fk_comments_locked_by FOREIGN KEY (locked_by) REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT fk_comments_removed_by FOREIGN KEY (removed_by) REFERENCES users(id) ON DELETE SET NULL
 );
 CREATE FULLTEXT INDEX ft_comments_content ON comments (content);
 
@@ -308,4 +330,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('013_backfill_late_community_rules'),
     ('014_drop_communities_rules'),
     ('015_add_fulltext_search_indexes'),
-    ('016_generalise_report_targets');
+    ('016_generalise_report_targets'),
+    ('017_add_post_and_comment_content_state');

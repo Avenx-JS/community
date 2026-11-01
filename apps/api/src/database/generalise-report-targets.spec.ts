@@ -99,7 +99,7 @@ describe('migration 016 (generalise report targets)', () => {
     );
     expect(table).toContain('CONSTRAINT chk_user_reports_context CHECK');
     expect(normalise(snapshot)).toContain(
-      "('015_add_fulltext_search_indexes'), ('016_generalise_report_targets');",
+      "('015_add_fulltext_search_indexes'), ('016_generalise_report_targets')",
     );
   });
 });
