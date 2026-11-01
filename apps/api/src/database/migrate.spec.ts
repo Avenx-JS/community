@@ -60,6 +60,9 @@ describe('migration ordering and application', () => {
     expect(position('015_add_fulltext_search_indexes')).toBe(
       position('014_drop_communities_rules') + 1,
     );
+    expect(position('016_generalise_report_targets')).toBe(
+      position('015_add_fulltext_search_indexes') + 1,
+    );
     expect(new Set(versions).size).toBe(versions.length);
   });
 

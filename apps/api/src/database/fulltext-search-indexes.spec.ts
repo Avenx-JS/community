@@ -50,7 +50,7 @@ describe('migration 015 (full-text search indexes)', () => {
     }
     expect(snapshot.match(/FULLTEXT/g)).toHaveLength(FULLTEXT_INDEXES.length);
     expect(snapshot).toContain(
-      "('014_drop_communities_rules'), ('015_add_fulltext_search_indexes');",
+      "('014_drop_communities_rules'), ('015_add_fulltext_search_indexes')",
     );
   });
 });

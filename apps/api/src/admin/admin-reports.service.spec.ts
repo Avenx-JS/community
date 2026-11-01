@@ -208,6 +208,21 @@ describe('AdminReportsService', () => {
     expect(list.sql).toContain('created_at DESC, ur.id DESC');
   });
 
+  // Migration 016 added target_type/target_id. The queue still reads user
+  // reports through reported_user_id and never joins the polymorphic target,
+  // so a report whose target no longer exists still renders.
+  it('reads the queue through the reported account, never the report target', async () => {
+    await service.findAll({} as ListReportsDto);
+    const [list, countQuery] = calls;
+
+    for (const { sql } of [list, countQuery]) {
+      expect(sql).toContain(
+        'INNER JOIN users reported_user ON reported_user.id = ur.reported_user_id',
+      );
+      expect(sql).not.toMatch(/target_(type|id|author_id)/);
+    }
+  });
+
   it('orders oldest first with an id tiebreaker and returns the filtered envelope', async () => {
     listRows = [
       {

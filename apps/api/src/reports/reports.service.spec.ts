@@ -120,9 +120,16 @@ describe('ReportsService', () => {
       null,
       null,
       null,
+      'user',
+      'reported-id',
     ]);
+    expect(duplicateCheck?.sql).toContain(
+      'WHERE reporter_id = ? AND target_type = ? AND target_id = ?',
+    );
+    expect(duplicateCheck?.sql).not.toContain('reported_user_id');
     expect(duplicateCheck?.values).toEqual([
       'reporter-id',
+      'user',
       'reported-id',
       null,
       null,
@@ -199,11 +206,63 @@ describe('ReportsService', () => {
     );
     expect(duplicateCheck?.values).toEqual([
       'reporter-id',
+      'user',
       'reported-id',
       'post',
       'post-1',
     ]);
-    expect(insert?.values.slice(5)).toEqual(['post', 'post-1']);
+    expect(insert?.values.slice(5)).toEqual([
+      'post',
+      'post-1',
+      'user',
+      'reported-id',
+    ]);
+  });
+
+  it('keys duplicates on the target and its evidence', async () => {
+    // A store that applies the duplicate query's key to what was inserted.
+    const stored: unknown[][] = [];
+    const execute = connection.execute;
+    connection.execute = (sql, values) => {
+      if (sql.startsWith('INSERT INTO user_reports')) {
+        // reporter, target_type, target_id, context_type, context_id
+        stored.push([values[1], values[7], values[8], values[5], values[6]]);
+      }
+      if (sql.startsWith('SELECT id FROM user_reports')) {
+        const key = JSON.stringify(values);
+        return Promise.resolve([
+          stored
+            .filter((row) => JSON.stringify(row) === key)
+            .map(() => ({ id: 'active-report' })),
+          [],
+        ]);
+      }
+      return execute(sql, values);
+    };
+
+    await service.create(
+      reportInput({ context_type: 'post', context_id: 'post-1' }),
+      'reporter-id',
+    );
+    // The same account with different evidence, or none, is a new report.
+    await service.create(
+      reportInput({ context_type: 'post', context_id: 'post-2' }),
+      'reporter-id',
+    );
+    await service.create(reportInput(), 'reporter-id');
+    expect(stored).toHaveLength(3);
+
+    // The same target with the same evidence is a duplicate.
+    await expect(
+      service.create(
+        reportInput({ context_type: 'post', context_id: 'post-1' }),
+        'reporter-id',
+      ),
+    ).rejects.toBeInstanceOf(ConflictException);
+    await expect(
+      service.create(reportInput(), 'reporter-id'),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(stored).toHaveLength(3);
   });
 
   it('accepts comments authored by the reported account', async () => {

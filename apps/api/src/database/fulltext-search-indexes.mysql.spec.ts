@@ -26,8 +26,8 @@ const snapshot = readFileSync(
   'utf8',
 ).replace(/^CREATE DATABASE[^;]*;\s*USE community;/, '');
 
-// The snapshot at version 014: its FULLTEXT statements and the 015 version
-// removed. Building it this way, rather than dropping the indexes, keeps the
+// The snapshot with 015 undone: its FULLTEXT statements and the 015 version
+// removed, so the runner applies 015 alone. Building it this way, rather than dropping the indexes, keeps the
 // tables free of the hidden FTS_DOC_ID column, so 015 performs the same
 // rebuild it performs on an upgraded installation.
 const preceding = snapshot

@@ -94,6 +94,8 @@ describe('Report endpoint (e2e)', () => {
             description,
             type,
             contextId,
+            targetType,
+            targetId,
           ] = values;
           insertedReports.push({
             id,
@@ -103,6 +105,8 @@ describe('Report endpoint (e2e)', () => {
             description,
             context_type: type,
             context_id: contextId,
+            target_type: targetType,
+            target_id: targetId,
             status: 'open',
             created_at: new Date('2026-10-25T10:00:00.000Z'),
           });
@@ -261,6 +265,9 @@ describe('Report endpoint (e2e)', () => {
       context_type: 'post',
       context_id: 'post-1',
       reason: 'harassment',
+      target_type: 'user',
+      target_id: 'target-user-id',
+      reported_user_id: 'target-user-id',
     });
 
     existingReports = [{ id: 'active-report', status: 'under_review' }];

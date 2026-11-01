@@ -10,7 +10,11 @@ import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { CreateReportDto } from './dto/create-report.dto';
 import { isReportReason } from './report.constants';
-import type { ReportContextType, ReportReason } from './report.constants';
+import type {
+  ReportContextType,
+  ReportReason,
+  ReportTargetType,
+} from './report.constants';
 
 interface ReportedUserRow extends RowDataPacket {
   id: string;
@@ -81,6 +85,11 @@ export class ReportsService {
       }
     }
 
+    // POST /reports reports accounts only; the context pair is evidence.
+    const target: { type: ReportTargetType; id: string } = {
+      type: 'user',
+      id: reportedUser.id,
+    };
     const connection = await this.pool.getConnection();
     let transactionStarted = false;
     const id = randomUUID();
@@ -93,15 +102,19 @@ export class ReportsService {
       await connection.execute('SELECT id FROM users WHERE id = ? FOR UPDATE', [
         reporterId,
       ]);
+      // Keyed on the target plus the evidence: a report about the same account
+      // with different evidence is a new report, and reports about two posts
+      // by one author never collide.
       const [existingReports] = await connection.execute<ExistingReportRow[]>(
         `SELECT id FROM user_reports
-         WHERE reporter_id = ? AND reported_user_id = ?
+         WHERE reporter_id = ? AND target_type = ? AND target_id = ?
            AND status IN ('open', 'under_review')
            AND context_type <=> ? AND context_id <=> ?
          FOR UPDATE`,
         [
           reporterId,
-          reportedUser.id,
+          target.type,
+          target.id,
           input.context_type ?? null,
           input.context_id ?? null,
         ],
@@ -112,8 +125,9 @@ export class ReportsService {
 
       await connection.execute<ResultSetHeader>(
         `INSERT INTO user_reports
-         (id, reporter_id, reported_user_id, reason, description, context_type, context_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         (id, reporter_id, reported_user_id, reason, description, context_type, context_id,
+          target_type, target_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           reporterId,
@@ -122,6 +136,8 @@ export class ReportsService {
           input.description ?? null,
           input.context_type ?? null,
           input.context_id ?? null,
+          target.type,
+          target.id,
         ],
       );
 

@@ -659,10 +659,20 @@ report exactly at `to` is not included. This half-open UTC convention should
 also be used for report metrics and other date-range analytics.
 
 List items include report and queue fields, `has_context`, timestamps, and the
-reporter/reported usernames. A deleted reporter is shown as `null`; the
-reported username is present because reports against deleted accounts are
-cascaded away. Free-text descriptions are returned only by the detail route.
-An empty page returns `200` with an empty `items` array.
+reporter/reported usernames. A deleted reporter is shown as `null`. The queue
+reads reports through the account they concern (`reported_user_id`), so the
+reported username is always present: since migration 016 a report whose
+account was deleted is kept with `reported_user_id` set to `NULL` and is left
+out of the queue, its counts and the detail route, rather than deleted.
+Free-text descriptions are returned only by the detail route. An empty page
+returns `200` with an empty `items` array.
+
+The queue never joins a report's target (`target_type`/`target_id`, see
+[Reports](#reports)). A report whose target has since been removed still
+renders, and so must every future reader: treat the target as possibly
+missing. Today the queue holds only `user` targets, and its request and
+response shapes are unchanged; surfacing post, comment and community targets
+is separate work.
 
 ```json
 {
@@ -1192,8 +1202,13 @@ account. The reporter is always derived from the token. The JSON body accepts:
 
 Unknown accounts or missing context return `404`. Reporting yourself or
 pointing to content by another account returns `400`. An active duplicate
-report by the same reporter for the same account and context returns `409`;
-after the earlier report is resolved or rejected, another report may be filed.
+report returns `409`; after the earlier report is resolved or rejected,
+another report may be filed. A duplicate is an active report by the same
+reporter with the same target (`target_type`, `target_id`) and the same
+evidence (`context_type`, `context_id`). Reporting the same account again with
+different evidence, or none, is a new report. Keying on the target rather than
+on `reported_user_id` means reports about two posts by one author can never
+collide.
 No action is taken against the reported account by submitting a report.
 Reports against suspended or banned accounts are accepted.
 
@@ -1213,6 +1228,68 @@ The response does not disclose the target's internal ID, email, report history,
 or moderation outcome. `reporter_id`, status, resolution fields, and all other
 undeclared body fields are rejected with `400`. Descriptions are stored as
 plain text and must be encoded by clients when rendered.
+
+### Report targets
+
+Since migration `016_generalise_report_targets`, a report names one
+polymorphic target: `target_type` is `user`, `post`, `comment` or `community`,
+and `target_id` is that row's ID. `POST /reports` writes only `user` targets,
+with `target_id` equal to the reported account. Content and community
+submissions are separate work; the schema is ready for them.
+
+One table with one target column was chosen over one table per target kind,
+which would make the admin queue `UNION` several near-identical tables to show
+one ordered list. It was also chosen over nullable `post_id`, `comment_id` and
+`community_id` columns, which leave no single column to group report
+statistics by.
+
+**No foreign key on `target_id`.** It is polymorphic, like `votes.target_id`,
+`admin_actions.target_id` and `notifications.subject_id`. A report must outlive
+the content it names, so the moderation decision stays auditable. Readers must
+therefore not join the target to show a report, and must tolerate a target that
+no longer exists.
+
+**`reported_user_id` is kept, and is now nullable.** It names the account the
+report concerns. Account filters (`reported_username`), the
+`*_against_user` counts and restriction review all use it. Its foreign key is
+`ON DELETE SET NULL` (it was `CASCADE`), so deleting an account no longer
+deletes reports about it.
+
+| `target_type` | `target_id` | `reported_user_id` | `target_author_id` |
+| --- | --- | --- | --- |
+| `user` | the account | the account | `NULL` |
+| `post`, `comment` | the content | the content's author | the author at submission |
+| `community` | the community | `NULL` | `NULL` |
+
+`target_author_id` (`ON DELETE SET NULL`) records a content target's author at
+submission time. A later change to `reported_user_id` therefore cannot silently
+re-point the report. Deleting the author account clears both links, after
+which only the target itself identifies the report's subject.
+
+**`context_type` / `context_id` keep their meaning, narrowed.** They are
+supporting evidence about a `user` target, never the target itself. The
+existing check still requires both or neither, and `POST /reports` still
+requires the content to be authored by the reported account. A content target
+needs no separate evidence pointer.
+
+**Self-reports.** `chk_user_reports_not_self` compares `reporter_id` with
+`reported_user_id`. Because a content target stores its author in
+`reported_user_id`, the same constraint refuses reporting your own post or
+comment. For a community target `reported_user_id` is `NULL`, so the check
+passes, which is correct.
+
+`target_type` defaults to `'user'` only so the column could be added `NOT
+NULL` to a populated table. Every writer sets it explicitly, and the default
+should be dropped once content and community submissions exist.
+`idx_user_reports_target (target_type, target_id, status)` serves the
+duplicate check and per-target lookups.
+`idx_user_reports_target_type_created (target_type, created_at)` serves
+per-kind report statistics.
+
+**The table is still named `user_reports`.** It now holds more than reports
+about users. Renaming it would touch every service, test, fixture, index name
+and the `user_restrictions.report_id` reference for no behavioural gain, so the
+misnomer is kept on purpose.
 
 Report creation has additional fixed-window limits of 20 per IP per hour and
 10 per authenticated account per hour, in addition to the generic write
