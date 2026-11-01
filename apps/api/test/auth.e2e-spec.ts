@@ -162,14 +162,28 @@ describe('Auth endpoints (e2e)', () => {
         }
         return Promise.resolve([{ affectedRows: 0 }, []]);
       }
-      if (sql.startsWith('SELECT user_id AS id FROM auth_sessions')) {
+      if (sql.startsWith('SELECT auth_sessions.user_id AS id')) {
         const [tokenHash] = values as [string];
         const session = sessions.find(
           (entry) =>
             entry.token_hash === tokenHash &&
             entry.expires_at.getTime() > Date.now(),
         );
-        return Promise.resolve([session ? [{ id: session.user_id }] : [], []]);
+        return Promise.resolve([
+          session
+            ? [
+                {
+                  id: session.user_id,
+                  restriction_type: null,
+                  restriction_expires_at: null,
+                },
+              ]
+            : [],
+          [],
+        ]);
+      }
+      if (sql.startsWith('SELECT type, expires_at')) {
+        return Promise.resolve([[], []]);
       }
       if (sql.startsWith('SELECT session_id FROM auth_sessions')) {
         const [tokenHash] = values as [string];
@@ -331,6 +345,9 @@ describe('Auth endpoints (e2e)', () => {
         return Promise.resolve([{ affectedRows: affected }, []]);
       }
       if (sql.startsWith('SELECT token_hash FROM auth_refresh_tokens')) {
+        return Promise.resolve([[], []]);
+      }
+      if (sql.startsWith('SELECT type, expires_at')) {
         return Promise.resolve([[], []]);
       }
       return Promise.reject(new Error(`Unexpected transactional SQL: ${sql}`));

@@ -56,8 +56,12 @@ describe('Admin authorization pipeline (e2e)', () => {
         {
           provide: AuthService,
           useValue: {
-            validateAccessToken: (token: string) =>
-              Promise.resolve(token === 'valid-token' ? 'test-user-id' : null),
+            validateAccessTokenState: (token: string) =>
+              Promise.resolve(
+                token === 'valid-token'
+                  ? { kind: 'valid', userId: 'test-user-id' }
+                  : { kind: 'invalid' },
+              ),
           },
         },
         {

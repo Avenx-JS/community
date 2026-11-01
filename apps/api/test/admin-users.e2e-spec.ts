@@ -99,13 +99,13 @@ describe('Admin users API (e2e)', () => {
       .useValue({ execute })
       .overrideProvider(AuthService)
       .useValue({
-        validateAccessToken: (token: string) =>
+        validateAccessTokenState: (token: string) =>
           Promise.resolve(
             token === 'admin-token'
-              ? 'admin-id'
+              ? { kind: 'valid', userId: 'admin-id' }
               : token === 'member-token'
-                ? 'member-id'
-                : null,
+                ? { kind: 'valid', userId: 'member-id' }
+                : { kind: 'invalid' },
           ),
       })
       .overrideProvider(UsersService)
