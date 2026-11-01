@@ -57,6 +57,9 @@ describe('migration ordering and application', () => {
     expect(position('014_drop_communities_rules')).toBeGreaterThan(
       position('009_create_community_rule_documents'),
     );
+    expect(position('015_add_fulltext_search_indexes')).toBe(
+      position('014_drop_communities_rules') + 1,
+    );
     expect(new Set(versions).size).toBe(versions.length);
   });
 

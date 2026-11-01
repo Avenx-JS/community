@@ -64,6 +64,80 @@ running migrations, not the API runtime database user. Migration credentials
 are read from the environment and are never printed; do not place passwords in
 the command line or migration files.
 
+#### Search indexes
+
+Migration `015_add_fulltext_search_indexes` adds MySQL native `FULLTEXT`
+indexes for word search. No endpoint queries them yet; they exist for the
+search endpoint, which must use exactly these column lists:
+
+| Index | Table | Query it supports |
+| --- | --- | --- |
+| `ft_posts_title_content` | `posts` | `MATCH (title, content) AGAINST (? IN BOOLEAN MODE)` |
+| `ft_comments_content` | `comments` | `MATCH (content) AGAINST (? IN BOOLEAN MODE)` |
+| `ft_communities_name_description` | `communities` | `MATCH (name, description) AGAINST (? IN BOOLEAN MODE)` |
+
+A `MATCH` column list must equal an index's column list exactly, which is why
+each table has one multi-column index rather than one per column. A
+leading-wildcard `LIKE '%term%'` cannot use a B-tree index and scans the whole
+table; on posts and comments that would make each public search request a
+scan of all content. `GET /communities?search=` still uses its `LIKE` substring
+match unchanged; moving it to `MATCH` changes its matching and ordering and is
+the search endpoint's decision.
+
+**Why native FULLTEXT.** An external engine (Elasticsearch, Meilisearch,
+Typesense) searches better, but adds a service to run, a sync pipeline to keep
+consistent, and a second source of truth for a project that is deliberately a
+single MySQL instance. `LIKE '%…%'` everywhere has the scan problem above and
+no word boundaries, relevance or multi-word handling. Trigram or
+generated-column prefix indexes serve prefix search, not word search.
+
+**Query in boolean mode.** Natural-language mode filters by relevance: on
+InnoDB a word that occurs in every row has zero inverse document frequency and
+returns nothing (MyISAM's counterpart is its 50%-of-rows threshold). On a new
+installation with few rows that silently empties searches for common words.
+Boolean mode returns every row containing the word.
+
+**Server-configuration limitations.** These are server settings, not schema,
+so no migration can change them:
+
+- `innodb_ft_min_token_size` defaults to 3, so one- and two-character terms
+  such as `go` or `C` match nothing. The search endpoint must reject queries
+  shorter than 3 characters rather than return a silent empty result. Changing
+  the setting needs a server restart and a rebuild of every `FULLTEXT` index.
+- InnoDB's built-in stopword list (`the`, `about`, `with`, …) removes common
+  English words from the index, so they also match nothing. No custom stopword
+  table is shipped: changing `innodb_ft_server_stopword_table` takes effect only
+  for indexes built afterwards, which means rebuilding them.
+
+`fulltext-search-indexes.mysql.spec.ts` pins both limitations, together with
+boolean mode returning common words, so the endpoint's validation rules are
+backed by a test.
+
+**Users are excluded.** Usernames are single tokens matched by prefix. The
+existing `UNIQUE` B-tree index on `users.username` already serves
+`LIKE 'term%'`, so user search must use a prefix match. Do not add a
+`FULLTEXT` index on `users`.
+
+**Write cost.** Every insert and update of an indexed column also updates the
+full-text index. That covers `POST /communities`, `POST /posts`,
+`POST /posts/:postId/comments` and the editing endpoints. InnoDB batches these
+writes through its full-text cache, so the per-write cost is small but not
+zero. Committed rows are searchable immediately.
+
+**Migration cost.** The first `FULLTEXT` index on an InnoDB table adds the
+hidden `FTS_DOC_ID` column and rebuilds the whole table. Each index in 015 is
+the first on its table, so on populated `posts` and `comments` tables the
+migration is slow and I/O heavy rather than instant. It runs as online DDL
+(`ALGORITHM=INPLACE`), but adding a `FULLTEXT` index does not permit concurrent
+writes, so schedule it in a maintenance window. It is not safely re-runnable
+after partial application. Before completing it by hand, check which indexes
+exist:
+
+```sql
+SELECT table_name, index_name FROM information_schema.statistics
+WHERE table_schema = DATABASE() AND index_type = 'FULLTEXT';
+```
+
 ### Platform roles
 
 `users.role` is an `ENUM` with the values `user`, `moderator`, and `admin`,

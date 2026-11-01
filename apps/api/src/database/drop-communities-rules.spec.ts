@@ -60,6 +60,6 @@ describe('migration 014 (drop communities.rules)', () => {
     expect(communities).toBeDefined();
     expect(communities).not.toMatch(/\brules\b/);
     expect(snapshot).toContain("('013_backfill_late_community_rules')");
-    expect(snapshot).toContain("('014_drop_communities_rules');");
+    expect(snapshot).toContain("('014_drop_communities_rules')");
   });
 });
