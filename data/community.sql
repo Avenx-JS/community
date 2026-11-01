@@ -56,6 +56,8 @@ CREATE TABLE communities (
     INDEX idx_communities_creator_id (creator_id),
     FOREIGN KEY (creator_id) REFERENCES users(id) ON DELETE CASCADE
 );
+CREATE FULLTEXT INDEX ft_communities_name_description
+  ON communities (name, description);
 
 CREATE TABLE community_subscriptions (
     user_id VARCHAR(36) NOT NULL,
@@ -136,6 +138,7 @@ CREATE TABLE posts (
     FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE
 );
+CREATE FULLTEXT INDEX ft_posts_title_content ON posts (title, content);
 
 CREATE TABLE comments (
     id VARCHAR(36) PRIMARY KEY,
@@ -148,6 +151,7 @@ CREATE TABLE comments (
     FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (parent_id) REFERENCES comments(id) ON DELETE CASCADE
 );
+CREATE FULLTEXT INDEX ft_comments_content ON comments (content);
 
 CREATE TABLE votes (
     id VARCHAR(36) PRIMARY KEY,
@@ -294,4 +298,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('011_create_community_notification_preferences'),
     ('012_create_community_rule_acceptances'),
     ('013_backfill_late_community_rules'),
-    ('014_drop_communities_rules');
+    ('014_drop_communities_rules'),
+    ('015_add_fulltext_search_indexes');
