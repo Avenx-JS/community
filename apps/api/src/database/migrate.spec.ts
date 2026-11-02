@@ -66,6 +66,9 @@ describe('migration ordering and application', () => {
     expect(position('017_add_post_and_comment_content_state')).toBe(
       position('016_generalise_report_targets') + 1,
     );
+    expect(position('018_add_content_listing_indexes')).toBe(
+      position('017_add_post_and_comment_content_state') + 1,
+    );
     expect(new Set(versions).size).toBe(versions.length);
   });
 

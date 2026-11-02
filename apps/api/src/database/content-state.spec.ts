@@ -99,7 +99,7 @@ describe('migration 017 (post and comment content state)', () => {
 
   it('records the version in the snapshot', () => {
     expect(normalise(snapshot)).toContain(
-      "('016_generalise_report_targets'), ('017_add_post_and_comment_content_state');",
+      "('016_generalise_report_targets'), ('017_add_post_and_comment_content_state')",
     );
   });
 });

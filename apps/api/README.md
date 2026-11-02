@@ -138,6 +138,68 @@ SELECT table_name, index_name FROM information_schema.statistics
 WHERE table_schema = DATABASE() AND index_type = 'FULLTEXT';
 ```
 
+#### Index coverage for content listings
+
+Migration `018_add_content_listing_indexes` adds the B-tree indexes behind the
+vote aggregate and the newest-first content listings. It changes no response;
+only query plans change.
+
+| Index | Columns | Query it serves |
+| --- | --- | --- |
+| `idx_votes_target` | `votes (target_type, target_id, value)` | `VotesService.vote`'s `SUM(value) … WHERE target_type = ? AND target_id = ?` |
+| `idx_posts_community_created` | `posts (community_id, created_at, id)` | `GET /posts?community_id=…` |
+| `idx_posts_author_created` | `posts (author_id, created_at, id)` | One author's posts, newest first |
+| `idx_comments_author_created` | `comments (author_id, created_at, id)` | One author's comments, newest first |
+| `idx_comments_parent_created` | `comments (parent_id, created_at, id)` | Paginated replies of one comment |
+| `idx_comments_post_created` | `comments (post_id, created_at, id)` | `CommentsService.findThread` (`GET /posts/:postId/comments`) |
+
+**The `(filter, created_at, id)` shape.** Every list orders by
+`created_at DESC, id DESC` (threads ascending). With the filter column first,
+the matching rows sit in the index already in that order, and MySQL reads them
+backwards (or forwards) without a filesort. `id` is included because it is the
+pagination tiebreaker: without it, rows sharing a `created_at` still need
+sorting, and the plan is not fully index-ordered. A new listing should reuse
+this shape rather than filter on a single-column index and sort.
+
+**`idx_votes_target` is covering.** Before it, no index on `votes` led with
+`target_type` (`unique_user_target` leads with `user_id`), so every vote
+scanned the whole table to recompute the score. Its leading
+pair matches the `WHERE`, and `value` is included so the sum is computed from
+the index alone, without reading a row.
+
+**Do not drop the implicit foreign-key indexes.** The composites make the
+single-column indexes MySQL created for `posts(author_id)`,
+`posts(community_id)`, `comments(post_id)`, `comments(author_id)` and
+`comments(parent_id)` redundant as access paths, but each still supports a
+foreign key. Whether MySQL accepts a composite as a foreign key's supporting
+index depends on creation order and server version, and dropping one can fail
+the `ALTER` or leave the constraint without the index it requires. Keeping them
+costs some write throughput on `posts` and `comments` and nothing else. For the
+same reason `data/community.sql` creates the composites with `CREATE INDEX`
+after each table rather than inline: declared inside `CREATE TABLE`, a
+composite would back the foreign key and the single-column index would never
+be created, so fresh and migrated installations would differ.
+
+**Migration cost.** On populated `posts`, `comments` or `votes` tables, index
+creation locks or copies the table. Consider running each statement as online
+DDL (`ALGORITHM=INPLACE, LOCK=NONE`) on a populated database. The migration is
+not safely re-runnable after partial application. Before completing it by hand,
+check which of the six indexes exist:
+
+```sql
+SELECT table_name, index_name FROM information_schema.statistics
+WHERE table_schema = DATABASE()
+  AND index_name IN ('idx_votes_target', 'idx_posts_community_created',
+    'idx_posts_author_created', 'idx_comments_author_created',
+    'idx_comments_parent_created', 'idx_comments_post_created')
+GROUP BY table_name, index_name;
+```
+
+`content-listing-indexes.mysql.spec.ts` seeds a few thousand rows and asserts
+each query above is planned on its index with no filesort (and `Using index`
+for the vote aggregate), so an index that exists but is not chosen fails the
+suite.
+
 ### Platform roles
 
 `users.role` is an `ENUM` with the values `user`, `moderator`, and `admin`,

@@ -150,6 +150,8 @@ CREATE TABLE posts (
     CONSTRAINT fk_posts_removed_by FOREIGN KEY (removed_by) REFERENCES users(id) ON DELETE SET NULL
 );
 CREATE FULLTEXT INDEX ft_posts_title_content ON posts (title, content);
+CREATE INDEX idx_posts_community_created ON posts (community_id, created_at, id);
+CREATE INDEX idx_posts_author_created ON posts (author_id, created_at, id);
 
 CREATE TABLE comments (
     id VARCHAR(36) PRIMARY KEY,
@@ -174,6 +176,9 @@ CREATE TABLE comments (
     CONSTRAINT fk_comments_removed_by FOREIGN KEY (removed_by) REFERENCES users(id) ON DELETE SET NULL
 );
 CREATE FULLTEXT INDEX ft_comments_content ON comments (content);
+CREATE INDEX idx_comments_author_created ON comments (author_id, created_at, id);
+CREATE INDEX idx_comments_parent_created ON comments (parent_id, created_at, id);
+CREATE INDEX idx_comments_post_created ON comments (post_id, created_at, id);
 
 CREATE TABLE votes (
     id VARCHAR(36) PRIMARY KEY,
@@ -185,6 +190,7 @@ CREATE TABLE votes (
     UNIQUE KEY unique_user_target (user_id, target_type, target_id),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+CREATE INDEX idx_votes_target ON votes (target_type, target_id, value);
 
 CREATE TABLE user_reports (
     id VARCHAR(36) PRIMARY KEY,
@@ -331,4 +337,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('014_drop_communities_rules'),
     ('015_add_fulltext_search_indexes'),
     ('016_generalise_report_targets'),
-    ('017_add_post_and_comment_content_state');
+    ('017_add_post_and_comment_content_state'),
+    ('018_add_content_listing_indexes');
