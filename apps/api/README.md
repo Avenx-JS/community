@@ -1381,6 +1381,63 @@ be purged. It is intentionally deferred because it adds a second table, an
 upsert per interval, and a separate backfill/retention design. Revisit that
 model when long-window trends are needed.
 
+## Outbound email
+
+`EmailModule` (`src/email`) provides the delivery seam that flows such as
+password reset need: the only safe channel for a reset token is the address on
+file, never an HTTP response. Feature modules import `EmailModule` and inject
+the abstract `EmailTransport`, which has a single
+`send({ to, subject, text }): Promise<void>`. Messages are plain text only:
+there is no HTML body, no attachments, and no templating. No route sends email
+yet.
+
+The transport is selected and validated when the application starts. An
+invalid value, or a missing one in production, fails startup instead of
+falling back:
+
+| Variable | Rule | Default |
+| --- | --- | --- |
+| `EMAIL_TRANSPORT` | `logging` or `smtp`; anything else fails startup. An empty value counts as unset. | `logging` outside production; **none** in production, where an unset or empty value fails startup |
+| `SMTP_HOST` | Required when `EMAIL_TRANSPORT=smtp`. | none |
+| `SMTP_FROM` | Required when `EMAIL_TRANSPORT=smtp`; must be a bare email address (`noreply@example.com`, not `Name <…>`). | none |
+| `SMTP_PORT` | Integer from 1 to 65535. | `465` when `SMTP_SECURE=true`, otherwise `587` |
+| `SMTP_SECURE` | `true` (implicit TLS) or `false` (STARTTLS when the server offers it). | `false` |
+| `SMTP_USER`, `SMTP_PASSWORD` | Optional, but must be set together. | unauthenticated |
+
+**The logging transport refuses to start in production.**
+`EMAIL_TRANSPORT=logging` with `NODE_ENV=production` fails startup, and so
+does constructing `LoggingEmailTransport` directly. The logging transport
+writes recipient, subject, and **body** through Nest's logger so flows can be
+exercised locally without a provider. In production that would mean emails
+that are never delivered and reset tokens written to the application log.
+Outside production, treat the development log as containing email addresses
+and tokens.
+
+SMTP uses `nodemailer`, so no deployment is tied to one vendor. A
+provider-specific transport can be added later behind the same interface.
+
+**Failure policy.** `send` rejects on failure and does not retry: there is no
+queue, backoff, or dead-letter store. SMTP failures reject with an
+`EmailDeliveryError` that carries only the client's error code (for example
+`EAUTH`), never the server's response text. A consumer **must not** surface
+a send failure to its caller. It catches the rejection, logs it without the
+message body, and returns its normal response. For a password-reset request,
+"this address does not exist" and "sending failed" would otherwise become an
+account-enumeration oracle.
+
+**Logging rules.** A transport logs at most the recipient and subject, and
+never the body. The SMTP transport logs nothing itself, and nodemailer's own
+logger and debug output stay disabled, because they record the SMTP
+conversation, including the body and the AUTH exchange. The logging transport
+is the deliberate, development-only exception. Configuration errors name the
+variable and its rule, never the configured value, so `SMTP_PASSWORD` cannot
+reach a log line. No email address reaches an HTTP response:
+`SafeApiExceptionFilter` reduces unexpected failures to a generic `500`.
+
+Deliberately not included: email verification at registration, email-change
+confirmation, notification digests, templating, queueing or retries, and
+bounce handling. Each needs its own decision.
+
 ## REST input and content safety
 
 All request bodies and query DTOs pass through the global NestJS validation
