@@ -24,6 +24,8 @@ interface RateLimitOptions {
 interface AuthRateLimitConfig {
   loginIp: RateLimitOptions;
   loginAccount: RateLimitOptions;
+  passwordChangeIp: RateLimitOptions;
+  passwordChangeAccount: RateLimitOptions;
   registerIp: RateLimitOptions;
   registerAccount: RateLimitOptions;
   refreshIp: RateLimitOptions;
@@ -61,6 +63,8 @@ function readConfig(): AuthRateLimitConfig {
   return {
     loginIp: readOptions('AUTH_LOGIN_IP', 20, 900),
     loginAccount: readOptions('AUTH_LOGIN_ACCOUNT', 10, 900),
+    passwordChangeIp: readOptions('AUTH_PASSWORD_CHANGE_IP', 10, 3600),
+    passwordChangeAccount: readOptions('AUTH_PASSWORD_CHANGE_ACCOUNT', 5, 3600),
     registerIp: readOptions('AUTH_REGISTER_IP', 5, 3600),
     registerAccount: readOptions('AUTH_REGISTER_ACCOUNT', 3, 3600),
     refreshIp: readOptions('AUTH_REFRESH_IP', 30, 3600),
@@ -100,6 +104,22 @@ export class AuthRateLimitService {
     return this.enforceSignals([
       this.signal('login:ip', ip, this.config.loginIp),
       this.signal('login:account', account, this.config.loginAccount),
+    ]);
+  }
+
+  // Password change verifies the current password, so it is a guessing
+  // oracle for anyone holding a stolen access token.
+  async enforcePasswordChange(
+    ip: string,
+    userId: string,
+  ): Promise<number | null> {
+    return this.enforceSignals([
+      this.signal('password:change:ip', ip, this.config.passwordChangeIp),
+      this.signal(
+        'password:change:account',
+        userId,
+        this.config.passwordChangeAccount,
+      ),
     ]);
   }
 

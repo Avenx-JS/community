@@ -1,10 +1,25 @@
-import { ConflictException, UnauthorizedException } from '@nestjs/common';
-import { beforeEach, describe, expect, it } from '@jest/globals';
+import {
+  ConflictException,
+  Logger,
+  UnauthorizedException,
+} from '@nestjs/common';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  jest,
+} from '@jest/globals';
 import { argon2id, hash as argon2Hash, verify as argon2Verify } from 'argon2';
 import { createHash, randomBytes, scrypt as scryptCallback } from 'node:crypto';
 import type { Pool, PoolConnection } from 'mysql2/promise';
 import { DELETED_PASSWORD_HASH } from '../users/account-deletion.service';
-import { AuthService } from './auth.service';
+import {
+  AuthService,
+  CHANGE_PASSWORD_SQL,
+  LOCK_PASSWORD_SQL,
+} from './auth.service';
 
 type ExecuteResult = [unknown, unknown] | Error;
 type ExecuteFunction = (
@@ -540,5 +555,210 @@ describe('AuthService', () => {
     await service.validateAccessToken('valid-token');
 
     expect(calls[1].sql).toContain('AND deleted_at IS NULL');
+  });
+});
+
+describe('AuthService.changePassword', () => {
+  const USER_ID = 'user-1';
+  const CURRENT = 'current-horse-battery';
+  const NEXT = 'next-horse-battery-staple';
+  let events: string[];
+  let calls: Array<{ sql: string; values: unknown[] }>;
+  let storedHash: string;
+  let updateAffectedRows: number | undefined;
+  let failUpdate: boolean;
+  let rowPresent: boolean;
+  let beforeUpdate: (() => void) | undefined;
+  let service: AuthService;
+  let logoutAll: jest.SpiedFunction<AuthService['logoutAll']>;
+
+  beforeEach(async () => {
+    events = [];
+    calls = [];
+    storedHash = await argon2Hash(CURRENT, {
+      type: argon2id,
+      memoryCost: 19 * 1024,
+      timeCost: 2,
+      parallelism: 1,
+    });
+    updateAffectedRows = undefined;
+    failUpdate = false;
+    rowPresent = true;
+    beforeUpdate = undefined;
+    const connection = {
+      execute: (sql: string, values: unknown[]) => {
+        calls.push({ sql, values });
+        events.push(sql === LOCK_PASSWORD_SQL ? 'lock' : sql);
+        if (sql === LOCK_PASSWORD_SQL) {
+          return Promise.resolve([
+            rowPresent ? [{ id: USER_ID, password_hash: storedHash }] : [],
+            [],
+          ]);
+        }
+        if (sql === CHANGE_PASSWORD_SQL) {
+          if (failUpdate) {
+            return Promise.reject(new Error('write failed'));
+          }
+          // Lets a test change the stored hash between the read and the
+          // compare-and-set, as a concurrent change would.
+          beforeUpdate?.();
+          const [hash, , expected] = values as string[];
+          const matched = expected === storedHash;
+          if (matched) {
+            storedHash = hash;
+          }
+          return Promise.resolve([
+            { affectedRows: updateAffectedRows ?? (matched ? 1 : 0) },
+            [],
+          ]);
+        }
+        return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
+      },
+      beginTransaction: () => {
+        events.push('begin');
+        return Promise.resolve();
+      },
+      commit: () => {
+        events.push('commit');
+        return Promise.resolve();
+      },
+      rollback: () => {
+        events.push('rollback');
+        return Promise.resolve();
+      },
+      release: () => {
+        events.push('release');
+      },
+    };
+    service = new AuthService({
+      getConnection: () => Promise.resolve(connection),
+    } as unknown as Pool);
+    logoutAll = jest.spyOn(service, 'logoutAll').mockImplementation(() => {
+      events.push('logoutAll');
+      return Promise.resolve();
+    });
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('locks the row, compare-and-sets an Argon2id hash, commits, then revokes', async () => {
+    const previousHash = storedHash;
+
+    await service.changePassword(USER_ID, CURRENT, NEXT);
+
+    expect(calls[0]).toEqual({
+      sql: 'SELECT id, password_hash FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1 FOR UPDATE',
+      values: [USER_ID],
+    });
+    expect(calls[1].sql).toBe(
+      'UPDATE users SET password_hash = ? WHERE id = ? AND password_hash = ?',
+    );
+    expect(calls[1].values.slice(1)).toEqual([USER_ID, previousHash]);
+    expect(storedHash).toMatch(/^\$argon2id\$v=19\$m=19456,p=1,t=2\$/);
+    await expect(argon2Verify(storedHash, NEXT)).resolves.toBe(true);
+    expect(events).toEqual([
+      'begin',
+      'lock',
+      CHANGE_PASSWORD_SQL,
+      'commit',
+      'release',
+      'logoutAll',
+    ]);
+    expect(logoutAll).toHaveBeenCalledWith(USER_ID);
+  });
+
+  it('returns 401 for a wrong current password and writes nothing', async () => {
+    await expect(
+      service.changePassword(USER_ID, 'wrong-horse-battery', NEXT),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+
+    expect(events).toEqual(['begin', 'lock', 'rollback', 'release']);
+  });
+
+  it.each([
+    ['the account row is missing or deleted', () => (rowPresent = false)],
+    [
+      'the stored hash is the deleted-account sentinel',
+      () => (storedHash = DELETED_PASSWORD_HASH),
+    ],
+  ])('returns 401 and writes nothing when %s', async (_case, arrange) => {
+    arrange();
+
+    await expect(
+      service.changePassword(USER_ID, CURRENT, NEXT),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(events).toEqual(['begin', 'lock', 'rollback', 'release']);
+  });
+
+  it('accepts a legacy scrypt hash and replaces it with Argon2id', async () => {
+    storedHash = await createLegacyScryptHash(CURRENT);
+
+    await service.changePassword(USER_ID, CURRENT, NEXT);
+
+    expect(storedHash).toMatch(/^\$argon2id\$/);
+    await expect(argon2Verify(storedHash, NEXT)).resolves.toBe(true);
+  });
+
+  it('returns 409 and rolls back when the compare-and-set matches no row', async () => {
+    updateAffectedRows = 0;
+
+    await expect(
+      service.changePassword(USER_ID, CURRENT, NEXT),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(events).toEqual([
+      'begin',
+      'lock',
+      CHANGE_PASSWORD_SQL,
+      'rollback',
+      'release',
+    ]);
+    expect(logoutAll).not.toHaveBeenCalled();
+  });
+
+  it('never lets the loser of a concurrent change succeed', async () => {
+    // The other change commits between this read and this update.
+    beforeUpdate = () => {
+      storedHash = 'hash-written-by-the-concurrent-change';
+    };
+
+    await expect(
+      service.changePassword(USER_ID, CURRENT, NEXT),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(storedHash).toBe('hash-written-by-the-concurrent-change');
+    expect(events).toContain('rollback');
+    expect(logoutAll).not.toHaveBeenCalled();
+  });
+
+  it('rolls back and releases when a write fails', async () => {
+    failUpdate = true;
+
+    await expect(
+      service.changePassword(USER_ID, CURRENT, NEXT),
+    ).rejects.toThrow('write failed');
+    expect(events.slice(-2)).toEqual(['rollback', 'release']);
+    expect(logoutAll).not.toHaveBeenCalled();
+  });
+
+  it('keeps the new password and resolves when revocation fails', async () => {
+    logoutAll.mockRejectedValue(new Error(`revocation failed ${CURRENT}`));
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+
+    await expect(
+      service.changePassword(USER_ID, CURRENT, NEXT),
+    ).resolves.toBeUndefined();
+
+    await expect(argon2Verify(storedHash, NEXT)).resolves.toBe(true);
+    expect(events).toContain('commit');
+    expect(warn).toHaveBeenCalledWith(
+      'Session revocation failed after password change',
+    );
+    const logged = JSON.stringify(warn.mock.calls);
+    for (const secret of [CURRENT, NEXT, storedHash]) {
+      expect(logged).not.toContain(secret);
+    }
   });
 });

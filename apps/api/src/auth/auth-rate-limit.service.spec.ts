@@ -177,6 +177,89 @@ describe('AuthRateLimitService', () => {
     ).toEqual([]);
   });
 
+  it('applies hourly password-change IP and account signals', async () => {
+    await expect(
+      service.enforcePasswordChange('192.0.2.10', 'token-user-id'),
+    ).resolves.toBeNull();
+
+    const hmac = (scope: string, value: string) =>
+      createHmac(
+        'sha256',
+        process.env.RATE_LIMIT_HASH_SECRET ??
+          process.env.MYSQL_PASSWORD ??
+          'community-local-rate-limit-secret',
+      )
+        .update(scope)
+        .update('\0')
+        .update(value)
+        .digest('hex');
+    const upserts = calls.filter((call) =>
+      call.sql.startsWith('INSERT INTO auth_rate_limits'),
+    );
+    expect(upserts.map((call) => call.values[0])).toEqual([
+      hmac('password:change:ip', '192.0.2.10'),
+      hmac('password:change:account', 'token-user-id'),
+    ]);
+    expect(
+      upserts.every((call) => call.sql.includes('INTERVAL 3600 SECOND')),
+    ).toBe(true);
+    expect(JSON.stringify(calls)).not.toContain('token-user-id');
+  });
+
+  it.each([
+    ['AUTH_PASSWORD_CHANGE_IP', 11],
+    ['AUTH_PASSWORD_CHANGE_ACCOUNT', 6],
+  ])(
+    'denies password changes past the default %s limit',
+    async (_prefix, count) => {
+      requestCount = count;
+      retryAfter = 1800;
+
+      await expect(
+        service.enforcePasswordChange('192.0.2.10', 'token-user-id'),
+      ).resolves.toBe(1800);
+    },
+  );
+
+  it('honours password-change rate-limit environment overrides', async () => {
+    const names = [
+      'AUTH_PASSWORD_CHANGE_IP_MAX',
+      'AUTH_PASSWORD_CHANGE_IP_WINDOW_SECONDS',
+      'AUTH_PASSWORD_CHANGE_ACCOUNT_MAX',
+      'AUTH_PASSWORD_CHANGE_ACCOUNT_WINDOW_SECONDS',
+    ] as const;
+    const previous = names.map((name) => process.env[name]);
+    process.env.AUTH_PASSWORD_CHANGE_IP_MAX = '3';
+    process.env.AUTH_PASSWORD_CHANGE_IP_WINDOW_SECONDS = '120';
+    process.env.AUTH_PASSWORD_CHANGE_ACCOUNT_MAX = '2';
+    process.env.AUTH_PASSWORD_CHANGE_ACCOUNT_WINDOW_SECONDS = '180';
+    try {
+      const overridden = new AuthRateLimitService({
+        execute: (sql: string, values: unknown[]) => {
+          calls.push({ sql, values });
+          return Promise.resolve([[{ request_count: 3, retry_after: 99 }], []]);
+        },
+      } as unknown as Pool);
+
+      // 3 requests exceed the account limit of 2 but not the IP limit of 3.
+      await expect(
+        overridden.enforcePasswordChange('192.0.2.10', 'token-user-id'),
+      ).resolves.toBe(99);
+      const windows = calls
+        .filter((call) => call.sql.startsWith('INSERT INTO auth_rate_limits'))
+        .map((call) => /INTERVAL (\d+) SECOND/.exec(call.sql)?.[1]);
+      expect(windows).toEqual(['120', '180']);
+    } finally {
+      names.forEach((name, index) => {
+        if (previous[index] === undefined) {
+          delete process.env[name];
+        } else {
+          process.env[name] = previous[index];
+        }
+      });
+    }
+  });
+
   it('honours report rate-limit environment overrides', async () => {
     const previousValues = {
       ipMax: process.env.API_REPORT_CREATE_IP_MAX,

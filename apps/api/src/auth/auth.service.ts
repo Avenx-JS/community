@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
+  Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import { argon2id, hash as argon2Hash, verify as argon2Verify } from 'argon2';
@@ -41,6 +42,13 @@ const argon2HashPattern =
 const legacyScryptHashPattern =
   /^scrypt\$16384\$8\$1\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{86}$/;
 
+export const LOCK_PASSWORD_SQL =
+  'SELECT id, password_hash FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1 FOR UPDATE';
+// Binds the hash that was verified, so a concurrent change is never
+// overwritten: the same compare-and-set login uses for its rehash.
+export const CHANGE_PASSWORD_SQL =
+  'UPDATE users SET password_hash = ? WHERE id = ? AND password_hash = ?';
+
 interface PasswordVerification {
   valid: boolean;
   needsRehash: boolean;
@@ -74,6 +82,11 @@ interface UserRow extends RowDataPacket {
   email: string;
   password_hash: string;
   created_at: Date;
+}
+
+interface PasswordRow extends RowDataPacket {
+  id: string;
+  password_hash: string;
 }
 
 interface SessionUserRow extends RowDataPacket {
@@ -130,6 +143,7 @@ export interface AuthResponse {
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
   private readonly activityWriteIntervalSeconds = readPositiveInteger(
     'USER_ACTIVITY_WRITE_INTERVAL_SECONDS',
     300,
@@ -188,10 +202,11 @@ export class AuthService {
 
     if (verification.needsRehash) {
       const passwordHash = await this.hashPassword(input.password);
-      await this.pool.execute<ResultSetHeader>(
-        'UPDATE users SET password_hash = ? WHERE id = ? AND password_hash = ?',
-        [passwordHash, user.id, user.password_hash],
-      );
+      await this.pool.execute<ResultSetHeader>(CHANGE_PASSWORD_SQL, [
+        passwordHash,
+        user.id,
+        user.password_hash,
+      ]);
       user.password_hash = passwordHash;
     }
 
@@ -341,6 +356,71 @@ export class AuthService {
       'UPDATE auth_refresh_tokens SET revoked_at = UTC_TIMESTAMP() WHERE user_id = ? AND revoked_at IS NULL',
       [userId],
     );
+  }
+
+  async changePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<void> {
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+      // FOR UPDATE serialises concurrent changes: the second waits, then
+      // verifies against the hash the first one wrote.
+      const [rows] = await connection.execute<PasswordRow[]>(
+        LOCK_PASSWORD_SQL,
+        [userId],
+      );
+      const row = rows[0];
+      if (!row) {
+        throw new UnauthorizedException('Invalid credentials');
+      }
+
+      // Accepts a legacy scrypt hash exactly as login does; the Argon2id hash
+      // written below upgrades it as a side effect.
+      const verification = await this.verifyPassword(
+        currentPassword,
+        row.password_hash,
+      );
+      if (!verification.valid) {
+        throw new UnauthorizedException('Invalid credentials');
+      }
+
+      const passwordHash = await this.hashPassword(newPassword);
+      const [result] = await connection.execute<ResultSetHeader>(
+        CHANGE_PASSWORD_SQL,
+        [passwordHash, userId, row.password_hash],
+      );
+      if (result.affectedRows !== 1) {
+        throw new ConflictException('The password was changed concurrently');
+      }
+
+      await connection.commit();
+      transactionStarted = false;
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
+
+    // Deliberately after the commit and allowed to fail: the password is
+    // already changed, and a revocation failure must not roll that back or
+    // turn the response into an error the client would retry against the
+    // new password. Unlike a restriction there is no per-request backstop:
+    // refresh does not consult the password, so on failure surviving access
+    // tokens work until they expire (15 minutes) and surviving refresh tokens
+    // until they are revoked by a later logout-all or expire (30 days).
+    try {
+      await this.logoutAll(userId);
+    } catch {
+      this.logger.warn('Session revocation failed after password change');
+    }
   }
 
   // Re-confirms a signed-in user's password. Fails closed for any stored value

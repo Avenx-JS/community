@@ -1061,13 +1061,74 @@ avoid persisting refresh tokens in browser local storage. Browser clients should
 keep credentials in memory until an appropriately protected cookie-based flow
 is available; native clients should use platform secure storage.
 
+### Changing your password
+
+`POST /auth/password/change` with a bearer token and
+`{ "current_password": "...", "new_password": "..." }` changes the password of
+the token's account. No body field identifies the account, and unknown
+properties such as `user_id` are rejected.
+
+| Status | When |
+| --- | --- |
+| `204` | The password is changed and every session of the account is revoked. No body and no new tokens. |
+| `400` | A field is missing, not a string, outside 12–128 characters, an unknown property is present, or `new_password` equals `current_password`. |
+| `401` | No valid bearer token, or `current_password` is wrong. Nothing is written. |
+| `409` | The password changed concurrently between the check and the write. Nothing is written. |
+| `429` | The password-change rate limit is exceeded; see `Retry-After`. |
+
+**Every session is revoked, including the caller's own.** The access token
+used for the request is refused on its next use, every refresh token of the
+account is rejected, and no replacement tokens are returned. Clients must
+expect their own credentials to stop working immediately and send the user
+back to sign in with the new password. Keeping the calling session alive
+would be friendlier, but a user changing a password because they fear
+compromise could not tell whether the surviving session was theirs or the
+attacker's.
+
+**Restricted accounts can change their password.** The route carries
+`@AllowRestricted()`, like logout and logout-all: a suspension or ban limits
+participation, not account hygiene, and a suspended user must still be able
+to replace a compromised password. The restriction itself is unaffected.
+
+The change runs in one transaction. It reads the user row with
+`SELECT … FOR UPDATE`, verifies `current_password` with the same check as
+login, and writes a new Argon2id hash with
+`UPDATE … WHERE id = ? AND password_hash = ?`, binding the hash that was
+verified. Concurrent changes therefore serialise: exactly one succeeds, and
+the other gets `401` (it verified against the new hash) or `409` (the
+compare-and-set matched no row). The account never ends up with a password
+nobody chose. An account still on a legacy `scrypt` hash can change its
+password, and the new hash is Argon2id.
+
+Session revocation runs **after** the commit and its failure does not fail
+the request: the password is already changed, and the client must not retry
+against a password that no longer exists. Unlike a restriction, nothing on the
+request path backstops a failed revocation. Until it is repeated, surviving
+access tokens work for up to their 15-minute lifetime, and surviving refresh
+tokens keep issuing new ones until they expire (30 days) or are revoked by
+`POST /auth/logout-all`. The failure is logged as a warning without the user,
+passwords, or hashes. An operator who sees it can revoke that account's
+sessions; making refresh reject tokens issued before the last password change
+would need a `password_changed_at` column and is not implemented.
+
+No audit entry is written: `admin_actions` records platform-administrative
+actions, and a user changing their own password is not one. **Follow-up:** a
+`password_changed` notification would tell users about a change they did not
+make, but `notifications.type` is an `ENUM` that needs a migration for a new
+value, and the user cannot read the inbox until signing in again anyway. It is
+deliberately not part of this endpoint.
+
 ### Authentication rate limits
 
 Login, registration, and refresh requests use atomic fixed-window counters in
 the shared MySQL `auth_rate_limits` table. Default limits are 20 login attempts
 per IP and 10 per normalized account per 15 minutes; 5 registrations per IP
 and 3 per normalized username/email per hour; and 30 refresh attempts per IP
-and 10 per refresh token per hour. Exceeded limits return HTTP `429` with a
+and 10 per refresh token per hour. Password changes are limited to 10 per IP
+and 5 per account (the token's user ID) per hour, because the endpoint
+verifies a password and is therefore a guessing oracle for anyone holding a
+stolen access token; the global write limit is far too loose for that.
+Exceeded limits return HTTP `429` with a
 `Retry-After` header. Login failures remain generic, and no account lockout is
 applied. The exported `AuthRateLimitService.enforceSignals()` method uses the
 same shared counters and can be reused for future API route throttles.
@@ -1077,8 +1138,11 @@ Limits are configurable with `AUTH_LOGIN_IP_MAX`,
 `AUTH_LOGIN_ACCOUNT_WINDOW_SECONDS`, `AUTH_REGISTER_IP_MAX`,
 `AUTH_REGISTER_IP_WINDOW_SECONDS`, `AUTH_REGISTER_ACCOUNT_MAX`,
 `AUTH_REGISTER_ACCOUNT_WINDOW_SECONDS`, `AUTH_REFRESH_IP_MAX`,
-`AUTH_REFRESH_IP_WINDOW_SECONDS`, `AUTH_REFRESH_TOKEN_MAX`, and
-`AUTH_REFRESH_TOKEN_WINDOW_SECONDS`. Values must be integers from 1 to 86400.
+`AUTH_REFRESH_IP_WINDOW_SECONDS`, `AUTH_REFRESH_TOKEN_MAX`,
+`AUTH_REFRESH_TOKEN_WINDOW_SECONDS`, `AUTH_PASSWORD_CHANGE_IP_MAX`,
+`AUTH_PASSWORD_CHANGE_IP_WINDOW_SECONDS`, `AUTH_PASSWORD_CHANGE_ACCOUNT_MAX`,
+and `AUTH_PASSWORD_CHANGE_ACCOUNT_WINDOW_SECONDS`. Values must be integers
+from 1 to 86400.
 The API does not trust proxy forwarding headers by default; `request.ip` uses
 the direct socket address. Deployments behind a reverse proxy must configure
 trusted proxy handling at the infrastructure/application boundary before

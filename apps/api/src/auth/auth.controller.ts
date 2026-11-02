@@ -31,6 +31,7 @@ import type { AuthenticatedRequest } from './auth.guard';
 import { AllowRestricted } from './allow-restricted.decorator';
 import { AuthService } from './auth.service';
 import { AuthRateLimitService } from './auth-rate-limit.service';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { RefreshDto } from './dto/refresh.dto';
@@ -163,6 +164,54 @@ export class AuthController {
   })
   async logoutAll(@Req() request: AuthenticatedRequest): Promise<void> {
     await this.authService.logoutAll(request.user.id);
+  }
+
+  @Post('password/change')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @UseGuards(AuthGuard)
+  // A suspended or banned user must still be able to replace a compromised
+  // password: restrictions limit participation, not account hygiene.
+  @AllowRestricted()
+  @ApiOperation({
+    summary: 'Change your password',
+    description:
+      'Verifies `current_password` and replaces it with `new_password`. On ' +
+      'success **every session of the account is revoked, including the ' +
+      'one that made this request**: the access token used here is refused ' +
+      'on its next use, every refresh token is rejected, and no new tokens ' +
+      'are returned. Sign in again with the new password. Also available to ' +
+      'suspended and banned accounts. Rate limited per client IP and account.',
+  })
+  @ApiAuthenticated({
+    allowRestricted: true,
+    unauthorized: 'Incorrect current password.',
+  })
+  @ApiNoContentResponse({
+    description:
+      'The password is changed and all sessions, including this one, are ' +
+      'revoked.',
+  })
+  @ApiErrorResponses({
+    400: 'Invalid input, or the new password equals the current one.',
+    409: 'The password was changed concurrently; nothing was written.',
+  })
+  async changePassword(
+    @Body() body: ChangePasswordDto,
+    @Req() request: AuthenticatedRequest,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<void> {
+    await this.enforceRateLimit(
+      response,
+      this.authRateLimitService.enforcePasswordChange(
+        this.clientIp(request),
+        request.user.id,
+      ),
+    );
+    await this.authService.changePassword(
+      request.user.id,
+      body.current_password,
+      body.new_password,
+    );
   }
 
   private clientIp(request: Request): string {

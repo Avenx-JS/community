@@ -1,5 +1,7 @@
+import 'reflect-metadata';
 import { Test, TestingModule } from '@nestjs/testing';
 import { beforeEach, describe, expect, it, jest } from '@jest/globals';
+import { ALLOW_RESTRICTED } from './allow-restricted.decorator';
 import { AuthController } from './auth.controller';
 import type { AuthenticatedRequest } from './auth.guard';
 import { AuthRateLimitService } from './auth-rate-limit.service';
@@ -15,6 +17,7 @@ describe('AuthController', () => {
   let refreshCalls: string[];
   let logoutCalls: string[];
   let logoutAllCalls: string[];
+  let changePasswordCalls: string[][];
   let rateLimitCalls: Array<{ scope: string; values: string[] }>;
   let retryAfter: number | null;
 
@@ -39,9 +42,13 @@ describe('AuthController', () => {
       logoutAllCalls.push(userId);
       return Promise.resolve();
     },
+    changePassword: (userId: string, current: string, next: string) => {
+      changePasswordCalls.push([userId, current, next]);
+      return Promise.resolve();
+    },
   } satisfies Pick<
     AuthService,
-    'register' | 'login' | 'refresh' | 'logout' | 'logoutAll'
+    'register' | 'login' | 'refresh' | 'logout' | 'logoutAll' | 'changePassword'
   >;
   const rateLimitService = {
     enforceRegistration: (ip: string, username: string, email: string) => {
@@ -56,9 +63,16 @@ describe('AuthController', () => {
       rateLimitCalls.push({ scope: 'refresh', values: [ip, token] });
       return Promise.resolve(retryAfter);
     },
+    enforcePasswordChange: (ip: string, userId: string) => {
+      rateLimitCalls.push({ scope: 'password-change', values: [ip, userId] });
+      return Promise.resolve(retryAfter);
+    },
   } satisfies Pick<
     AuthRateLimitService,
-    'enforceRegistration' | 'enforceLogin' | 'enforceRefresh'
+    | 'enforceRegistration'
+    | 'enforceLogin'
+    | 'enforceRefresh'
+    | 'enforcePasswordChange'
   >;
 
   beforeEach(async () => {
@@ -79,6 +93,7 @@ describe('AuthController', () => {
     refreshCalls = [];
     logoutCalls = [];
     logoutAllCalls = [];
+    changePasswordCalls = [];
     rateLimitCalls = [];
     retryAfter = null;
 
@@ -149,6 +164,68 @@ describe('AuthController', () => {
 
     expect(refreshCalls).toEqual(['current-refresh-token']);
     expect(logoutAllCalls).toEqual(['user-id']);
+  });
+
+  it('changes the password of the token user after its own rate limit', async () => {
+    const request = {
+      ip: '192.0.2.1',
+      socket: { remoteAddress: 'local' },
+      accessToken: 'current-session-token',
+      user: { id: 'user-id' },
+    } as unknown as AuthenticatedRequest;
+    const response = { setHeader: jest.fn() };
+
+    await expect(
+      controller.changePassword(
+        {
+          current_password: 'current-horse-battery',
+          new_password: 'next-horse-battery-staple',
+        },
+        request,
+        response as never,
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(rateLimitCalls).toEqual([
+      { scope: 'password-change', values: ['192.0.2.1', 'user-id'] },
+    ]);
+    expect(changePasswordCalls).toEqual([
+      ['user-id', 'current-horse-battery', 'next-horse-battery-staple'],
+    ]);
+  });
+
+  it('sets Retry-After and does not change the password when limited', async () => {
+    retryAfter = 1200;
+    const response = { setHeader: jest.fn() };
+
+    await expect(
+      controller.changePassword(
+        {
+          current_password: 'current-horse-battery',
+          new_password: 'next-horse-battery-staple',
+        },
+        {
+          ip: '192.0.2.1',
+          socket: { remoteAddress: 'local' },
+          user: { id: 'user-id' },
+        } as unknown as AuthenticatedRequest,
+        response as never,
+      ),
+    ).rejects.toMatchObject({ status: 429 });
+    expect(response.setHeader).toHaveBeenCalledWith('Retry-After', '1200');
+    expect(changePasswordCalls).toEqual([]);
+  });
+
+  it('allows restricted accounts to change their password', () => {
+    expect(
+      Reflect.getMetadata(
+        ALLOW_RESTRICTED,
+        Object.getOwnPropertyDescriptor(
+          AuthController.prototype,
+          'changePassword',
+        )?.value as object,
+      ),
+    ).toBe(true);
   });
 
   it('sets Retry-After and rejects requests denied by the limiter', async () => {

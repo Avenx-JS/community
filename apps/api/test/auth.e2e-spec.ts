@@ -5,7 +5,13 @@ import type { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
-import { MYSQL_POOL } from '../src/auth/auth.service';
+import { verify as argon2Verify } from 'argon2';
+import { randomBytes, scrypt as scryptCallback } from 'node:crypto';
+import {
+  CHANGE_PASSWORD_SQL,
+  LOCK_PASSWORD_SQL,
+  MYSQL_POOL,
+} from '../src/auth/auth.service';
 import {
   ANONYMISE_ACCOUNT_SQL,
   CREATED_COMMUNITY_SQL,
@@ -21,6 +27,27 @@ interface TestUser {
   created_at: Date;
   last_seen_at: Date | null;
   deleted_at?: Date | null;
+}
+
+function legacyScryptHash(password: string): Promise<string> {
+  const salt = randomBytes(16);
+  return new Promise((resolve, reject) => {
+    scryptCallback(
+      password,
+      salt,
+      64,
+      { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 },
+      (error, key) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(
+          `scrypt$16384$8$1$${salt.toString('base64url')}$${key.toString('base64url')}`,
+        );
+      },
+    );
+  });
 }
 
 // Applies the deleted_at predicate when, and only when, the query carries it.
@@ -56,6 +83,8 @@ describe('Auth endpoints (e2e)', () => {
   let sessions: TestSession[];
   let refreshTokens: TestRefreshToken[];
   let rateLimitBuckets: Map<string, TestRateLimitBucket>;
+  let restrictedUserIds: Set<string>;
+  let previousPasswordChangeAccountMax: string | undefined;
   let previousLoginIpMax: string | undefined;
   let previousLoginIpWindow: string | undefined;
   let previousActivityWriteInterval: string | undefined;
@@ -78,7 +107,10 @@ describe('Auth endpoints (e2e)', () => {
     previousLoginIpWindow = process.env.AUTH_LOGIN_IP_WINDOW_SECONDS;
     previousActivityWriteInterval =
       process.env.USER_ACTIVITY_WRITE_INTERVAL_SECONDS;
+    previousPasswordChangeAccountMax =
+      process.env.AUTH_PASSWORD_CHANGE_ACCOUNT_MAX;
     process.env.AUTH_LOGIN_IP_MAX = '2';
+    process.env.AUTH_PASSWORD_CHANGE_ACCOUNT_MAX = '3';
     process.env.AUTH_LOGIN_IP_WINDOW_SECONDS = '60';
     process.env.USER_ACTIVITY_WRITE_INTERVAL_SECONDS = '300';
     activityUpdateAttempts = 0;
@@ -89,6 +121,7 @@ describe('Auth endpoints (e2e)', () => {
     sessions = [];
     refreshTokens = [];
     rateLimitBuckets = new Map();
+    restrictedUserIds = new Set();
     const execute = (
       sql: string,
       values: unknown[],
@@ -190,7 +223,9 @@ describe('Auth endpoints (e2e)', () => {
             ? [
                 {
                   id: session.user_id,
-                  restriction_type: null,
+                  restriction_type: restrictedUserIds.has(session.user_id)
+                    ? 'suspension'
+                    : null,
                   restriction_expires_at: null,
                 },
               ]
@@ -368,6 +403,29 @@ describe('Auth endpoints (e2e)', () => {
       if (sql.startsWith('SELECT type, expires_at')) {
         return Promise.resolve([[], []]);
       }
+      // Password change, through the real AuthService.
+      if (sql === LOCK_PASSWORD_SQL) {
+        const [userId] = values as [string];
+        return Promise.resolve([
+          users
+            .filter(
+              (entry) => entry.id === userId && passesDeletedFilter(sql, entry),
+            )
+            .map(({ id, password_hash }) => ({ id, password_hash })),
+          [],
+        ]);
+      }
+      if (sql === CHANGE_PASSWORD_SQL) {
+        const [passwordHash, userId, oldPasswordHash] = values as string[];
+        const user = users.find(
+          (entry) =>
+            entry.id === userId && entry.password_hash === oldPasswordHash,
+        );
+        if (user) {
+          user.password_hash = passwordHash;
+        }
+        return Promise.resolve([{ affectedRows: user ? 1 : 0 }, []]);
+      }
       // Account deletion, through the real AccountDeletionService.
       if (sql === LOCK_ACCOUNT_SQL) {
         const [userId] = values as [string];
@@ -438,6 +496,12 @@ describe('Auth endpoints (e2e)', () => {
       delete process.env.AUTH_LOGIN_IP_MAX;
     } else {
       process.env.AUTH_LOGIN_IP_MAX = previousLoginIpMax;
+    }
+    if (previousPasswordChangeAccountMax === undefined) {
+      delete process.env.AUTH_PASSWORD_CHANGE_ACCOUNT_MAX;
+    } else {
+      process.env.AUTH_PASSWORD_CHANGE_ACCOUNT_MAX =
+        previousPasswordChangeAccountMax;
     }
     if (previousLoginIpWindow === undefined) {
       delete process.env.AUTH_LOGIN_IP_WINDOW_SECONDS;
@@ -938,5 +1002,253 @@ describe('Auth endpoints (e2e)', () => {
       .post('/auth/refresh')
       .send({ refreshToken })
       .expect(401);
+  });
+
+  describe('POST /auth/password/change', () => {
+    const CURRENT = 'correct-horse-battery';
+    const NEXT = 'brand-new-horse-battery';
+    const responses: string[] = [];
+
+    const register = async (username = 'changing_user') => {
+      const response = await request(app.getHttpServer())
+        .post('/auth/register')
+        .send({ username, email: `${username}@example.com`, password: CURRENT })
+        .expect(201);
+      responses.push(response.text);
+      return response.body as { accessToken: string; refreshToken: string };
+    };
+    const change = async (
+      accessToken: string | undefined,
+      body: object,
+      expected: number,
+    ) => {
+      const pending = request(app.getHttpServer()).post(
+        '/auth/password/change',
+      );
+      if (accessToken) {
+        void pending.set('Authorization', `Bearer ${accessToken}`);
+      }
+      const response = await pending.send(body).expect(expected);
+      responses.push(response.text);
+      return response;
+    };
+    const login = async (password: string, expected: number) => {
+      // This suite caps login at two per IP; these tests count changes, not
+      // logins, so each login starts from empty buckets.
+      rateLimitBuckets.clear();
+      const response = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ identifier: 'changing_user', password })
+        .expect(expected);
+      responses.push(response.text);
+      return response.body as { accessToken: string };
+    };
+
+    beforeEach(() => {
+      responses.length = 0;
+    });
+
+    // No response, successful or not, may carry a password or a hash.
+    afterEach(() => {
+      const serialised = responses.join('\n');
+      for (const secret of [CURRENT, NEXT, '$argon2id$', 'password_hash']) {
+        expect(serialised).not.toContain(secret);
+      }
+      for (const user of users) {
+        expect(serialised).not.toContain(user.password_hash);
+      }
+    });
+
+    it('changes the password, revokes every session, and requires the new password', async () => {
+      const first = await register();
+      const second = await login(CURRENT, 200);
+      const previousHash = users[0].password_hash;
+
+      const response = await change(
+        first.accessToken,
+        { current_password: CURRENT, new_password: NEXT },
+        204,
+      );
+
+      expect(response.text).toBe('');
+      expect(users[0].password_hash).not.toBe(previousHash);
+      expect(users[0].password_hash).toMatch(
+        /^\$argon2id\$v=19\$m=19456,p=1,t=2\$/,
+      );
+      // The caller's own credentials as well as the other session's.
+      for (const token of [first.accessToken, second.accessToken]) {
+        await request(app.getHttpServer())
+          .post('/auth/logout')
+          .set('Authorization', `Bearer ${token}`)
+          .expect(401);
+      }
+      await request(app.getHttpServer())
+        .post('/auth/refresh')
+        .send({ refreshToken: first.refreshToken })
+        .expect(401);
+      expect(sessions).toEqual([]);
+      expect(refreshTokens.every((token) => token.revoked_at !== null)).toBe(
+        true,
+      );
+
+      await login(CURRENT, 401);
+      await login(NEXT, 200);
+    });
+
+    it('returns 401 for a wrong current password and writes nothing', async () => {
+      const { accessToken } = await register();
+      const previousHash = users[0].password_hash;
+
+      await change(
+        accessToken,
+        { current_password: 'wrong-horse-battery', new_password: NEXT },
+        401,
+      );
+
+      expect(users[0].password_hash).toBe(previousHash);
+      expect(sessions).toHaveLength(1);
+      await login(CURRENT, 200);
+    });
+
+    it('returns 401 without a valid bearer token', async () => {
+      await register();
+      const previousHash = users[0].password_hash;
+      const body = { current_password: CURRENT, new_password: NEXT };
+
+      await change(undefined, body, 401);
+      await change('not-a-real-token', body, 401);
+      expect(users[0].password_hash).toBe(previousHash);
+    });
+
+    it.each([
+      [
+        'the same password',
+        { current_password: CURRENT, new_password: CURRENT },
+      ],
+      ['a missing current_password', { new_password: NEXT }],
+      ['a missing new_password', { current_password: CURRENT }],
+      ['an empty body', {}],
+      [
+        'an 11-character new_password',
+        { current_password: CURRENT, new_password: 'p'.repeat(11) },
+      ],
+      [
+        'a 129-character new_password',
+        { current_password: CURRENT, new_password: 'p'.repeat(129) },
+      ],
+      [
+        'an 11-character current_password',
+        { current_password: 'p'.repeat(11), new_password: NEXT },
+      ],
+      [
+        'a 129-character current_password',
+        { current_password: 'p'.repeat(129), new_password: NEXT },
+      ],
+      [
+        'a non-string new_password',
+        { current_password: CURRENT, new_password: 123456789012 },
+      ],
+      [
+        'a non-string current_password',
+        { current_password: [CURRENT], new_password: NEXT },
+      ],
+      [
+        'an unknown property naming a user',
+        {
+          current_password: CURRENT,
+          new_password: NEXT,
+          user_id: 'other-user',
+        },
+      ],
+    ])('returns 400 for %s and writes nothing', async (_case, body) => {
+      const { accessToken } = await register();
+      const previousHash = users[0].password_hash;
+
+      await change(accessToken, body, 400);
+
+      expect(users[0].password_hash).toBe(previousHash);
+      expect(sessions).toHaveLength(1);
+    });
+
+    it('lets a suspended or banned account change its password', async () => {
+      const { accessToken } = await register();
+      restrictedUserIds.add(users[0].id);
+
+      await change(
+        accessToken,
+        { current_password: CURRENT, new_password: NEXT },
+        204,
+      );
+
+      await expect(argon2Verify(users[0].password_hash, NEXT)).resolves.toBe(
+        true,
+      );
+      expect(sessions).toEqual([]);
+    });
+
+    it('accepts a legacy scrypt hash and stores Argon2id afterwards', async () => {
+      const { accessToken } = await register();
+      users[0].password_hash = await legacyScryptHash(CURRENT);
+
+      await change(
+        accessToken,
+        { current_password: CURRENT, new_password: NEXT },
+        204,
+      );
+
+      expect(users[0].password_hash).toMatch(/^\$argon2id\$/);
+      await login(NEXT, 200);
+    });
+
+    it('lets exactly one of two concurrent changes succeed', async () => {
+      const first = await register();
+      const second = await login(CURRENT, 200);
+      const attempts = [
+        [first.accessToken, 'first-new-horse-battery'],
+        [second.accessToken, 'second-new-horse-battery'],
+      ];
+
+      const results = await Promise.all(
+        attempts.map(([token, password]) =>
+          request(app.getHttpServer())
+            .post('/auth/password/change')
+            .set('Authorization', `Bearer ${token}`)
+            .send({ current_password: CURRENT, new_password: password }),
+        ),
+      );
+      responses.push(...results.map((response) => response.text));
+
+      const statuses = results.map((response) => response.status);
+      expect(statuses.filter((status) => status === 204)).toHaveLength(1);
+      for (const status of statuses) {
+        expect([204, 401, 409]).toContain(status);
+      }
+      // The stored hash is the winner's, never an unknown password.
+      const winner = attempts[statuses.indexOf(204)][1];
+      await login(winner, 200);
+    });
+
+    it('returns 429 with Retry-After once the account bucket is exhausted', async () => {
+      const { accessToken } = await register();
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await change(
+          accessToken,
+          { current_password: 'wrong-horse-battery', new_password: NEXT },
+          401,
+        );
+      }
+
+      const limited = await change(
+        accessToken,
+        { current_password: CURRENT, new_password: NEXT },
+        429,
+      );
+
+      expect(Number(limited.headers['retry-after'])).toBeGreaterThan(0);
+      expect((limited.body as { message: string }).message).toBe(
+        'Too many requests',
+      );
+      await login(CURRENT, 200);
+    });
   });
 });
