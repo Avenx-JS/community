@@ -1,13 +1,21 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   Patch,
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiNoContentResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 import { AllowRestricted } from '../auth/allow-restricted.decorator';
 import { AuthGuard, type AuthenticatedRequest } from '../auth/auth.guard';
 import {
@@ -15,6 +23,8 @@ import {
   ApiErrorResponses,
   ApiRouteParam,
 } from '../common/openapi';
+import { AccountDeletionService } from './account-deletion.service';
+import { DeleteOwnAccountDto } from './dto/delete-own-account.dto';
 import { UpdateOwnProfileDto } from './dto/update-own-profile.dto';
 import { UsersService } from './users.service';
 import { OwnProfileResponse, UserProfileResponse } from './users.responses';
@@ -23,7 +33,10 @@ import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
 @ApiTags('users')
 @Controller('users')
 export class UsersController {
-  constructor(private readonly usersService: UsersService) {}
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly accountDeletion: AccountDeletionService,
+  ) {}
 
   // The 'me' routes must stay above ':username', or Express would hand
   // /users/me to the public profile handler. Today SafeRouteParamPipe's
@@ -63,6 +76,42 @@ export class UsersController {
     @Body() body: UpdateOwnProfileDto,
   ) {
     return this.usersService.updateOwnProfile(request.user.id, body);
+  }
+
+  // DELETE with a body rather than POST /users/me/delete: the resource is the
+  // account itself, and the body only confirms the password. A client or
+  // proxy that drops DELETE bodies gets a 400 and deletes nothing.
+  // Deliberately not @AllowRestricted(): deletion must not be a way out of a
+  // suspension or ban. The dedicated account:delete rate-limit buckets live in
+  // AuthRateLimitService.enforceApiRequest.
+  @Delete('me')
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary: "Delete the caller's own account",
+    description:
+      'Requires the current password. Anonymises the account rather than ' +
+      'erasing it: posts, comments, votes, reports and restrictions are kept; ' +
+      'the username is not released. Rate limited per IP and account per day.',
+  })
+  @ApiAuthenticated({
+    unauthorized: 'Incorrect password.',
+    forbidden: 'Restricted accounts cannot delete themselves.',
+  })
+  @ApiNoContentResponse({ description: 'The account is deleted.' })
+  @ApiErrorResponses({
+    400: 'Missing or malformed password, or an unknown property.',
+    404: 'The account is already deleted.',
+    409: 'The caller created a community and must delete or transfer it first.',
+  })
+  deleteOwnAccount(
+    @Req() request: AuthenticatedRequest,
+    @Body() body: DeleteOwnAccountDto,
+  ): Promise<void> {
+    return this.accountDeletion.deleteOwnAccount(
+      request.user.id,
+      body.password,
+    );
   }
 
   @Get(':username')

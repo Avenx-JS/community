@@ -10,12 +10,14 @@ CREATE TABLE users (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_seen_at TIMESTAMP NULL DEFAULT NULL,
     display_name VARCHAR(50) NULL DEFAULT NULL,
-    bio VARCHAR(500) NULL DEFAULT NULL
+    bio VARCHAR(500) NULL DEFAULT NULL,
+    deleted_at TIMESTAMP NULL DEFAULT NULL
 );
 
 CREATE INDEX idx_users_role ON users (role);
 CREATE INDEX idx_users_last_seen_at ON users (last_seen_at);
 CREATE INDEX idx_users_created_at ON users (created_at);
+CREATE INDEX idx_users_deleted_at ON users (deleted_at);
 
 CREATE TABLE auth_sessions (
     token_hash CHAR(64) PRIMARY KEY,
@@ -341,4 +343,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('016_generalise_report_targets'),
     ('017_add_post_and_comment_content_state'),
     ('018_add_content_listing_indexes'),
-    ('019_add_user_profile_fields');
+    ('019_add_user_profile_fields'),
+    ('020_add_user_account_deletion');

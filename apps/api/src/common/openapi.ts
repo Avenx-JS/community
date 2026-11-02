@@ -54,6 +54,8 @@ interface AuthenticatedOptions {
   forbidden?: string;
   // Routes marked @AllowRestricted() never answer 403 for a restriction.
   allowRestricted?: boolean;
+  // Additional reasons this route answers 401, besides the bearer token.
+  unauthorized?: string;
 }
 
 export function ApiAuthenticated(options: AuthenticatedOptions = {}) {
@@ -61,7 +63,12 @@ export function ApiAuthenticated(options: AuthenticatedOptions = {}) {
     ApiBearerAuth(),
     ApiUnauthorizedResponse({
       type: ErrorResponse,
-      description: 'Missing, invalid, or expired bearer token.',
+      description: [
+        'Missing, invalid, or expired bearer token.',
+        options.unauthorized,
+      ]
+        .filter(Boolean)
+        .join(' '),
     }),
   ];
 

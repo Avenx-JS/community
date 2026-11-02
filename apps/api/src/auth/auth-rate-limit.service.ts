@@ -37,6 +37,8 @@ interface AuthRateLimitConfig {
   contentCreateCooldown: RateLimitOptions;
   reportCreateIp: RateLimitOptions;
   reportCreateAccount: RateLimitOptions;
+  accountDeleteIp: RateLimitOptions;
+  accountDeleteAccount: RateLimitOptions;
 }
 
 const localDevelopmentSecret = 'community-local-rate-limit-secret';
@@ -72,6 +74,8 @@ function readConfig(): AuthRateLimitConfig {
     contentCreateCooldown: readOptions('API_CONTENT_COOLDOWN', 1, 30),
     reportCreateIp: readOptions('API_REPORT_CREATE_IP', 20, 3600),
     reportCreateAccount: readOptions('API_REPORT_CREATE_ACCOUNT', 10, 3600),
+    accountDeleteIp: readOptions('API_ACCOUNT_DELETE_IP', 10, 86400),
+    accountDeleteAccount: readOptions('API_ACCOUNT_DELETE_ACCOUNT', 5, 86400),
   };
 }
 
@@ -173,6 +177,23 @@ export class AuthRateLimitService {
             'api:content:create:cooldown',
             accountId,
             this.config.contentCreateCooldown,
+          ),
+        );
+      }
+    }
+
+    // Account deletion verifies a password, so it is also a password-guessing
+    // oracle for anyone holding an access token.
+    if (method === 'DELETE' && path === '/users/me') {
+      signals.push(
+        this.signal('account:delete:ip', ip, this.config.accountDeleteIp),
+      );
+      if (accountId) {
+        signals.push(
+          this.signal(
+            'account:delete:account',
+            accountId,
+            this.config.accountDeleteAccount,
           ),
         );
       }

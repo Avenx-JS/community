@@ -62,7 +62,7 @@ describe('UsersService', () => {
     ]);
     expect(queryCalls).toEqual([
       {
-        sql: 'SELECT username, display_name, bio, created_at FROM users WHERE username = ? LIMIT 1',
+        sql: 'SELECT username, display_name, bio, created_at FROM users WHERE username = ? AND deleted_at IS NULL LIMIT 1',
         values: ['sample'],
       },
     ]);

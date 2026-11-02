@@ -1196,6 +1196,129 @@ authenticated user's own account. **New account-scoped sub-resources go under
 resource-root routes that take the actor from the token; they are published
 API and stay where they are rather than being renamed.
 
+### Deleting your own account
+
+`DELETE /users/me` with body `{ "password": "<current password>" }` deletes the
+caller's account and returns `204` with no body. The password (12–128
+characters, as for login) is required because this is the only irreversible
+self-service action in the API: a stolen access token alone must not be enough.
+
+**Deletion anonymises; it does not erase.** The `users` row is the parent of
+almost every foreign key, and deleting it would cascade:
+
+- `posts.author_id` and `comments.author_id` cascade, and `comments.post_id`
+  cascades in turn, so one account's departure would delete every other user's
+  replies on its posts.
+- `communities.creator_id` cascades, taking the community, its rules,
+  subscriptions and content with it.
+- `user_restrictions.user_id` cascades, and `user_reports.reported_user_id` is
+  `SET NULL`, so a banned user could delete their account to erase the ban and
+  detach every report about them, then register again.
+
+So the row is kept, no cascade ever fires, and what is removed is everything
+that identifies or authenticates the person. Soft delete alone (a flag with the
+row untouched) was rejected because it keeps the email, the username and a
+working credential. Reassigning content to a shared "deleted user" row was
+rejected because every author-scoped query would have to special-case that id,
+and one missed case would attribute live content to it.
+
+**What changes, in one transaction** (on one connection; any failure rolls the
+whole operation back and the account stays fully intact):
+
+1. The `users` row is locked `FOR UPDATE`. An already-deleted account is `404`.
+2. The password is verified with the same path as login. A mismatch is `401`
+   and nothing is written.
+3. A community creator is refused with `409` (below).
+4. The row is anonymised:
+
+   | Column | Becomes |
+   | --- | --- |
+   | `username` | `deleted_<id>` |
+   | `email` | `deleted_<id>@invalid` |
+   | `password_hash` | `deleted`, which no password matches: it is neither an Argon2id nor a scrypt hash, so verification fails closed (pinned in `auth.service.spec.ts`) |
+   | `display_name`, `bio`, `last_seen_at` | `NULL` |
+   | `deleted_at` | `UTC_TIMESTAMP()` |
+
+   `username` and `email` are `UNIQUE NOT NULL`, so they get per-account
+   placeholders built from the account's own id rather than `NULL`. Ids are
+   UUIDs, and their hyphens fail the registration username pattern; `.invalid`
+   is reserved by RFC 2606, cannot be delivered to, and fails email validation.
+   No one can register a placeholder in advance and block a deletion.
+5. The account's private state is deleted: its `community_subscriptions`,
+   `community_notification_preferences`, and the `notifications` it received.
+6. Every session and refresh token is revoked.
+
+**Kept:** posts, comments, votes, `community_rule_acceptances`,
+`community_moderators` rows, every report about or by the account, and every
+restriction on it. Restrictions, reports, the admin audit trail and other users'
+notifications keep pointing at the anonymised row.
+
+**Revocation is inside the transaction**, unlike restriction revocation, which
+runs after commit and may fail (see "Account restrictions"). That design works
+because `AuthGuard` re-checks the restriction on every request. Nothing on the
+request path checks `deleted_at`, so for deletion revocation is the
+enforcement: it commits with the deletion or not at all.
+
+**Afterwards** the account cannot log in or refresh (both lookups filter
+`deleted_at IS NULL`, so even a matching credential would not authenticate),
+and every previously issued access token is refused. `GET /users/:username`
+returns `404` for the old username. The placeholder never reaches the lookup,
+because its hyphens fail the route pattern (`400`), and the profile query also
+filters `deleted_at IS NULL`. Activity telemetry never writes `last_seen_at` on
+a deleted row. A second deletion with the old token is `401`; the `404` is only
+reachable by two concurrent requests.
+
+**Rendering retained content.** Posts and comments keep their `author_id`, so a
+client resolving the author sees the `deleted_<id>` placeholder. The API
+returns the placeholder unchanged and does not invent a display string. Clients
+should recognise the `deleted_` prefix followed by a UUID and show "deleted
+user". No registrable username has that shape.
+
+**Restricted accounts cannot delete themselves.** The route is not
+`@AllowRestricted()`, so a suspended or banned account gets `403` with the
+restriction body. Otherwise deletion would be the ban-evasion path: delete,
+re-register, start clean. Support answer: wait out the suspension, or appeal
+the restriction; deletion is possible once it is lifted or has expired.
+
+**Community creators must deal with their community first.** If the caller is
+the `creator_id` of any community, the request is `409`:
+
+```json
+{
+  "statusCode": 409,
+  "message": "You created a community. Delete it or transfer its ownership before deleting your account.",
+  "error": "Conflict"
+}
+```
+
+Deleting the account would otherwise either delete the community (the cascade)
+or leave it with an owner who can never act. Community deletion and ownership
+transfer are separate work; until they exist, a creator cannot delete their
+account through the API.
+
+**The original username becomes available again.** The placeholder replaces
+it in the row, so the old name is no longer in the unique index and a new
+account may register it. Nothing links the new account to the old one: the old
+account's content stays attributed to its id, which now shows the placeholder.
+Clients and moderators must therefore identify accounts by id, never by
+username. Reserving retired names would mean keeping a record of them (for
+example a table of hashed usernames checked at registration); that is a
+separate decision and not part of this change.
+
+**No notification and no audit row.** The only account that could receive a
+notification is the one being deleted. This is a user action, not an
+administrative one, so it writes nothing to `admin_actions`, whose actions and
+target types are platform-admin scoped; `users.deleted_at` is the record.
+
+**Rate limit.** Besides the global buckets, deletion has its own daily buckets,
+because a route that verifies a password is also a password-guessing oracle for
+anyone holding an access token. See "API abuse controls and request bounds".
+
+`DELETE` with a body rather than `POST /users/me/delete`: the resource is the
+account itself, and the body only confirms the password. A client or proxy
+that drops `DELETE` bodies gets `400` and deletes nothing, so the awkward case
+fails safe.
+
 ## Data classification, errors, and logging
 
 - **Public:** username, the user-authored profile fields `display_name` and
@@ -1441,6 +1564,16 @@ limits. Override them with positive-integer `API_REPORT_CREATE_IP_MAX`,
 `API_REPORT_CREATE_ACCOUNT_WINDOW_SECONDS`. Account counters use only the
 validated bearer-token user ID. Exceeding a limit returns `429` and
 `Retry-After`.
+
+Account deletion (`DELETE /users/me`) has additional fixed-window limits of 10
+per IP per day and 5 per authenticated account per day, because it verifies a
+password and so doubles as a password-guessing oracle. Override them with
+`API_ACCOUNT_DELETE_IP_MAX`, `API_ACCOUNT_DELETE_IP_WINDOW_SECONDS`,
+`API_ACCOUNT_DELETE_ACCOUNT_MAX`, and
+`API_ACCOUNT_DELETE_ACCOUNT_WINDOW_SECONDS`. Every attempt counts, including
+wrong passwords and invalid bodies; requests refused by `AuthGuard` (no token,
+or a restricted account) are refused before the limiter runs. Exceeding a
+limit returns `429` and `Retry-After`.
 
 ## Security headers and CORS
 

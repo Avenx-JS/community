@@ -139,6 +139,44 @@ describe('AuthRateLimitService', () => {
     expect(JSON.stringify(calls)).not.toContain('token-user-id');
   });
 
+  it('adds daily account-deletion IP and token-account signals', async () => {
+    await service.enforceApiRequest(
+      '192.0.2.10',
+      'DELETE',
+      '/users/me',
+      'token-user-id',
+    );
+
+    const hmac = (scope: string, value: string) =>
+      createHmac(
+        'sha256',
+        process.env.RATE_LIMIT_HASH_SECRET ??
+          process.env.MYSQL_PASSWORD ??
+          'community-local-rate-limit-secret',
+      )
+        .update(scope)
+        .update('\0')
+        .update(value)
+        .digest('hex');
+    const deletionSignals = calls.filter(
+      (call) =>
+        call.sql.startsWith('INSERT INTO auth_rate_limits') &&
+        call.sql.includes('INTERVAL 86400 SECOND'),
+    );
+    expect(deletionSignals.map((call) => call.values[0])).toEqual([
+      hmac('account:delete:ip', '192.0.2.10'),
+      hmac('account:delete:account', 'token-user-id'),
+    ]);
+    expect(JSON.stringify(calls)).not.toContain('token-user-id');
+
+    calls.length = 0;
+    await service.enforceApiRequest('192.0.2.10', 'GET', '/users/me', 'id');
+    await service.enforceApiRequest('192.0.2.10', 'PATCH', '/users/me', 'id');
+    expect(
+      calls.filter((call) => call.sql.includes('INTERVAL 86400 SECOND')),
+    ).toEqual([]);
+  });
+
   it('honours report rate-limit environment overrides', async () => {
     const previousValues = {
       ipMax: process.env.API_REPORT_CREATE_IP_MAX,

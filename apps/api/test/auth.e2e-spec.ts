@@ -6,6 +6,12 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 import { MYSQL_POOL } from '../src/auth/auth.service';
+import {
+  ANONYMISE_ACCOUNT_SQL,
+  CREATED_COMMUNITY_SQL,
+  DELETE_PRIVATE_STATE_SQL,
+  LOCK_ACCOUNT_SQL,
+} from '../src/users/account-deletion.service';
 
 interface TestUser {
   id: string;
@@ -14,7 +20,12 @@ interface TestUser {
   password_hash: string;
   created_at: Date;
   last_seen_at: Date | null;
+  deleted_at?: Date | null;
 }
+
+// Applies the deleted_at predicate when, and only when, the query carries it.
+const passesDeletedFilter = (sql: string, user: TestUser) =>
+  !sql.includes('deleted_at IS NULL') || !user.deleted_at;
 
 interface TestSession {
   token_hash: string;
@@ -116,8 +127,9 @@ describe('Auth endpoints (e2e)', () => {
         return Promise.resolve([
           users.filter(
             (user) =>
-              user.email === identifier ||
-              user.username.toLowerCase() === identifier,
+              (user.email === identifier ||
+                user.username.toLowerCase() === identifier) &&
+              passesDeletedFilter(sql, user),
           ),
           [],
         ]);
@@ -286,7 +298,9 @@ describe('Auth endpoints (e2e)', () => {
       if (sql.startsWith('SELECT id, username, email, password_hash')) {
         const [userId] = values as [string];
         return Promise.resolve([
-          users.filter((entry) => entry.id === userId),
+          users.filter(
+            (entry) => entry.id === userId && passesDeletedFilter(sql, entry),
+          ),
           [],
         ]);
       }
@@ -353,6 +367,38 @@ describe('Auth endpoints (e2e)', () => {
       }
       if (sql.startsWith('SELECT type, expires_at')) {
         return Promise.resolve([[], []]);
+      }
+      // Account deletion, through the real AccountDeletionService.
+      if (sql === LOCK_ACCOUNT_SQL) {
+        const [userId] = values as [string];
+        return Promise.resolve([
+          users
+            .filter((entry) => entry.id === userId)
+            .map((entry) => ({
+              id: entry.id,
+              password_hash: entry.password_hash,
+              deleted_at: entry.deleted_at ?? null,
+            })),
+          [],
+        ]);
+      }
+      if (sql === CREATED_COMMUNITY_SQL) {
+        return Promise.resolve([[], []]);
+      }
+      if (sql === ANONYMISE_ACCOUNT_SQL) {
+        const [username, email, passwordHash, userId] = values as string[];
+        const user = users.find((entry) => entry.id === userId)!;
+        Object.assign(user, {
+          username,
+          email,
+          password_hash: passwordHash,
+          last_seen_at: null,
+          deleted_at: new Date(),
+        });
+        return Promise.resolve([{ affectedRows: 1 }, []]);
+      }
+      if ((DELETE_PRIVATE_STATE_SQL as readonly string[]).includes(sql)) {
+        return Promise.resolve([{ affectedRows: 0 }, []]);
       }
       return Promise.reject(new Error(`Unexpected transactional SQL: ${sql}`));
     };
@@ -810,6 +856,87 @@ describe('Auth endpoints (e2e)', () => {
         identifier: 'unknown@example.com',
         password: 'incorrect-password',
       })
+      .expect(401);
+  });
+
+  it('refuses login, refresh and every issued token after account deletion', async () => {
+    const register = await request(app.getHttpServer())
+      .post('/auth/register')
+      .send({
+        username: 'leaving_user',
+        email: 'leaving@example.com',
+        password: 'correct-horse-battery',
+      })
+      .expect(201);
+    const registerBody = register.body as {
+      accessToken: string;
+      refreshToken: string;
+    };
+    const login = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ identifier: 'leaving_user', password: 'correct-horse-battery' })
+      .expect(200);
+    const loginBody = login.body as { accessToken: string };
+
+    await request(app.getHttpServer())
+      .delete('/users/me')
+      .set('Authorization', `Bearer ${registerBody.accessToken}`)
+      .send({ password: 'wrong-horse-battery' })
+      .expect(401);
+    expect(users[0].deleted_at ?? null).toBeNull();
+
+    await request(app.getHttpServer())
+      .delete('/users/me')
+      .set('Authorization', `Bearer ${loginBody.accessToken}`)
+      .send({ password: 'correct-horse-battery' })
+      .expect(204);
+    expect(users[0]).toMatchObject({
+      username: `deleted_${users[0].id}`,
+      email: `deleted_${users[0].id}@invalid`,
+      password_hash: 'deleted',
+    });
+
+    // Both sessions, including the one that did not make the request.
+    for (const token of [registerBody.accessToken, loginBody.accessToken]) {
+      await request(app.getHttpServer())
+        .post('/auth/logout')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(401);
+    }
+    await request(app.getHttpServer())
+      .post('/auth/refresh')
+      .send({ refreshToken: registerBody.refreshToken })
+      .expect(401);
+    await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ identifier: 'leaving_user', password: 'correct-horse-battery' })
+      .expect(401);
+    expect(refreshTokens.every((token) => token.revoked_at !== null)).toBe(
+      true,
+    );
+  });
+
+  it('refuses login and refresh for a deleted account even if a credential matched', async () => {
+    const register = await request(app.getHttpServer())
+      .post('/auth/register')
+      .send({
+        username: 'ghost_user',
+        email: 'ghost@example.com',
+        password: 'correct-horse-battery',
+      })
+      .expect(201);
+    const { refreshToken } = register.body as { refreshToken: string };
+    // Deleted without revocation or anonymisation: only the predicate stands
+    // between this row and a session.
+    users[0].deleted_at = new Date();
+
+    await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ identifier: 'ghost_user', password: 'correct-horse-battery' })
+      .expect(401);
+    await request(app.getHttpServer())
+      .post('/auth/refresh')
+      .send({ refreshToken })
       .expect(401);
   });
 });

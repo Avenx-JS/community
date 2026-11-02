@@ -46,7 +46,7 @@ export class UsersService {
 
   async getUserProfile(username: string): Promise<UserProfile> {
     const [users] = await this.pool.execute<UserProfileRow[]>(
-      'SELECT username, display_name, bio, created_at FROM users WHERE username = ? LIMIT 1',
+      'SELECT username, display_name, bio, created_at FROM users WHERE username = ? AND deleted_at IS NULL LIMIT 1',
       [username],
     );
     const user = users[0];

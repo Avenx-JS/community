@@ -169,7 +169,7 @@ export class AuthService {
   async login(input: LoginInput): Promise<AuthResponse> {
     const identifier = input.identifier.trim().toLowerCase();
     const [users] = await this.pool.execute<UserRow[]>(
-      'SELECT id, username, email, password_hash, created_at FROM users WHERE email = ? OR username = ? LIMIT 1',
+      'SELECT id, username, email, password_hash, created_at FROM users WHERE (email = ? OR username = ?) AND deleted_at IS NULL LIMIT 1',
       [identifier, identifier],
     );
     const user = users[0];
@@ -208,7 +208,9 @@ export class AuthService {
     return result.kind === 'valid' ? result.userId : null;
   }
 
-  async validateAccessTokenState(token: string): Promise<AccessTokenValidationResult> {
+  async validateAccessTokenState(
+    token: string,
+  ): Promise<AccessTokenValidationResult> {
     const tokenHash = this.hashToken(token);
     const [sessions] = await this.pool.execute<SessionUserRow[]>(
       `SELECT auth_sessions.user_id AS id,
@@ -250,6 +252,7 @@ export class AuthService {
         `UPDATE users
          SET last_seen_at = UTC_TIMESTAMP()
          WHERE id = ?
+           AND deleted_at IS NULL
            AND (last_seen_at IS NULL
                 OR last_seen_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? SECOND))`,
         [userId, this.activityWriteIntervalSeconds],
@@ -307,18 +310,7 @@ export class AuthService {
     try {
       await connection.beginTransaction();
       transactionStarted = true;
-      await connection.execute(
-        'SELECT token_hash FROM auth_refresh_tokens WHERE user_id = ? FOR UPDATE',
-        [userId],
-      );
-      await connection.execute<ResultSetHeader>(
-        'DELETE FROM auth_sessions WHERE user_id = ?',
-        [userId],
-      );
-      await connection.execute<ResultSetHeader>(
-        'UPDATE auth_refresh_tokens SET revoked_at = UTC_TIMESTAMP() WHERE user_id = ? AND revoked_at IS NULL',
-        [userId],
-      );
+      await this.revokeAllSessions(userId, connection);
       await connection.commit();
       transactionStarted = false;
     } catch (error) {
@@ -329,6 +321,35 @@ export class AuthService {
     } finally {
       connection.release();
     }
+  }
+
+  // Revokes every access and refresh credential of an account inside the
+  // caller's transaction, so the revocation commits or rolls back with it.
+  async revokeAllSessions(
+    userId: string,
+    connection: PoolConnection,
+  ): Promise<void> {
+    await connection.execute(
+      'SELECT token_hash FROM auth_refresh_tokens WHERE user_id = ? FOR UPDATE',
+      [userId],
+    );
+    await connection.execute<ResultSetHeader>(
+      'DELETE FROM auth_sessions WHERE user_id = ?',
+      [userId],
+    );
+    await connection.execute<ResultSetHeader>(
+      'UPDATE auth_refresh_tokens SET revoked_at = UTC_TIMESTAMP() WHERE user_id = ? AND revoked_at IS NULL',
+      [userId],
+    );
+  }
+
+  // Re-confirms a signed-in user's password. Fails closed for any stored value
+  // that is neither an Argon2id nor a legacy scrypt hash.
+  async passwordMatches(
+    password: string,
+    storedHash: string,
+  ): Promise<boolean> {
+    return (await this.verifyPassword(password, storedHash)).valid;
   }
 
   private async getActiveRestriction(
@@ -400,7 +421,7 @@ export class AuthService {
         throw new UnauthorizedException('Invalid or expired refresh token');
       } else {
         const [users] = await connection.execute<UserRow[]>(
-          'SELECT id, username, email, password_hash, created_at FROM users WHERE id = ? LIMIT 1',
+          'SELECT id, username, email, password_hash, created_at FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1',
           [currentToken.user_id],
         );
         const user = users[0];
@@ -408,7 +429,10 @@ export class AuthService {
           throw new UnauthorizedException('Invalid or expired refresh token');
         }
 
-        const restriction = await this.getActiveRestriction(user.id, connection);
+        const restriction = await this.getActiveRestriction(
+          user.id,
+          connection,
+        );
         if (restriction) {
           if (restriction.type === 'ban') {
             await connection.execute<ResultSetHeader>(

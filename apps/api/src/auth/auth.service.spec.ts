@@ -2,7 +2,8 @@ import { ConflictException, UnauthorizedException } from '@nestjs/common';
 import { beforeEach, describe, expect, it } from '@jest/globals';
 import { argon2id, hash as argon2Hash, verify as argon2Verify } from 'argon2';
 import { createHash, randomBytes, scrypt as scryptCallback } from 'node:crypto';
-import type { Pool } from 'mysql2/promise';
+import type { Pool, PoolConnection } from 'mysql2/promise';
+import { DELETED_PASSWORD_HASH } from '../users/account-deletion.service';
 import { AuthService } from './auth.service';
 
 type ExecuteResult = [unknown, unknown] | Error;
@@ -277,7 +278,9 @@ describe('AuthService', () => {
       [],
     ]);
 
-    await expect(service.validateAccessTokenState('restricted-token')).resolves.toEqual({
+    await expect(
+      service.validateAccessTokenState('restricted-token'),
+    ).resolves.toEqual({
       kind: 'restricted',
       userId: 'user-restricted',
       restriction: {
@@ -305,14 +308,19 @@ describe('AuthService', () => {
       created_at: new Date(),
     };
     const expiresAt = new Date(Date.now() + 60_000);
-    results.push([[user], []], [[{ type: 'suspension', expires_at: expiresAt }], []]);
+    results.push(
+      [[user], []],
+      [[{ type: 'suspension', expires_at: expiresAt }], []],
+    );
 
     try {
       await service.login({ identifier: 'restricted_user', password });
       throw new Error('expected restriction rejection');
     } catch (error) {
       expect(error).toBeInstanceOf(Error);
-      expect((error as Error & { getResponse?: () => unknown }).getResponse?.()).toEqual({
+      expect(
+        (error as Error & { getResponse?: () => unknown }).getResponse?.(),
+      ).toEqual({
         type: 'suspension',
         expires_at: expiresAt.toISOString(),
       });
@@ -432,5 +440,105 @@ describe('AuthService', () => {
     expect(calls[1].sql).toBe('DELETE FROM auth_sessions WHERE user_id = ?');
     expect(calls[2].sql).toContain('UPDATE auth_refresh_tokens');
     expect(transactions.commits).toBe(1);
+  });
+
+  it("revokes credentials on the caller's connection without managing its transaction", async () => {
+    const onConnection: string[] = [];
+    const connection = {
+      execute: (sql: string) => {
+        onConnection.push(sql);
+        return Promise.resolve([{ affectedRows: 1 }, []]);
+      },
+    };
+
+    await service.revokeAllSessions(
+      'user-id',
+      connection as unknown as PoolConnection,
+    );
+
+    expect(onConnection).toEqual([
+      'SELECT token_hash FROM auth_refresh_tokens WHERE user_id = ? FOR UPDATE',
+      'DELETE FROM auth_sessions WHERE user_id = ?',
+      'UPDATE auth_refresh_tokens SET revoked_at = UTC_TIMESTAMP() WHERE user_id = ? AND revoked_at IS NULL',
+    ]);
+    expect(calls).toEqual([]);
+    expect(transactions).toEqual({ commits: 0, rollbacks: 0 });
+  });
+
+  // The difference between a disabled account and one anyone can sign into.
+  it('never matches any password against the deleted-account sentinel hash', async () => {
+    const oldPassword = 'correct horse battery staple';
+    const oldHash = await argon2Hash(oldPassword, {
+      type: argon2id,
+      version: 0x13,
+      memoryCost: 19 * 1024,
+      timeCost: 2,
+      parallelism: 1,
+      hashLength: 32,
+    });
+    await expect(service.passwordMatches(oldPassword, oldHash)).resolves.toBe(
+      true,
+    );
+
+    for (const password of [
+      '',
+      oldPassword,
+      DELETED_PASSWORD_HASH,
+      'a'.repeat(128),
+      '\u0000',
+    ]) {
+      await expect(
+        service.passwordMatches(password, DELETED_PASSWORD_HASH),
+      ).resolves.toBe(false);
+    }
+  });
+
+  it('excludes deleted accounts from the login lookup', async () => {
+    results.push([[], []]);
+
+    await expect(
+      service.login({
+        identifier: `deleted_${'0'.repeat(8)}`,
+        password: 'any-password',
+      }),
+    ).rejects.toMatchObject({ status: 401, message: 'Invalid credentials' });
+    expect(calls[0].sql).toBe(
+      'SELECT id, username, email, password_hash, created_at FROM users WHERE (email = ? OR username = ?) AND deleted_at IS NULL LIMIT 1',
+    );
+  });
+
+  it('excludes deleted accounts from the refresh lookup', async () => {
+    results.push(
+      [
+        [
+          {
+            session_id: 'session-1',
+            user_id: 'deleted-user',
+            expires_at: new Date(Date.now() + 60_000),
+            used_at: null,
+            revoked_at: null,
+          },
+        ],
+        [],
+      ],
+      [[], []],
+    );
+
+    await expect(service.refresh('d'.repeat(43))).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
+    expect(calls[1]).toEqual({
+      sql: 'SELECT id, username, email, password_hash, created_at FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1',
+      values: ['deleted-user'],
+    });
+    expect(transactions.rollbacks).toBe(1);
+  });
+
+  it('never records activity on a deleted account', async () => {
+    results.push([[{ id: 'user-1' }], []], [{ affectedRows: 0 }, []]);
+
+    await service.validateAccessToken('valid-token');
+
+    expect(calls[1].sql).toContain('AND deleted_at IS NULL');
   });
 });

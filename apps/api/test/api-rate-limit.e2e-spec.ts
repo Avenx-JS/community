@@ -14,6 +14,8 @@ import {
   Get,
   Injectable,
   Module,
+  Delete,
+  HttpCode,
   Post,
   Req,
   UseGuards,
@@ -67,6 +69,11 @@ class ApiRateLimitTestController {
   createPost(@Req() request: TestRequest) {
     return { author_id: request.user.id };
   }
+
+  @Delete('users/me')
+  @HttpCode(204)
+  @UseGuards(TestIdentityGuard)
+  deleteOwnAccount() {}
 }
 
 @Module({
@@ -91,6 +98,7 @@ describe('API rate limits (e2e)', () => {
       'API_CONTENT_COOLDOWN_MAX',
       'API_CONTENT_COOLDOWN_WINDOW_SECONDS',
       'API_BODY_LIMIT_BYTES',
+      'API_ACCOUNT_DELETE_ACCOUNT_MAX',
     ];
     previousEnvironment = Object.fromEntries(
       names.map((name) => [name, process.env[name]]),
@@ -104,6 +112,7 @@ describe('API rate limits (e2e)', () => {
     process.env.API_CONTENT_COOLDOWN_MAX = '1';
     process.env.API_CONTENT_COOLDOWN_WINDOW_SECONDS = '30';
     process.env.API_BODY_LIMIT_BYTES = '1024';
+    process.env.API_ACCOUNT_DELETE_ACCOUNT_MAX = '2';
   });
 
   afterAll(() => {
@@ -208,6 +217,23 @@ describe('API rate limits (e2e)', () => {
       .send({ title: 'Too soon' })
       .expect(429);
     expect(limited.headers['retry-after']).toBeDefined();
+  });
+
+  it('limits account deletion per account per day, with Retry-After', async () => {
+    const deleteAs = (token: string) =>
+      request(app.getHttpServer())
+        .delete('/users/me')
+        .set('Authorization', token);
+
+    await deleteAs('token-a').expect(204);
+    await deleteAs('token-a').expect(204);
+    const limited = await deleteAs('token-a').expect(429);
+    const retryAfter = Number(limited.headers['retry-after']);
+    expect(retryAfter).toBeGreaterThan(3600);
+    expect(retryAfter).toBeLessThanOrEqual(86400);
+
+    // A separate account bucket; the per-IP bucket (10 per day) still has room.
+    await deleteAs('token-b').expect(204);
   });
 
   it('applies body-size limits and returns protected error headers', async () => {

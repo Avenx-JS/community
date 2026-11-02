@@ -72,6 +72,9 @@ describe('migration ordering and application', () => {
     expect(position('019_add_user_profile_fields')).toBe(
       position('018_add_content_listing_indexes') + 1,
     );
+    expect(position('020_add_user_account_deletion')).toBe(
+      position('019_add_user_profile_fields') + 1,
+    );
     expect(new Set(versions).size).toBe(versions.length);
   });
 

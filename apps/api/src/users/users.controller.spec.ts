@@ -5,6 +5,7 @@ import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { MetadataScanner } from '@nestjs/core';
 import type { AuthenticatedRequest } from '../auth/auth.guard';
 import { AuthService } from '../auth/auth.service';
+import { AccountDeletionService } from './account-deletion.service';
 import { UsersController } from './users.controller';
 import { UsersService } from './users.service';
 
@@ -40,6 +41,12 @@ describe('UsersController', () => {
     UsersService,
     'getUserProfile' | 'getOwnProfile' | 'updateOwnProfile'
   >;
+  const accountDeletion = {
+    deleteOwnAccount: (userId: string, password: string) => {
+      calls.push(['deleteOwnAccount', userId, password]);
+      return Promise.resolve();
+    },
+  } satisfies Pick<AccountDeletionService, 'deleteOwnAccount'>;
   const request = { user: { id: 'user-id' } } as AuthenticatedRequest;
 
   beforeEach(async () => {
@@ -48,6 +55,7 @@ describe('UsersController', () => {
       controllers: [UsersController],
       providers: [
         { provide: UsersService, useValue: usersService },
+        { provide: AccountDeletionService, useValue: accountDeletion },
         // AuthGuard's dependency; the guard itself does not run here.
         { provide: AuthService, useValue: {} },
       ],
@@ -67,6 +75,15 @@ describe('UsersController', () => {
     expect(calls).toEqual([
       ['getOwnProfile', 'user-id'],
       ['updateOwnProfile', 'user-id', { bio: 'Hi' }],
+    ]);
+  });
+
+  it('deletes only the authenticated account, passing the confirmed password', async () => {
+    await expect(
+      controller.deleteOwnAccount(request, { password: 'correct password' }),
+    ).resolves.toBeUndefined();
+    expect(calls).toEqual([
+      ['deleteOwnAccount', 'user-id', 'correct password'],
     ]);
   });
 
