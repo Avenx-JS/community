@@ -54,7 +54,7 @@ describe('migration 018 (content listing indexes)', () => {
 
   it('records the version in the snapshot', () => {
     expect(normalise(snapshot)).toContain(
-      "('017_add_post_and_comment_content_state'), ('018_add_content_listing_indexes');",
+      "('017_add_post_and_comment_content_state'), ('018_add_content_listing_indexes')",
     );
   });
 });

@@ -629,11 +629,10 @@ Restrictions are created and lifted through the routes in
 enforced on authentication, refresh, and every guarded route.
 
 Email is intentionally excluded from both admin responses. This preserves the
-data-classification guarantee that email is not returned by profile, auth,
-content, or list responses. Neither route returns password hashes, credentials,
-tokens, session identifiers, or auth-rate-limit keys. The public
-`GET /users/:username` contract is unchanged and still returns only
-`{ "username": "..." }`.
+data-classification guarantee that email is returned only to its owner, by
+`GET /users/me`. Neither route returns password hashes, credentials, tokens,
+session identifiers, or auth-rate-limit keys. The public `GET /users/:username`
+profile is described in "Public user profiles" and never includes email.
 
 Example list response:
 
@@ -1096,18 +1095,23 @@ window.
 
 ## Public user profiles
 
-`GET /users/:username` returns only the public username for the exact account
-with HTTP `200`:
+`GET /users/:username` returns the public profile of the exact account with
+HTTP `200`:
 
 ```json
 {
-  "username": "sample_user"
+  "username": "sample_user",
+  "display_name": "Sam",
+  "bio": "Grows tomatoes.",
+  "created_at": "2026-10-21T20:00:00.000Z"
 }
 ```
 
-The profile endpoint does not expose the account ID or creation timestamp, and
-never exposes email, password, or password hash. If the username does not
-exist, the endpoint returns HTTP `404`:
+`display_name` and `bio` are user-authored public text and are `null` until the
+owner sets them. `created_at` is the join date, public in the same way a
+community's `created_at` is. The public profile never exposes the account ID,
+email, role, `last_seen_at`, password, or password hash. If the username does
+not exist, the endpoint returns HTTP `404`:
 
 ```json
 {
@@ -1117,17 +1121,94 @@ exist, the endpoint returns HTTP `404`:
 }
 ```
 
+### Own account: `GET /users/me` and `PATCH /users/me`
+
+Both require a bearer token and act only on the account the token belongs to;
+no path, query or body field can name another account.
+
+`GET /users/me` returns the caller's own record with HTTP `200`:
+
+```json
+{
+  "id": "6f1c…",
+  "username": "sample_user",
+  "email": "sample_user@example.com",
+  "display_name": "Sam",
+  "bio": "Grows tomatoes.",
+  "role": "user",
+  "created_at": "2026-10-21T20:00:00.000Z"
+}
+```
+
+It is marked `@AllowRestricted()`: a suspended or banned account can still read
+the account it is asking about, as it can still log out.
+
+**`GET /users/me` is the only route that returns the caller's email** (and the
+only one returning their role to them). This is consistent with the data
+classification below: email is private account data, which means it is kept
+from *other* users, not from the account owner. `last_seen_at` is excluded even
+here: it is activity telemetry for admin analytics, not a profile field, and
+returning it would invite clients to treat it as a presence signal it is not.
+Password hashes, tokens, token hashes and session fields are never returned.
+
+`PATCH /users/me` updates `display_name` (at most 50 characters, single line)
+and `bio` (at most 500 characters, line breaks allowed), and returns the same
+shape as `GET /users/me`:
+
+- Values are trimmed. A field trimmed to empty (`""`) is stored as `NULL`,
+  which is how a field is cleared; an explicit `null` is rejected.
+- An absent field is left unchanged; `{ "bio": "…" }` does not touch
+  `display_name`.
+- An empty body is `400`, as are over-long values, non-strings and control
+  characters.
+- Any other property is `400` and nothing is written. That includes
+  `username`, `email`, `role`, `id`, `created_at` and `password_hash`: the
+  global `ValidationPipe`'s `forbidNonWhitelisted` is what keeps them
+  unsettable, and `users.e2e-spec.ts` pins each one.
+- It is **not** `@AllowRestricted()`: a suspended or banned account may read its
+  profile but not change it (`403` with the restriction body).
+
+Neither route has a dedicated rate-limit bucket; the global per-IP and
+per-account buckets apply. Express matches routes in declaration order, so
+`@Get('me')` is declared before `@Get(':username')`;
+`users.controller.spec.ts` pins that order. (Today `me` would be rejected by
+the three-character username minimum instead, which hides a misordering.)
+
+**Not editable here, deliberately:**
+
+- **`username`** is referenced by `GET /users/:username`, by
+  `ManageModeratorDto`, by report submission, and by the
+  `admin_actions.actor_username` snapshot. Renaming is a cross-cutting change
+  with its own migration and audit questions.
+- **`email`** is the account-recovery credential. Changing it must require the
+  current password and a verification round trip to the new address, and this
+  project has no email delivery yet. An unverified change through a profile
+  `PATCH` would let anyone holding a stolen access token take over the
+  account's recovery path. Left as follow-up.
+- **`role`** is assignable only by an operator in the database (see "Platform
+  roles").
+
+### Route namespace for account-scoped resources
+
+`/users/me` introduces `/users/me/*` as the namespace for sub-resources of the
+authenticated user's own account. **New account-scoped sub-resources go under
+`/users/me/*`.** The existing `/subscriptions` and `/notifications` are
+resource-root routes that take the actor from the token; they are published
+API and stay where they are rather than being renamed.
+
 ## Data classification, errors, and logging
 
-- **Public:** username and user-authored post/comment content. Post and comment
-  DTOs expose their public content identifiers and author IDs for attribution;
-  those IDs are not credentials.
-- **Private account data:** email is accepted for registration and login but is
-  not returned by profile, auth, content, or list responses. The signed-in
-  auth-response user object contains only that account's ID and username; user
-  creation time and `last_seen_at` are not exposed by the profile or auth
-  response. `last_seen_at` is private behavioral data and is only available
-  through admin-authorized account detail and analytics.
+- **Public:** username, the user-authored profile fields `display_name` and
+  `bio`, the account's join date (`created_at`), and user-authored post/comment
+  content. Post and comment DTOs expose their public content identifiers and
+  author IDs for attribution; those IDs are not credentials.
+- **Private account data:** email is accepted for registration and login and
+  is returned only to the account owner, by `GET /users/me`; it is not returned
+  by public profile, auth, content, or list responses. Role is likewise
+  returned only to its owner by that route. The signed-in auth-response user
+  object contains only that account's ID and username. `last_seen_at` is
+  private behavioral data, is not returned even by `GET /users/me`, and is only
+  available through admin-authorized account detail and analytics.
 - **Never returned or logged:** plaintext passwords, password hashes, salts,
   bearer/refresh tokens, token hashes, and session identifiers. Encoded
   password hashes remain database-only. Access and refresh credentials appear

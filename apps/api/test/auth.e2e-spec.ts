@@ -122,7 +122,11 @@ describe('Auth endpoints (e2e)', () => {
           [],
         ]);
       }
-      if (sql.startsWith('SELECT username FROM users WHERE username')) {
+      if (
+        sql.startsWith(
+          'SELECT username, display_name, bio, created_at FROM users WHERE username',
+        )
+      ) {
         const [username] = values as [string];
         return Promise.resolve([
           users.filter((user) => user.username === username),
@@ -496,7 +500,9 @@ describe('Auth endpoints (e2e)', () => {
     await request(app.getHttpServer())
       .get('/users/public_user')
       .expect(200)
-      .expect({ username: 'public_user' });
+      .expect(({ body }) =>
+        expect(body).toMatchObject({ username: 'public_user' }),
+      );
     await request(app.getHttpServer())
       .post('/auth/logout')
       .set('Authorization', 'Bearer invalid-token')

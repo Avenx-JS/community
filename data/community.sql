@@ -8,7 +8,9 @@ CREATE TABLE users (
     password_hash VARCHAR(255) NOT NULL,
     role ENUM('user', 'moderator', 'admin') NOT NULL DEFAULT 'user',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_seen_at TIMESTAMP NULL DEFAULT NULL
+    last_seen_at TIMESTAMP NULL DEFAULT NULL,
+    display_name VARCHAR(50) NULL DEFAULT NULL,
+    bio VARCHAR(500) NULL DEFAULT NULL
 );
 
 CREATE INDEX idx_users_role ON users (role);
@@ -338,4 +340,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('015_add_fulltext_search_indexes'),
     ('016_generalise_report_targets'),
     ('017_add_post_and_comment_content_state'),
-    ('018_add_content_listing_indexes');
+    ('018_add_content_listing_indexes'),
+    ('019_add_user_profile_fields');
