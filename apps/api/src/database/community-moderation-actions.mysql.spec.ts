@@ -33,10 +33,11 @@ const snapshot = readFileSync(
   'utf8',
 ).replace(/^CREATE DATABASE[^;]*;\s*USE community;/, '');
 
-// The snapshot with 021 undone: its table and its version.
+// The snapshot with 021 and 023 undone: the table and both versions.
 const preceding = snapshot
   .replace(/CREATE TABLE community_moderation_actions \([\s\S]*?\n\);\r?\n/, '')
-  .replace(/,\r?\n\s*\('021_create_community_moderation_actions'\)/, '');
+  .replace(/,\r?\n\s*\('021_create_community_moderation_actions'\)/, '')
+  .replace(/,\r?\n\s*\('023_add_community_moderation_community_actions'\)/, '');
 
 // Runs migration 021 through the real runner on a real MySQL server, over a
 // database at version 020, then exercises the cascade rules, the writer's
@@ -195,8 +196,11 @@ integration('community moderation actions (MySQL)', () => {
     await connection?.end();
   });
 
-  it('applies 021 once, then skips it', () => {
-    expect(firstRun).toEqual([`Applied ${VERSION}`]);
+  it('applies 021 and 023 once, then skips them', () => {
+    expect(firstRun).toEqual([
+      `Applied ${VERSION}`,
+      'Applied 023_add_community_moderation_community_actions',
+    ]);
     expect(secondRun).toEqual([]);
   });
 

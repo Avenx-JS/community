@@ -7,6 +7,7 @@ import type {
   RowDataPacket,
 } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { activeCommunitySql } from '../common/community-visibility';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { CreateVoteDto } from './dto/create-vote.dto';
 
@@ -109,11 +110,12 @@ export class VotesService {
       (RowDataPacket & { id: string; community_id: string })[]
     >(
       targetType === 'post'
-        ? 'SELECT id, community_id FROM posts WHERE id = ? FOR UPDATE'
+        ? `SELECT id, community_id FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} FOR UPDATE`
         : `SELECT comments.id, posts.community_id
            FROM comments
            INNER JOIN posts ON posts.id = comments.post_id
-           WHERE comments.id = ? FOR UPDATE OF comments`,
+           WHERE comments.id = ? AND ${activeCommunitySql('posts.community_id')}
+           FOR UPDATE OF comments`,
       [targetId],
     );
 

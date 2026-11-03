@@ -27,7 +27,7 @@ export const deletedEmail = (userId: string) => `deleted_${userId}@invalid`;
 export const LOCK_ACCOUNT_SQL =
   'SELECT id, password_hash, deleted_at FROM users WHERE id = ? LIMIT 1 FOR UPDATE';
 export const CREATED_COMMUNITY_SQL =
-  'SELECT id FROM communities WHERE creator_id = ? LIMIT 1';
+  'SELECT id FROM communities WHERE creator_id = ? AND deleted_at IS NULL LIMIT 1';
 export const ANONYMISE_ACCOUNT_SQL =
   'UPDATE users SET username = ?, email = ?, password_hash = ?, display_name = NULL, bio = NULL, last_seen_at = NULL, deleted_at = UTC_TIMESTAMP() WHERE id = ?';
 // The account's own private state, of no value to anyone else. Everything

@@ -30,7 +30,7 @@ export class NotificationPreferencesService {
        FROM communities c
        LEFT JOIN community_notification_preferences p
          ON p.community_id = c.id AND p.user_id = ?
-       WHERE c.name = ? LIMIT 1`,
+       WHERE c.name = ? AND c.deleted_at IS NULL LIMIT 1`,
       [userId, userId, name],
     );
     const row = rows[0];
@@ -53,7 +53,10 @@ export class NotificationPreferencesService {
   ): Promise<NotificationPreferencesDto> {
     const [communities] = await this.pool.execute<
       (RowDataPacket & { id: string })[]
-    >('SELECT id FROM communities WHERE name = ? LIMIT 1', [name]);
+    >(
+      'SELECT id FROM communities WHERE name = ? AND deleted_at IS NULL LIMIT 1',
+      [name],
+    );
     const community = communities[0];
     if (!community) {
       throw new NotFoundException('Community not found');

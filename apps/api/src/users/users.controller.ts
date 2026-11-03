@@ -102,7 +102,7 @@ export class UsersController {
   @ApiErrorResponses({
     400: 'Missing or malformed password, or an unknown property.',
     404: 'The account is already deleted.',
-    409: 'The caller created a community and must delete or transfer it first.',
+    409: 'The caller created a community that is not deleted and must delete or transfer it first.',
   })
   deleteOwnAccount(
     @Req() request: AuthenticatedRequest,

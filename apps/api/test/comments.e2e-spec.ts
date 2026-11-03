@@ -50,6 +50,7 @@ describe('Comment endpoints (e2e)', () => {
   let failNotificationWrite: boolean;
   let openConnections: number;
   let rules: RulesStore;
+  let deletedCommunities: Set<string>;
   const postIds = ['post-1', 'post-2'];
   const postAuthors = new Map([
     ['post-1', 'user-2'],
@@ -109,6 +110,15 @@ describe('Comment endpoints (e2e)', () => {
     notifications = [];
     failNotificationWrite = false;
     openConnections = 0;
+    deletedCommunities = new Set();
+    // A statement that excludes deleted communities does not see a post in
+    // one; a statement that forgets the exclusion still does.
+    const visiblePost = (postId: string, sql: string) =>
+      postIds.includes(postId) &&
+      !(
+        sql.includes('deleted_at IS NULL') &&
+        deletedCommunities.has(postCommunities.get(postId) as string)
+      );
     // No community has published rules unless a test publishes some.
     rules = createRulesStore({
       'community-1': { name: 'general', creator_id: 'creator-1' },
@@ -125,7 +135,7 @@ describe('Comment endpoints (e2e)', () => {
         if (sql.startsWith('SELECT id, author_id, community_id, title')) {
           const [postId] = values as [string];
           return [
-            postIds.includes(postId)
+            visiblePost(postId, sql)
               ? [
                   {
                     id: postId,
@@ -202,7 +212,7 @@ describe('Comment endpoints (e2e)', () => {
         }
         if (sql.startsWith('SELECT id FROM posts')) {
           const [postId] = values as [string];
-          return [postIds.includes(postId) ? [{ id: postId }] : [], []];
+          return [visiblePost(postId, sql) ? [{ id: postId }] : [], []];
         }
         if (
           sql.startsWith('SELECT id, post_id, author_id, parent_id') &&
@@ -268,7 +278,7 @@ describe('Comment endpoints (e2e)', () => {
         if (sql.startsWith('SELECT comments.id, comments.author_id')) {
           const [creatorId, moderatorId, commentId] = values as string[];
           const comment = comments.find((entry) => entry.id === commentId);
-          if (!comment) {
+          if (!comment || !visiblePost(comment.post_id, sql)) {
             return [[], []];
           }
           const communityId = postCommunities.get(comment.post_id) as string;
@@ -814,6 +824,61 @@ describe('Comment endpoints (e2e)', () => {
       await as('moderator-token').delete('/comments/root-2').expect(204);
 
       expect(check).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('in a deleted community', () => {
+    const send = (
+      method: 'get' | 'post' | 'delete',
+      path: string,
+      token = 'valid-token',
+    ) =>
+      request(app.getHttpServer())
+        [method](path)
+        .set('Authorization', `Bearer ${token}`);
+
+    beforeEach(() => {
+      deletedCommunities.add('community-1');
+    });
+
+    it('answers 404 for the thread of a post in it', async () => {
+      const response = await send('get', '/posts/post-1/comments').expect(404);
+      expect((response.body as { message: string }).message).toBe(
+        'Post not found',
+      );
+    });
+
+    it('refuses a new comment or reply with 404 and writes nothing', async () => {
+      await send('post', '/posts/post-1/comments')
+        .send({ content: 'Anyone here?' })
+        .expect(404);
+      await send('post', '/posts/post-1/comments')
+        .send({ content: 'Reply', parent_id: 'root-1' })
+        .expect(404);
+
+      expect(comments).toHaveLength(5);
+      expect(notifications).toEqual([]);
+      expect(openConnections).toBe(0);
+    });
+
+    it('answers 404 to deleting its comments, for authors and moderators alike', async () => {
+      await send('delete', '/comments/root-1').expect(404);
+      await send('delete', '/comments/root-2', 'moderator-token').expect(404);
+
+      expect(comments.map((comment) => comment.id)).toEqual([
+        'root-1',
+        'reply-1',
+        'nested-reply',
+        'root-2',
+        'other-post-comment',
+      ]);
+      expect(
+        queryCalls.some(({ sql }) => sql.startsWith('DELETE FROM comments')),
+      ).toBe(false);
+    });
+
+    it('leaves threads in other communities readable', async () => {
+      await send('get', '/posts/post-2/comments').expect(200);
     });
   });
 });

@@ -29,9 +29,11 @@ describe('Vote endpoint (e2e)', () => {
   let rollbacks: number;
   let releases: number;
   let rules: RulesStore;
+  let deletedCommunities: Set<string>;
 
   beforeEach(async () => {
     votes = new Map();
+    deletedCommunities = new Set();
     queryCalls = [];
     commits = 0;
     rollbacks = 0;
@@ -68,8 +70,16 @@ describe('Vote endpoint (e2e)', () => {
           const [targetId] = values as [string];
           const targetType = sql.includes('FROM posts') ? 'post' : 'comment';
           const communityId = targets[targetType].get(targetId);
+          // A lock that excludes deleted communities does not find a
+          // target in one.
+          const hidden =
+            communityId !== undefined &&
+            sql.includes('deleted_at IS NULL') &&
+            deletedCommunities.has(communityId);
           return [
-            communityId ? [{ id: targetId, community_id: communityId }] : [],
+            communityId && !hidden
+              ? [{ id: targetId, community_id: communityId }]
+              : [],
             [],
           ];
         }
@@ -352,4 +362,26 @@ describe('Vote endpoint (e2e)', () => {
       ).toBe(false);
     });
   });
+
+  it.each([
+    ['post', 'post-1', 'community-1'],
+    ['comment', 'comment-1', 'community-2'],
+  ])(
+    'answers 404 to a vote on a %s in a deleted community and stores nothing',
+    async (targetType, targetId, communityId) => {
+      deletedCommunities.add(communityId);
+
+      const response = await request(app.getHttpServer())
+        .post('/votes')
+        .set('Authorization', 'Bearer valid-token')
+        .send({ target_type: targetType, target_id: targetId, value: 1 })
+        .expect(404);
+
+      expect((response.body as { message: string }).message).toBe(
+        targetType === 'post' ? 'Post not found' : 'Comment not found',
+      );
+      expect(votes.size).toBe(0);
+      expect(commits).toBe(0);
+    },
+  );
 });

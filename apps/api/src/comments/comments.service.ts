@@ -12,6 +12,7 @@ import {
   canModerateCommunitySql,
   isSqlTrue,
 } from '../common/community-moderation';
+import { activeCommunitySql } from '../common/community-visibility';
 import type { NotificationEntry } from '../notifications/notification-metadata';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -133,7 +134,7 @@ export class CommentsService {
           title: string;
         })[]
       >(
-        'SELECT id, author_id, community_id, title FROM posts WHERE id = ? LIMIT 1',
+        `SELECT id, author_id, community_id, title FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} LIMIT 1`,
         [postId],
       );
       const post = posts[0];
@@ -245,7 +246,8 @@ export class CommentsService {
            ${canModerateCommunitySql('posts.community_id')} AS can_moderate
          FROM comments
          INNER JOIN posts ON posts.id = comments.post_id
-         WHERE comments.id = ? LIMIT 1 FOR UPDATE OF comments`,
+         WHERE comments.id = ? AND ${activeCommunitySql('posts.community_id')}
+         LIMIT 1 FOR UPDATE OF comments`,
         [actorId, actorId, id],
       );
       const comment = comments[0];
@@ -288,7 +290,7 @@ export class CommentsService {
 
   private async ensurePostExists(postId: string): Promise<void> {
     const [posts] = await this.pool.execute<(RowDataPacket & { id: string })[]>(
-      'SELECT id FROM posts WHERE id = ? LIMIT 1',
+      `SELECT id FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} LIMIT 1`,
       [postId],
     );
     if (!posts[0]) {

@@ -13,13 +13,24 @@ const enumList = (values: readonly string[]) =>
 
 const TABLE = /CREATE TABLE community_moderation_actions \(([\s\S]*?)\n\);/;
 
+// Added by migration 023; 021 is released and append-only.
+const ADDED_ACTIONS = ['community_updated', 'community_deleted'];
+const ADDED_TARGETS = ['community'];
+const ORIGINAL_ACTIONS = COMMUNITY_MODERATION_ACTIONS.filter(
+  (action) => !ADDED_ACTIONS.includes(action),
+);
+const ORIGINAL_TARGETS = COMMUNITY_MODERATION_TARGETS.filter(
+  (target) => !ADDED_TARGETS.includes(target),
+);
+
+const snapshot = read('../../../../data/community.sql');
+
 describe('migration 021 (community moderation actions)', () => {
   const migration = read(
     '../../../../data/migrations/021_create_community_moderation_actions.sql',
   );
   const sql = normalise(migration.replace(/^--.*$/gm, ''));
   const table = normalise(TABLE.exec(migration)?.[1] ?? '');
-  const snapshot = read('../../../../data/community.sql');
 
   it('creates only the table', () => {
     expect(sql.split(';').filter((statement) => statement.trim())).toHaveLength(
@@ -28,12 +39,15 @@ describe('migration 021 (community moderation actions)', () => {
     expect(sql).toMatch(/^CREATE TABLE community_moderation_actions \(/);
   });
 
-  it('declares enums identical to the shared constants', () => {
+  it('declares the original enums, which the constants extend only by appending', () => {
+    expect(
+      COMMUNITY_MODERATION_ACTIONS.slice(0, ORIGINAL_ACTIONS.length),
+    ).toEqual(ORIGINAL_ACTIONS);
     expect(table).toContain(
-      `action ENUM( ${enumList(COMMUNITY_MODERATION_ACTIONS)} ) NOT NULL`,
+      `action ENUM( ${enumList(ORIGINAL_ACTIONS)} ) NOT NULL`,
     );
     expect(table).toContain(
-      `target_type ENUM(${enumList(COMMUNITY_MODERATION_TARGETS)}) NOT NULL`,
+      `target_type ENUM(${enumList(ORIGINAL_TARGETS)}) NOT NULL`,
     );
   });
 
@@ -63,14 +77,51 @@ describe('migration 021 (community moderation actions)', () => {
 
   it('states re-run safety', () => {
     expect(migration).toMatch(
-      /Not safely re-runnable: if the table exists but this version is unrecorded,\n-- drop community_moderation_actions and run this migration again\./,
+      /Not safely re-runnable: if the table exists but this version is unrecorded,\r?\n-- drop community_moderation_actions and run this migration again\./,
+    );
+  });
+});
+
+describe('migration 023 (community moderation community actions)', () => {
+  const migration = read(
+    '../../../../data/migrations/023_add_community_moderation_community_actions.sql',
+  );
+  const sql = normalise(migration.replace(/^--.*$/gm, ''));
+
+  it('appends the community actions and target to both enums', () => {
+    expect(sql).toBe(
+      'ALTER TABLE community_moderation_actions ' +
+        `MODIFY COLUMN action ENUM( ${enumList(COMMUNITY_MODERATION_ACTIONS)} ) NOT NULL, ` +
+        `MODIFY COLUMN target_type ENUM(${enumList(COMMUNITY_MODERATION_TARGETS)}) NOT NULL;`,
     );
   });
 
-  it('is mirrored in the snapshot and records the version', () => {
-    expect(normalise(TABLE.exec(snapshot)?.[1] ?? '')).toBe(table);
+  it('states re-run safety', () => {
+    expect(migration).toMatch(/Safe to re-run/);
+  });
+});
+
+describe('community_moderation_actions in the snapshot', () => {
+  it('is 021 with the enums of 023', () => {
+    const migration = read(
+      '../../../../data/migrations/021_create_community_moderation_actions.sql',
+    );
+    const expected = normalise(TABLE.exec(migration)?.[1] ?? '')
+      .replace(
+        `action ENUM( ${enumList(ORIGINAL_ACTIONS)} )`,
+        `action ENUM( ${enumList(COMMUNITY_MODERATION_ACTIONS)} )`,
+      )
+      .replace(
+        `target_type ENUM(${enumList(ORIGINAL_TARGETS)})`,
+        `target_type ENUM(${enumList(COMMUNITY_MODERATION_TARGETS)})`,
+      );
+    expect(normalise(TABLE.exec(snapshot)?.[1] ?? '')).toBe(expected);
+  });
+
+  it('records 021 through 023 in order', () => {
     expect(normalise(snapshot)).toContain(
-      "('020_add_user_account_deletion'), ('021_create_community_moderation_actions');",
+      "('020_add_user_account_deletion'), ('021_create_community_moderation_actions'), " +
+        "('022_add_community_deletion'), ('023_add_community_moderation_community_actions');",
     );
   });
 });

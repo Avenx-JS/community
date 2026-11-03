@@ -10,6 +10,7 @@ import {
   type RowDataPacket,
 } from 'mysql2/promise';
 import { CommunitiesService } from '../communities/communities.service';
+import type { CommunityModerationLogService } from '../communities/community-moderation-log.service';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import {
   loadMigrations,
@@ -150,6 +151,7 @@ integration('full-text search indexes (MySQL)', () => {
     communities = new CommunitiesService(
       pool,
       {} as CommunityRuleAcceptanceService,
+      {} as CommunityModerationLogService,
     );
     for (const search of searchTerms) {
       searchesBefore.set(search, await communities.findAll({ search }));

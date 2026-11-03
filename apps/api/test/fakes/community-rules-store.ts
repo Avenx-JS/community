@@ -139,7 +139,8 @@ export function createRulesStore(
     }
     // assertAcceptedOrThrow: the name for the 403 and the creator exemption.
     if (
-      sql === 'SELECT name, creator_id FROM communities WHERE id = ? LIMIT 1'
+      sql ===
+      'SELECT name, creator_id FROM communities WHERE id = ? AND deleted_at IS NULL LIMIT 1'
     ) {
       const community = store.communities.get(values[0] as string);
       return [community ? [community] : [], []];

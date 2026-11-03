@@ -136,13 +136,21 @@ integration('content listing indexes (MySQL)', () => {
       [schema, table],
     );
 
+  // Post listings also probe communities for the deleted-community exclusion
+  // (migration 022); that probe must be a primary-key lookup, and the plan
+  // under test is the content table's own row.
   const plan = async (sql: string, values: unknown[]) => {
     const result = await rows(`EXPLAIN ${sql}`, values);
-    expect(result).toHaveLength(1);
+    const probes = result.filter((row) => row.table === 'communities');
+    for (const probe of probes) {
+      expect(probe.key).toBe('PRIMARY');
+    }
+    const content = result.filter((row) => row.table !== 'communities');
+    expect(content).toHaveLength(1);
     return {
-      key: result[0].key as string | null,
-      type: result[0].type as string,
-      extra: (result[0].Extra as string | null) ?? '',
+      key: content[0].key as string | null,
+      type: content[0].type as string,
+      extra: (content[0].Extra as string | null) ?? '',
     };
   };
 

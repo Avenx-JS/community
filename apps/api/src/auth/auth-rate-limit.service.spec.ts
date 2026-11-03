@@ -206,6 +206,37 @@ describe('AuthRateLimitService', () => {
     expect(JSON.stringify(calls)).not.toContain('token-user-id');
   });
 
+  it.each(['PATCH', 'DELETE'])(
+    'counts %s /communities/:name against the write buckets',
+    async (method) => {
+      const hmac = (scope: string, value: string) =>
+        createHmac(
+          'sha256',
+          process.env.RATE_LIMIT_HASH_SECRET ??
+            process.env.MYSQL_PASSWORD ??
+            'community-local-rate-limit-secret',
+        )
+          .update(scope)
+          .update('\0')
+          .update(value)
+          .digest('hex');
+
+      await service.enforceApiRequest(
+        '192.0.2.10',
+        method,
+        '/communities/gardening',
+        'creator-id',
+      );
+
+      const keys = calls
+        .filter((call) => call.sql.startsWith('INSERT INTO auth_rate_limits'))
+        .map((call) => call.values[0]);
+      expect(keys).toContain(hmac('api:write:ip', '192.0.2.10'));
+      expect(keys).toContain(hmac('api:write:account', 'creator-id'));
+      expect(keys).not.toContain(hmac('api:read:ip', '192.0.2.10'));
+    },
+  );
+
   it.each([
     ['AUTH_PASSWORD_CHANGE_IP', 11],
     ['AUTH_PASSWORD_CHANGE_ACCOUNT', 6],

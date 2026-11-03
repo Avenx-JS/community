@@ -78,6 +78,12 @@ describe('migration ordering and application', () => {
     expect(position('021_create_community_moderation_actions')).toBe(
       position('020_add_user_account_deletion') + 1,
     );
+    expect(position('022_add_community_deletion')).toBe(
+      position('021_create_community_moderation_actions') + 1,
+    );
+    expect(position('023_add_community_moderation_community_actions')).toBe(
+      position('022_add_community_deletion') + 1,
+    );
     expect(new Set(versions).size).toBe(versions.length);
   });
 

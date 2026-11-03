@@ -34,6 +34,8 @@ export const COMMUNITY_MODERATION_ACTIONS = [
   'moderator_added',
   'moderator_removed',
   'rules_published',
+  'community_updated',
+  'community_deleted',
 ] as const;
 
 export type CommunityModerationAction =
@@ -44,6 +46,7 @@ export const COMMUNITY_MODERATION_TARGETS = [
   'comment',
   'user',
   'rule_document',
+  'community',
 ] as const;
 
 export type CommunityModerationTarget =
@@ -100,7 +103,21 @@ export type CommunityModerationEntry =
       action: 'rules_published';
       targetType: 'rule_document';
       metadata?: { version?: number };
+    })
+  | (EntryBase & {
+      action: 'community_updated';
+      targetType: 'community';
+      metadata?: { fields?: string };
+    })
+  | (EntryBase & {
+      action: 'community_deleted';
+      targetType: 'community';
+      metadata?: Record<string, never>;
     });
+
+// The community fields PATCH /communities/:name may change; a
+// community_updated entry names which of them changed, never their values.
+export const EDITABLE_COMMUNITY_FIELDS = ['description'] as const;
 
 export type CommunityModerationMetadata = Record<string, string | number>;
 
@@ -238,6 +255,23 @@ function versionValue(metadata: Record<string, unknown>): number | undefined {
   return value;
 }
 
+// A comma-separated list of distinct editable field names, e.g. "description".
+function fieldsValue(metadata: Record<string, unknown>): string | undefined {
+  const value = stringValue(metadata, 'fields');
+  if (value === undefined) {
+    return undefined;
+  }
+  const fields = value.split(',');
+  const editable: readonly string[] = EDITABLE_COMMUNITY_FIELDS;
+  if (
+    new Set(fields).size !== fields.length ||
+    !fields.every((field) => editable.includes(field))
+  ) {
+    throw invalid('fields');
+  }
+  return value;
+}
+
 // No action allows a post or comment body, title or link: the log records
 // decisions, not content.
 export function buildCommunityModerationMetadata(
@@ -270,6 +304,9 @@ export function buildCommunityModerationMetadata(
       break;
     case 'rules_published':
       keep('version', versionValue(metadata));
+      break;
+    case 'community_updated':
+      keep('fields', fieldsValue(metadata));
       break;
     default:
       // Lock, unlock, restore, pin and unpin carry no metadata.
@@ -348,7 +385,7 @@ export class CommunityModerationLogService {
     const [communities] = await this.pool.execute<CommunityAccessRow[]>(
       `SELECT c.id, ${canModerateCommunitySql('c.id')} AS can_moderate
        FROM communities c
-       WHERE c.name = ? LIMIT 1`,
+       WHERE c.name = ? AND c.deleted_at IS NULL LIMIT 1`,
       [userId, userId, name],
     );
     const community = communities[0];

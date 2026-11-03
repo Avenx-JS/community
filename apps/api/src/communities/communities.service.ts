@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Inject,
@@ -6,13 +7,29 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
+import type {
+  Pool,
+  PoolConnection,
+  ResultSetHeader,
+  RowDataPacket,
+} from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { escapeLikeSearch } from '../common/like-search';
+import {
+  CommunityModerationLogService,
+  EDITABLE_COMMUNITY_FIELDS,
+} from './community-moderation-log.service';
 import { CommunityRuleAcceptanceService } from './community-rule-acceptance.service';
 import { CreateCommunityDto } from './dto/create-community.dto';
 import { ListCommunitiesDto } from './dto/list-communities.dto';
 import { ListSubscriptionsDto } from './dto/list-subscriptions.dto';
+import { UpdateCommunityDto } from './dto/update-community.dto';
+
+interface CreatorCheckOptions {
+  executor?: Pool | PoolConnection;
+  forUpdate?: boolean;
+  forbidden?: string;
+}
 
 interface CommunityRow extends RowDataPacket {
   id: string;
@@ -66,6 +83,7 @@ export class CommunitiesService {
   constructor(
     @Inject(MYSQL_POOL) private readonly pool: Pool,
     private readonly ruleAcceptance: CommunityRuleAcceptanceService,
+    private readonly moderationLog: CommunityModerationLogService,
   ) {}
 
   async findAll(query: ListCommunitiesDto): Promise<CommunityListDto> {
@@ -73,13 +91,13 @@ export class CommunitiesService {
     const limit = query.limit ?? 20;
     const offset = (page - 1) * limit;
     const search = query.search?.trim();
-    let where = '';
+    let where = ' WHERE deleted_at IS NULL';
     let values: (string | number)[] = [];
 
     if (search) {
       const term = `%${escapeLikeSearch(search)}%`;
-      where =
-        " WHERE LOWER(name) LIKE LOWER(?) ESCAPE '=' OR LOWER(description) LIKE LOWER(?) ESCAPE '='";
+      where +=
+        " AND (LOWER(name) LIKE LOWER(?) ESCAPE '=' OR LOWER(description) LIKE LOWER(?) ESCAPE '=')";
       values = [term, term];
     }
 
@@ -132,7 +150,7 @@ export class CommunitiesService {
 
   async findOne(name: string): Promise<CommunityDto> {
     const [communities] = await this.pool.execute<CommunityRow[]>(
-      'SELECT id, creator_id, name, description, created_at FROM communities WHERE name = ? LIMIT 1',
+      'SELECT id, creator_id, name, description, created_at FROM communities WHERE name = ? AND deleted_at IS NULL LIMIT 1',
       [name],
     );
     const community = communities[0];
@@ -168,14 +186,17 @@ export class CommunitiesService {
       `SELECT c.id, c.name, c.description, s.created_at AS subscribed_at
        FROM community_subscriptions s
        JOIN communities c ON c.id = s.community_id
-       WHERE s.user_id = ?
+       WHERE s.user_id = ? AND c.deleted_at IS NULL
        ORDER BY s.created_at DESC, s.community_id DESC LIMIT ? OFFSET ?`,
       [userId, limit, offset],
     );
     const [countRows] = await this.pool.execute<
       (RowDataPacket & { total: number })[]
     >(
-      'SELECT COUNT(*) AS total FROM community_subscriptions WHERE user_id = ?',
+      `SELECT COUNT(*) AS total
+       FROM community_subscriptions s
+       JOIN communities c ON c.id = s.community_id
+       WHERE s.user_id = ? AND c.deleted_at IS NULL`,
       [userId],
     );
 
@@ -269,21 +290,147 @@ export class CommunitiesService {
     );
   }
 
+  // Creator only. Edits a community's public identity, so moderators are
+  // refused: they hold no powers beyond content actions. Widening the edit to
+  // moderators is a change to the creator check in getCommunityForRoleChange.
+  async update(
+    name: string,
+    changes: UpdateCommunityDto,
+    actorId: string,
+  ): Promise<CommunityDto> {
+    const assignments: string[] = [];
+    const values: (string | null)[] = [];
+    const fields: string[] = [];
+    for (const field of EDITABLE_COMMUNITY_FIELDS) {
+      const value = changes[field];
+      if (value !== undefined) {
+        assignments.push(`${field} = ?`);
+        values.push(value === '' ? null : value);
+        fields.push(field);
+      }
+    }
+    if (assignments.length === 0) {
+      throw new BadRequestException('description must be provided');
+    }
+
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+
+      const community = await this.getCommunityForRoleChange(name, actorId, {
+        executor: connection,
+        forUpdate: true,
+        forbidden: 'Only the community creator can edit the community',
+      });
+      await connection.execute<ResultSetHeader>(
+        `UPDATE communities SET ${assignments.join(', ')} WHERE id = ?`,
+        [...values, community.id],
+      );
+      await this.moderationLog.record(connection, {
+        actorId,
+        communityId: community.id,
+        action: 'community_updated',
+        targetType: 'community',
+        targetId: community.id,
+        metadata: { fields: fields.join(',') },
+      });
+      const [communities] = await connection.execute<CommunityRow[]>(
+        'SELECT id, creator_id, name, description, created_at FROM communities WHERE id = ? LIMIT 1',
+        [community.id],
+      );
+      const updated = communities[0];
+      if (!updated) {
+        throw new Error('Updated community could not be retrieved');
+      }
+
+      await connection.commit();
+      return this.toDto(updated);
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  // Soft deletion: the row is marked and kept, and nothing that references it
+  // is destroyed (a hard delete would cascade through every post and comment).
+  // Every read excludes deleted_at IS NOT NULL. There is no restore route.
+  async remove(
+    name: string,
+    confirmation: string,
+    actorId: string,
+  ): Promise<void> {
+    if (confirmation !== name) {
+      throw new BadRequestException(
+        'The confirmation name does not match the community',
+      );
+    }
+
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+
+      // Locks the row, so a concurrent delete waits and then answers 404.
+      const community = await this.getCommunityForRoleChange(name, actorId, {
+        executor: connection,
+        forUpdate: true,
+        forbidden: 'Only the community creator can delete the community',
+      });
+      await connection.execute<ResultSetHeader>(
+        'UPDATE communities SET deleted_at = UTC_TIMESTAMP(), deleted_by = ? WHERE id = ?',
+        [actorId, community.id],
+      );
+      await this.moderationLog.record(connection, {
+        actorId,
+        communityId: community.id,
+        action: 'community_deleted',
+        targetType: 'community',
+        targetId: community.id,
+      });
+
+      await connection.commit();
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  // 404 for an unknown or deleted community, then 403 unless the actor is its
+  // creator: the one place the creator-only rule lives.
   private async getCommunityForRoleChange(
     name: string,
     actorId: string,
+    {
+      executor = this.pool,
+      forUpdate = false,
+      forbidden = 'Only the community creator can manage moderators',
+    }: CreatorCheckOptions = {},
   ): Promise<{ id: string; creator_id: string }> {
-    const [communities] = await this.pool.execute<
+    const [communities] = await executor.execute<
       (RowDataPacket & { id: string; creator_id: string })[]
-    >('SELECT id, creator_id FROM communities WHERE name = ? LIMIT 1', [name]);
+    >(
+      `SELECT id, creator_id FROM communities WHERE name = ? AND deleted_at IS NULL LIMIT 1${
+        forUpdate ? ' FOR UPDATE' : ''
+      }`,
+      [name],
+    );
     const community = communities[0];
     if (!community) {
       throw new NotFoundException('Community not found');
     }
     if (community.creator_id !== actorId) {
-      throw new ForbiddenException(
-        'Only the community creator can manage moderators',
-      );
+      throw new ForbiddenException(forbidden);
     }
     return community;
   }
@@ -291,7 +438,10 @@ export class CommunitiesService {
   private async getCommunityId(name: string): Promise<string> {
     const [communities] = await this.pool.execute<
       (RowDataPacket & { id: string })[]
-    >('SELECT id FROM communities WHERE name = ? LIMIT 1', [name]);
+    >(
+      'SELECT id FROM communities WHERE name = ? AND deleted_at IS NULL LIMIT 1',
+      [name],
+    );
     const community = communities[0];
 
     if (!community) {

@@ -55,6 +55,8 @@ const leaked = {
   body: 'the removed post body',
   content: 'the removed comment content',
   title: 'the removed post title',
+  description: 'the edited community description',
+  name: 'renamed_community',
   url: 'https://example.com/removed',
   email: 'private@example.com',
   password_hash: 'private-hash',
@@ -236,6 +238,25 @@ describe('CommunityModerationLogService', () => {
         },
         { version: 3 },
       ],
+      [
+        {
+          ...base,
+          action: 'community_updated',
+          targetType: 'community',
+          targetId: 'community-1',
+          metadata: { fields: 'description' },
+        },
+        { fields: 'description' },
+      ],
+      [
+        {
+          ...base,
+          action: 'community_deleted',
+          targetType: 'community',
+          targetId: 'community-1',
+        },
+        null,
+      ],
     ];
 
     it('covers every declared action', () => {
@@ -256,7 +277,7 @@ describe('CommunityModerationLogService', () => {
 
         expect(metadata).toEqual(expected);
         expect(JSON.stringify(metadata)).not.toMatch(
-          /removed post|removed comment|example\.com|hash|token|session|unexpected/i,
+          /removed post|removed comment|community description|renamed|example\.com|hash|token|session|unexpected/i,
         );
       },
     );
@@ -326,6 +347,21 @@ describe('CommunityModerationLogService', () => {
       ['rules_published', 'rule_document', { version: 0 }, 'version'],
       ['rules_published', 'rule_document', { version: 1.5 }, 'version'],
       ['rules_published', 'rule_document', { version: '2' }, 'version'],
+      ['community_updated', 'community', { fields: 'name' }, 'fields'],
+      ['community_updated', 'community', { fields: 'rules' }, 'fields'],
+      [
+        'community_updated',
+        'community',
+        { fields: 'description,description' },
+        'fields',
+      ],
+      ['community_updated', 'community', { fields: '' }, 'fields'],
+      [
+        'community_updated',
+        'community',
+        { fields: 'A new description' },
+        'fields',
+      ],
     ])(
       'rejects an invalid value for %s metadata %o',
       (action, targetType, metadata, key) => {

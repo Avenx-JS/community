@@ -226,15 +226,16 @@ describe('User profile endpoints (e2e)', () => {
         ]);
       }
       if (
-        sql ===
-        'SELECT id, title, content, type, author_id, community_id, created_at FROM posts ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?'
+        sql.startsWith(
+          'SELECT id, title, content, type, author_id, community_id, created_at FROM posts WHERE EXISTS',
+        )
       ) {
         return Promise.resolve([tables.posts, []]);
       }
-      if (sql === 'SELECT COUNT(*) AS total FROM posts') {
+      if (sql.startsWith('SELECT COUNT(*) AS total FROM posts WHERE EXISTS')) {
         return Promise.resolve([[{ total: tables.posts.length }], []]);
       }
-      if (sql === 'SELECT id FROM posts WHERE id = ? LIMIT 1') {
+      if (sql.startsWith('SELECT id FROM posts WHERE id = ? AND EXISTS')) {
         return Promise.resolve([
           tables.posts.filter(({ id }) => id === values[0]),
           [],

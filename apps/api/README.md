@@ -1345,7 +1345,7 @@ re-register, start clean. Support answer: wait out the suspension, or appeal
 the restriction; deletion is possible once it is lifted or has expired.
 
 **Community creators must deal with their community first.** If the caller is
-the `creator_id` of any community, the request is `409`:
+the `creator_id` of any community that is not deleted, the request is `409`:
 
 ```json
 {
@@ -1356,9 +1356,12 @@ the `creator_id` of any community, the request is `409`:
 ```
 
 Deleting the account would otherwise either delete the community (the cascade)
-or leave it with an owner who can never act. Community deletion and ownership
-transfer are separate work; until they exist, a creator cannot delete their
-account through the API.
+or leave it with an owner who can never act. A creator can now delete their
+communities first with `DELETE /communities/:name` (a soft delete, see
+[Editing and deleting a community](#editing-and-deleting-a-community)) and then
+their account; the deleted community keeps `deleted_at`, and `deleted_by`
+keeps referencing the anonymised account row. Ownership transfer is separate
+work.
 
 **The original username becomes available again.** The placeholder replaces
 it in the row, so the old name is no longer in the unique index and a new
@@ -1895,6 +1898,111 @@ also subscribed. The routes report membership only and say nothing about
 notification delivery. Like every other route except `GET /health`, both count
 against the API read rate limits.
 
+### Editing and deleting a community
+
+Both routes require a bearer token and are **creator only**: the community's
+`creator_id` may edit or delete it; its moderators, every other member and
+platform administrators get `403`. An unknown community answers `404` before
+any `403`, and an invalid name `400`. Moderators are refused because they
+hold no powers beyond content actions, and the description and the existence
+of the community are its public identity. The creator check lives in one place
+(`CommunitiesService.getCommunityForRoleChange`), so widening it later is a
+one-line change. Both routes count against the API write rate limits, and
+each records one [community moderation log](#community-moderation-log) entry
+in the same transaction as the change; a failure to write the entry rolls the
+change back.
+
+#### `PATCH /communities/:name`
+
+Edits the community and answers `200` with the community DTO. The body
+accepts only `description`: trimmed, at most 16,383 characters, plain text
+without control characters. An empty or whitespace-only description is stored
+as `NULL`; `null` itself is rejected (clearing is spelled `""`). An empty
+body returns `400`, as does any other property:
+
+- **`name` is not editable.** It is the route key of every community route,
+  and `GET /communities/:name` is the community's published identity. Renaming
+  would break every stored link to it, and there is no redirect mechanism.
+- **`rules` are not editable here.** They are published as immutable
+  versions through `PUT /communities/:name/rules`; accepting them in this body
+  would recreate the second source of truth that dropping `communities.rules`
+  removed.
+- `creator_id`, `id`, `created_at` and any unknown property are rejected by
+  the global `ValidationPipe`.
+
+The edit records a `community_updated` entry whose metadata names the changed
+fields (`{ "fields": "description" }`), never their old or new values.
+
+#### `DELETE /communities/:name`
+
+Deletes the community and answers `204`. The body must confirm the name:
+
+```json
+{ "name": "gardening" }
+```
+
+It must equal the route's community name exactly; a missing, mismatched or
+differently cased name returns `400` and deletes nothing. This is the same
+DELETE-with-a-body trade-off `DELETE /users/me` takes: a client or proxy that
+drops the body gets a `400`, never a deletion. Deleting an already-deleted
+community returns `404`. The deletion records a `community_deleted` entry.
+
+**Deletion is a soft delete and destroys no content.** Migration
+`022_add_community_deletion` adds `communities.deleted_at` and
+`deleted_by`; the route sets them under a row lock and changes nothing else.
+No post, comment, vote, subscription, moderator assignment, notification
+preference, rule document, rule acceptance or moderation-log entry is
+deleted. A hard delete was rejected because `ON DELETE CASCADE` would remove
+every post and comment by every member in one call; deleting only empty
+communities was rejected because it fails for exactly the communities whose
+creators most want them gone, and "empty" is a moving target under
+concurrency. `deleted_by` is `ON DELETE SET NULL`, so the record survives the
+removal of the acting account.
+
+**Every read excludes a deleted community.** A soft delete that one path
+ignores would leave the community partly invisible and partly usable, so each
+of these behaves as if the community did not exist:
+
+| Path                                                                                   | Behaviour for a deleted community          |
+| -------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `GET /communities` (with or without `search`)                                          | omitted from `items` and `total`           |
+| `GET /communities/:name`, `PATCH`, `DELETE`                                            | `404`                                      |
+| `GET /subscriptions`                                                                   | omitted from `items` and `total`           |
+| `GET /communities/:name/subscription`, `POST` and `DELETE .../subscribe`               | `404`                                      |
+| `GET` and `PUT .../notification-preferences`                                           | `404`                                      |
+| `POST` and `DELETE .../moderators`                                                     | `404`                                      |
+| `GET` and `PUT .../rules`, `GET .../rules/versions`, `GET .../rules/versions/:version` | `404`                                      |
+| `GET` and `POST .../rules/acceptance`                                                  | `404`                                      |
+| `GET .../moderation-log`                                                               | `404`                                      |
+| `POST /posts` into it                                                                  | `404` (`Community not found`)              |
+| `GET /posts` (with or without `community_id`)                                          | its posts omitted from `items` and `total` |
+| `GET /posts/:id`, `DELETE /posts/:id`                                                  | `404` for its posts                        |
+| `GET` and `POST /posts/:postId/comments`                                               | `404` for its posts                        |
+| `DELETE /comments/:id`                                                                 | `404` for comments on its posts            |
+| `POST /votes`                                                                          | `404` for its posts and their comments     |
+
+Content queries apply the shared `activeCommunitySql` predicate
+(`src/common/community-visibility.ts`); community lookups add
+`deleted_at IS NULL`. New reads of community-scoped data must do the same;
+`src/common/community-visibility.spec.ts` lists every call site and fails if
+one drops the exclusion. Platform administration (`/admin`) and the
+notification inbox are deliberately not filtered.
+
+A deleted community keeps its name: names are unique and never reused, so
+creating a community with that name returns `409`.
+
+**There is no restore route.** Deletion is irreversible through the API.
+Administrative suspension and restoration of a community is separate work
+with its own authorization, and a creator-facing undo would need its own
+policy on who may resurrect a community and for how long. Because nothing is
+destroyed, an operator can restore one by clearing `deleted_at` and
+`deleted_by`.
+
+**Deferred:** members are not notified that a community was deleted, and their
+subscriptions stay in the table, invisible. Telling every member is a product
+decision with its own fan-out concerns, and `notifications.type` would need a
+new enum value.
+
 ### Community roles and moderation
 
 Community membership is represented by `community_subscriptions`. The
@@ -1929,7 +2037,8 @@ checks, and record what they do in the
 `community_moderation_actions` (migration
 `021_create_community_moderation_actions`) is the append-only record of what a
 community's creator and moderators did in that community. Every row carries
-its `community_id`, and the row is deleted with its community.
+its `community_id`. Entries survive a (soft) community deletion; only a hard
+delete of the `communities` row, which no route performs, removes them.
 
 **Why not `admin_actions`.** The [administrative audit
 log](#administrative-action-audit-log) is platform-scoped: its action and
@@ -1953,16 +2062,23 @@ moderator actions, including those whose endpoints do not exist yet:
 | `member_removed`                                          | `user`          | `username`, `reason`               |
 | `member_unbanned`, `moderator_added`, `moderator_removed` | `user`          | `username`                         |
 | `rules_published`                                         | `rule_document` | `version`                          |
+| `community_updated`                                       | `community`     | `fields`                           |
+| `community_deleted`                                       | `community`     | none                               |
 
 Declaring them up front means the endpoint issues that add locking, pinning,
 removal, bans and member removal do not each need an `ALTER TABLE ... MODIFY
-COLUMN` on the enum, which is the expensive kind of migration.
+COLUMN` on the enum, which is the expensive kind of migration. The two
+`community_*` actions and the `community` target were added afterwards by
+migration `023_add_community_moderation_community_actions`, because `021` had
+already been released; nothing had written to the table, so that rebuild was
+immediate. `fields` is a comma-separated list of editable field names (today
+only `description`), never their values.
 `rules_published` covers the existing `PUT /communities/:name/rules`, and
 `moderator_added`/`moderator_removed` the existing moderator routes; none of
 them writes an entry yet.
 
-**Writers are wired up by the endpoint issues.** Nothing writes to the log
-yet. Each moderation endpoint calls `CommunityModerationLogService.record` as
+**Writers are wired up by the endpoint issues.** `PATCH` and
+`DELETE /communities/:name` are the first writers. Each moderation endpoint calls `CommunityModerationLogService.record` as
 part of its own work; the existing rules-publish and moderator-management
 routes are retrofitted separately. `record` has the same two overloads as
 `AuditLogService.record`: pass the caller's `PoolConnection` so the action and

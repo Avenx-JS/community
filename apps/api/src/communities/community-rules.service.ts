@@ -316,7 +316,7 @@ export class CommunityRulesService {
     forUpdate = false,
   ): Promise<RuleCommunityRow> {
     const [communities] = await executor.execute<RuleCommunityRow[]>(
-      `SELECT id, creator_id FROM communities WHERE name = ? LIMIT 1${
+      `SELECT id, creator_id FROM communities WHERE name = ? AND deleted_at IS NULL LIMIT 1${
         forUpdate ? ' FOR UPDATE' : ''
       }`,
       [name],

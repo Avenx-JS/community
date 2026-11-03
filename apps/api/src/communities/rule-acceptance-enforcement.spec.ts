@@ -10,6 +10,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { PostsService } from '../posts/posts.service';
 import { VotesService } from '../votes/votes.service';
 import { CommunitiesService } from './communities.service';
+import { CommunityModerationLogService } from './community-moderation-log.service';
 import { CommunityRuleAcceptanceService } from './community-rule-acceptance.service';
 
 // The four participation paths and their exemptions, run against one
@@ -111,11 +112,17 @@ describe('Rule acceptance enforcement', () => {
       const rows = (value: unknown): Promise<[unknown, unknown]> =>
         Promise.resolve([value, []]);
 
-      if (sql === 'SELECT id FROM communities WHERE name = ? LIMIT 1') {
+      if (
+        sql ===
+        'SELECT id FROM communities WHERE name = ? AND deleted_at IS NULL LIMIT 1'
+      ) {
         const id = communityNames[values[0] as string];
         return rows(id ? [{ id }] : []);
       }
-      if (sql === 'SELECT id FROM communities WHERE id = ? LIMIT 1') {
+      if (
+        sql ===
+        'SELECT id FROM communities WHERE id = ? AND deleted_at IS NULL LIMIT 1'
+      ) {
         return rows(
           rules.communities.has(values[0] as string) ? [{ id: values[0] }] : [],
         );
@@ -156,11 +163,7 @@ describe('Rule acceptance enforcement', () => {
         const post = postById(values[0]);
         return rows(post ? [post] : []);
       }
-      if (
-        sql.startsWith(
-          'SELECT id, community_id FROM posts WHERE id = ? FOR UPDATE',
-        )
-      ) {
+      if (sql.startsWith('SELECT id, community_id FROM posts WHERE id = ?')) {
         const post = postById(values[0]);
         return rows(
           post ? [{ id: post.id, community_id: post.community_id }] : [],
@@ -317,6 +320,7 @@ describe('Rule acceptance enforcement', () => {
       providers: [
         CommunitiesService,
         CommunityRuleAcceptanceService,
+        { provide: CommunityModerationLogService, useValue: {} },
         CommentsService,
         PostsService,
         VotesService,

@@ -6,6 +6,7 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  Patch,
   Post,
   Put,
   Query,
@@ -34,8 +35,10 @@ import {
 import { CommunitiesService } from './communities.service';
 import { NotificationPreferencesService } from './notification-preferences.service';
 import { CreateCommunityDto } from './dto/create-community.dto';
+import { DeleteCommunityDto } from './dto/delete-community.dto';
 import { ListCommunitiesDto } from './dto/list-communities.dto';
 import { ManageModeratorDto } from './dto/manage-moderator.dto';
+import { UpdateCommunityDto } from './dto/update-community.dto';
 import { UpdateNotificationPreferencesDto } from './dto/update-notification-preferences.dto';
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
 
@@ -89,6 +92,63 @@ export class CommunitiesController {
     @Param('name', new SafeRouteParamPipe('communityName')) name: string,
   ) {
     return this.communitiesService.findOne(name);
+  }
+
+  @Patch(':name')
+  @UseGuards(AuthGuard)
+  @ApiOperation({
+    summary: 'Edit a community',
+    description:
+      'Only the description is editable; an empty string clears it. name ' +
+      'is the route key and published identity and cannot be changed; ' +
+      'rules are published through PUT /communities/:name/rules. Records a ' +
+      'community_updated moderation-log entry.',
+  })
+  @ApiAuthenticated({
+    forbidden: 'Only the community creator may edit the community.',
+  })
+  @ApiRouteParam('name', 'communityName', 'Exact community name.')
+  @ApiOkResponse({ type: CommunityResponse })
+  @ApiErrorResponses({
+    400: 'Invalid community name, empty body, unknown property (including name and rules), or an invalid description.',
+    404: 'Community not found.',
+  })
+  update(
+    @Param('name', new SafeRouteParamPipe('communityName')) name: string,
+    @Body() body: UpdateCommunityDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.communitiesService.update(name, body, request.user.id);
+  }
+
+  // DELETE with a confirmation body, as DELETE /users/me takes: a client or
+  // proxy that drops DELETE bodies gets a 400 and deletes nothing.
+  @Delete(':name')
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary: 'Delete a community',
+    description:
+      'Requires the community name in the body as confirmation. A soft ' +
+      'delete: the community disappears from every read, but no post, ' +
+      'comment, subscription, moderator or rule is destroyed. There is no ' +
+      'restore route. Records a community_deleted moderation-log entry.',
+  })
+  @ApiAuthenticated({
+    forbidden: 'Only the community creator may delete the community.',
+  })
+  @ApiRouteParam('name', 'communityName', 'Exact community name.')
+  @ApiNoContentResponse({ description: 'The community is deleted.' })
+  @ApiErrorResponses({
+    400: 'Invalid community name, a missing or mismatched confirmation name, or an unknown property.',
+    404: 'Community not found or already deleted.',
+  })
+  remove(
+    @Param('name', new SafeRouteParamPipe('communityName')) name: string,
+    @Body() body: DeleteCommunityDto,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<void> {
+    return this.communitiesService.remove(name, body.name, request.user.id);
   }
 
   @Post(':name/subscribe')

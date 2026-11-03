@@ -110,7 +110,7 @@ export class CommunityRuleAcceptanceService {
     }
 
     const [communities] = await connection.execute<CommunityIdentityRow[]>(
-      'SELECT name, creator_id FROM communities WHERE id = ? LIMIT 1',
+      'SELECT name, creator_id FROM communities WHERE id = ? AND deleted_at IS NULL LIMIT 1',
       [communityId],
     );
     const community = communities[0];

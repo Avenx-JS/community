@@ -12,6 +12,7 @@ import {
   canModerateCommunitySql,
   isSqlTrue,
 } from '../common/community-moderation';
+import { activeCommunitySql } from '../common/community-visibility';
 import { readPositiveInteger } from '../common/read-positive-integer';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -74,7 +75,10 @@ export class PostsService {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
     const offset = (page - 1) * limit;
-    const where = query.community_id ? ' WHERE community_id = ?' : '';
+    // Posts in a deleted community are never listed.
+    const where = query.community_id
+      ? ` WHERE community_id = ? AND ${activeCommunitySql('posts.community_id')}`
+      : ` WHERE ${activeCommunitySql('posts.community_id')}`;
     const values: (string | number)[] = query.community_id
       ? [query.community_id]
       : [];
@@ -107,9 +111,10 @@ export class PostsService {
 
       const [communities] = await connection.execute<
         (RowDataPacket & { id: string })[]
-      >('SELECT id FROM communities WHERE id = ? LIMIT 1', [
-        input.community_id,
-      ]);
+      >(
+        'SELECT id FROM communities WHERE id = ? AND deleted_at IS NULL LIMIT 1',
+        [input.community_id],
+      );
 
       if (!communities[0]) {
         throw new NotFoundException('Community not found');
@@ -175,7 +180,7 @@ export class PostsService {
 
   async findOne(id: string): Promise<PostDto> {
     const [posts] = await this.pool.execute<PostRow[]>(
-      'SELECT id, title, content, type, author_id, community_id, created_at FROM posts WHERE id = ? LIMIT 1',
+      `SELECT id, title, content, type, author_id, community_id, created_at FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} LIMIT 1`,
       [id],
     );
     const post = posts[0];
@@ -204,7 +209,8 @@ export class PostsService {
         `SELECT posts.id, posts.author_id, posts.community_id, posts.title,
            ${canModerateCommunitySql('posts.community_id')} AS can_moderate
          FROM posts
-         WHERE posts.id = ? LIMIT 1 FOR UPDATE`,
+         WHERE posts.id = ? AND ${activeCommunitySql('posts.community_id')}
+         LIMIT 1 FOR UPDATE`,
         [actorId, actorId, id],
       );
       const post = posts[0];

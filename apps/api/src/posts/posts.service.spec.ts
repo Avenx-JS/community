@@ -360,7 +360,7 @@ describe('PostsService.create notifications', () => {
     ).rejects.toThrow(new NotFoundException('Community not found'));
 
     expect(queries.map((query) => query.sql)).toEqual([
-      'SELECT id FROM communities WHERE id = ? LIMIT 1',
+      'SELECT id FROM communities WHERE id = ? AND deleted_at IS NULL LIMIT 1',
     ]);
     expect(connection.rollback).toHaveBeenCalledTimes(1);
     expect(connection.release).toHaveBeenCalledTimes(1);

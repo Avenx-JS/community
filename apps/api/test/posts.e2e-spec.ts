@@ -53,6 +53,7 @@ describe('Post endpoints (e2e)', () => {
   let failNotificationWrite: boolean;
   let rules: RulesStore;
   let openConnections: number;
+  let deletedCommunities: Set<string>;
   const communities = [
     'community-1',
     'community-2',
@@ -100,6 +101,14 @@ describe('Post endpoints (e2e)', () => {
       'community-2': { name: 'other', creator_id: 'creator-2' },
     });
     openConnections = 0;
+    deletedCommunities = new Set();
+    // A statement that excludes deleted communities does not see a post in
+    // one; a statement that forgets the exclusion still does.
+    const visible = (post: TestPost, sql: string) =>
+      !(
+        sql.includes('deleted_at IS NULL') &&
+        deletedCommunities.has(post.community_id)
+      );
 
     // Evaluates the fan-out's recipient selection over the shared fixture;
     // the bound values are community id, then author id.
@@ -180,7 +189,10 @@ describe('Post endpoints (e2e)', () => {
 
         if (sql.startsWith('SELECT id FROM communities')) {
           const [id] = values as [string];
-          return [communities.includes(id) ? [{ id }] : [], []];
+          const live = !(
+            sql.includes('deleted_at IS NULL') && deletedCommunities.has(id)
+          );
+          return [communities.includes(id) && live ? [{ id }] : [], []];
         }
         if (sql.startsWith('INSERT INTO posts')) {
           const [id, title, content, type, authorId, communityId] = values as [
@@ -217,15 +229,25 @@ describe('Post endpoints (e2e)', () => {
         }
         if (sql.startsWith('SELECT id, title, content, type')) {
           const [id] = values as [string];
-          return [posts.filter((post) => post.id === id), []];
+          return [
+            posts.filter((post) => post.id === id && visible(post, sql)),
+            [],
+          ];
         }
         if (sql.startsWith('SELECT id FROM posts')) {
           const [id] = values as [string];
-          return [posts.some((post) => post.id === id) ? [{ id }] : [], []];
+          return [
+            posts.some((post) => post.id === id && visible(post, sql))
+              ? [{ id }]
+              : [],
+            [],
+          ];
         }
         if (sql.startsWith('SELECT posts.id, posts.author_id')) {
           const [creatorId, moderatorId, id] = values as string[];
-          const post = posts.find((entry) => entry.id === id);
+          const post = posts.find(
+            (entry) => entry.id === id && visible(entry, sql),
+          );
           return [
             post
               ? [
@@ -335,11 +357,12 @@ describe('Post endpoints (e2e)', () => {
     await app.init();
 
     function filteredPosts(sql: string, values: unknown[]): TestPost[] {
+      const live = posts.filter((post) => visible(post, sql));
       if (!sql.includes('WHERE community_id = ?')) {
-        return posts;
+        return live;
       }
       const [communityId] = values as [string];
-      return posts.filter((post) => post.community_id === communityId);
+      return live.filter((post) => post.community_id === communityId);
     }
   });
 
@@ -787,6 +810,82 @@ describe('Post endpoints (e2e)', () => {
       await as('moderator-token').delete('/posts/post-2').expect(204);
 
       expect(check).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('in a deleted community', () => {
+    const asAuthor = (method: 'get' | 'post' | 'delete', path: string) =>
+      request(app.getHttpServer())
+        [method](path)
+        .set('Authorization', 'Bearer valid-token');
+
+    beforeEach(() => {
+      deletedCommunities.add('community-1');
+    });
+
+    it('refuses a new post with the existing 404 and writes nothing', async () => {
+      const response = await asAuthor('post', '/posts')
+        .send({
+          title: 'Still here?',
+          type: 'text',
+          content: 'Hello',
+          community_id: 'community-1',
+        })
+        .expect(404);
+
+      expect((response.body as { message: string }).message).toBe(
+        'Community not found',
+      );
+      expect(posts).toHaveLength(3);
+      expect(notifications).toEqual([]);
+      expect(openConnections).toBe(0);
+    });
+
+    it('omits its posts from every listing and their totals', async () => {
+      const all = await request(app.getHttpServer())
+        .get('/posts?limit=100')
+        .expect(200);
+      const allBody = all.body as { items: { id: string }[]; total: number };
+      expect(allBody.items.map((post) => post.id)).toEqual(['post-3']);
+      expect(allBody.total).toBe(1);
+
+      const scoped = await request(app.getHttpServer())
+        .get('/posts?community_id=community-1')
+        .expect(200);
+      expect(scoped.body).toMatchObject({ items: [], total: 0 });
+    });
+
+    it('answers 404 for its posts, their threads and their deletion', async () => {
+      for (const [method, path] of [
+        ['get', '/posts/post-1'],
+        ['get', '/posts/post-1/comments'],
+        ['delete', '/posts/post-1'],
+      ] as const) {
+        const response = await asAuthor(method, path);
+        expect([method, path, response.status]).toEqual([method, path, 404]);
+      }
+      await request(app.getHttpServer())
+        .delete('/posts/post-2')
+        .set('Authorization', 'Bearer moderator-token')
+        .expect(404);
+    });
+
+    it('keeps every post row: the community is hidden, not erased', async () => {
+      await asAuthor('get', '/posts/post-1').expect(404);
+      await asAuthor('delete', '/posts/post-1').expect(404);
+
+      expect(posts.map((post) => post.id)).toEqual([
+        'post-1',
+        'post-2',
+        'post-3',
+      ]);
+      expect(
+        queryCalls.some(({ sql }) => sql.startsWith('DELETE FROM posts')),
+      ).toBe(false);
+    });
+
+    it('leaves posts in other communities untouched', async () => {
+      await request(app.getHttpServer()).get('/posts/post-3').expect(200);
     });
   });
 });

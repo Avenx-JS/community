@@ -25,6 +25,17 @@ interface TestCommunity {
   name: string;
   description: string | null;
   created_at: Date;
+  deleted_at?: Date | null;
+  deleted_by?: string | null;
+}
+
+interface LogEntry {
+  community_id: string;
+  actor_id: string;
+  action: string;
+  target_type: string;
+  target_id: string;
+  metadata: string | null;
 }
 
 // A database that has not yet run migration 014 still has the column. Every
@@ -35,6 +46,9 @@ const staleRulesColumn = { rules: 'stale legacy rules' };
 const tokenUsers: Record<string, string> = {
   'valid-token': 'authenticated-user',
   'other-token': 'user-b',
+  // user-a created "gardening"; user-m moderates it.
+  'creator-token': 'user-a',
+  'moderator-token': 'user-m',
 };
 
 interface SubscriptionPage {
@@ -58,6 +72,9 @@ describe('Community endpoints (e2e)', () => {
   let preferences: Map<string, number>;
   let queryCalls: Array<{ sql: string; values: unknown[] }>;
   let rules: RulesStore;
+  let logEntries: LogEntry[];
+  let failLogInsert: boolean;
+  let transactions: { committed: number; rolledBack: number };
 
   beforeEach(async () => {
     communities = [
@@ -97,12 +114,77 @@ describe('Community endpoints (e2e)', () => {
       ),
     );
 
+    logEntries = [];
+    failLogInsert = false;
+    transactions = { committed: 0, rolledBack: 0 };
+
+    const isDeleted = (value: unknown) =>
+      communities.some(
+        (community) =>
+          community.deleted_at &&
+          (community.name === value || community.id === value),
+      );
+
     const pool = {
       execute: async (sql: string, values: unknown[]) => {
         queryCalls.push({ sql, values });
+
+        // Soft deletion: a single-community lookup that excludes deleted
+        // communities finds nothing for one. A lookup without the exclusion
+        // still finds it, so a read path that forgets it fails its test.
+        if (
+          sql.includes('FROM communities') &&
+          sql.includes('deleted_at IS NULL') &&
+          /\b(?:name|id) = \?/.test(sql) &&
+          values.some(isDeleted)
+        ) {
+          return [[], []];
+        }
+
         const ruleAnswer = rules.handle(sql, values);
         if (ruleAnswer) {
           return ruleAnswer;
+        }
+
+        if (sql === 'SELECT username FROM users WHERE id = ? LIMIT 1') {
+          return [[{ username: String(values[0]).replace('-', '_') }], []];
+        }
+
+        if (sql.includes('INSERT INTO community_moderation_actions')) {
+          if (failLogInsert) {
+            throw new Error('Log insert failed');
+          }
+          const [, communityId, actorId, , action, targetType, targetId] =
+            values as string[];
+          logEntries.push({
+            community_id: communityId,
+            actor_id: actorId,
+            action,
+            target_type: targetType,
+            target_id: targetId,
+            metadata: values[7] as string | null,
+          });
+          return [{ affectedRows: 1 }, []];
+        }
+
+        if (sql === 'UPDATE communities SET description = ? WHERE id = ?') {
+          const [description, id] = values as [string | null, string];
+          const community = communities.find((entry) => entry.id === id);
+          if (community) community.description = description;
+          return [{ affectedRows: community ? 1 : 0 }, []];
+        }
+
+        if (
+          sql ===
+          'UPDATE communities SET deleted_at = UTC_TIMESTAMP(), deleted_by = ? WHERE id = ?'
+        ) {
+          const [actorId, id] = values as [string, string];
+          const community = communities.find((entry) => entry.id === id);
+          if (community) {
+            community.deleted_at = new Date('2026-11-03T12:00:00.000Z');
+            community.deleted_by = actorId;
+          }
+          return [{ affectedRows: community ? 1 : 0 }, []];
         }
 
         if (sql.startsWith('INSERT INTO communities')) {
@@ -177,11 +259,14 @@ describe('Community endpoints (e2e)', () => {
           ];
         }
 
-        if (sql.includes('FROM community_subscriptions s')) {
+        if (
+          sql.includes('FROM community_subscriptions s') &&
+          !sql.startsWith('SELECT COUNT(*)')
+        ) {
           const [userId, limit, offset] = values as [string, number, number];
           // Rows carry extra columns so the tests prove the service maps
           // only the documented fields into the response.
-          const rows = userSubscriptions(userId)
+          const rows = userSubscriptions(userId, sql)
             .sort(
               (left, right) =>
                 right.subscribed_at.getTime() - left.subscribed_at.getTime() ||
@@ -196,12 +281,11 @@ describe('Community endpoints (e2e)', () => {
         }
 
         if (
-          sql.startsWith(
-            'SELECT COUNT(*) AS total FROM community_subscriptions',
-          )
+          sql.startsWith('SELECT COUNT(*) AS total') &&
+          sql.includes('FROM community_subscriptions')
         ) {
           const [userId] = values as [string];
-          return [[{ total: userSubscriptions(userId).length }], []];
+          return [[{ total: userSubscriptions(userId, sql).length }], []];
         }
 
         if (sql.startsWith('SELECT created_at FROM community_subscriptions')) {
@@ -252,6 +336,41 @@ describe('Community endpoints (e2e)', () => {
 
         throw new Error(`Unexpected SQL query: ${sql}`);
       },
+      // A transaction snapshots the mutable state and restores it on
+      // rollback, so a failed log write is seen to undo the change.
+      getConnection: () => {
+        let snapshot: {
+          communities: TestCommunity[];
+          logEntries: LogEntry[];
+        } | null = null;
+        return Promise.resolve({
+          execute: (sql: string, values: unknown[]) =>
+            pool.execute(sql, values),
+          beginTransaction: () => {
+            snapshot = structuredClone({ communities, logEntries });
+            return Promise.resolve();
+          },
+          commit: () => {
+            snapshot = null;
+            transactions.committed += 1;
+            return Promise.resolve();
+          },
+          rollback: () => {
+            if (snapshot) {
+              communities.splice(
+                0,
+                communities.length,
+                ...snapshot.communities,
+              );
+              logEntries.splice(0, logEntries.length, ...snapshot.logEntries);
+            }
+            snapshot = null;
+            transactions.rolledBack += 1;
+            return Promise.resolve();
+          },
+          release: () => undefined,
+        });
+      },
     };
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
@@ -280,8 +399,12 @@ describe('Community endpoints (e2e)', () => {
     );
     await app.init();
 
-    function userSubscriptions(userId: string) {
+    function userSubscriptions(userId: string, sql: string) {
+      const live = sql.includes('c.deleted_at IS NULL');
       return communities.flatMap((community) => {
+        if (live && community.deleted_at) {
+          return [];
+        }
         const createdAt = subscribedAt.get(`${userId}:${community.id}`);
         return createdAt ? [{ ...community, subscribed_at: createdAt }] : [];
       });
@@ -291,12 +414,15 @@ describe('Community endpoints (e2e)', () => {
       sql: string,
       values: unknown[],
     ): TestCommunity[] {
+      const visible = sql.includes('deleted_at IS NULL')
+        ? communities.filter((community) => !community.deleted_at)
+        : communities;
       if (!sql.includes("ESCAPE '='")) {
-        return communities;
+        return visible;
       }
       const term = values[0] as string;
       const search = term.slice(1, -1).toLowerCase();
-      return communities.filter(
+      return visible.filter(
         (community) =>
           community.name.toLowerCase().includes(search) ||
           (community.description?.toLowerCase().includes(search) ?? false),
@@ -911,6 +1037,349 @@ describe('Community endpoints (e2e)', () => {
       rules.publish('community-a');
 
       await member.post('/communities/unknown/subscribe').expect(404);
+    });
+  });
+
+  describe('editing and deleting a community', () => {
+    const send = (
+      method: 'get' | 'post' | 'put' | 'patch' | 'delete',
+      path: string,
+      token?: string,
+      body?: object,
+    ) => {
+      const call = request(app.getHttpServer())[method](path);
+      if (token) call.set('Authorization', `Bearer ${token}`);
+      return body === undefined ? call : call.send(body);
+    };
+    const gardening = () =>
+      communities.find((community) => community.id === 'community-a')!;
+    const writes = () =>
+      queryCalls.filter(({ sql }) => /^\s*(UPDATE|DELETE|INSERT)\b/.test(sql));
+
+    it('lets the creator edit the description and leaves the name unchanged', async () => {
+      const response = await send(
+        'patch',
+        '/communities/gardening',
+        'creator-token',
+        { description: '  Growing plants, fixed  ' },
+      ).expect(200);
+
+      expect(response.body).toEqual({
+        id: 'community-a',
+        creator_id: 'user-a',
+        name: 'gardening',
+        description: 'Growing plants, fixed',
+        created_at: '2026-10-20T12:00:00.000Z',
+      });
+      expect(gardening().name).toBe('gardening');
+      expect(logEntries).toEqual([
+        {
+          community_id: 'community-a',
+          actor_id: 'user-a',
+          action: 'community_updated',
+          target_type: 'community',
+          target_id: 'community-a',
+          metadata: '{"fields":"description"}',
+        },
+      ]);
+      expect(transactions.committed).toBe(1);
+    });
+
+    it('stores a whitespace-only description as NULL', async () => {
+      const response = await send(
+        'patch',
+        '/communities/gardening',
+        'creator-token',
+        { description: ' \n\t ' },
+      ).expect(200);
+
+      expect(
+        (response.body as { description: string | null }).description,
+      ).toBeNull();
+      expect(gardening().description).toBeNull();
+    });
+
+    it.each([
+      [{}],
+      [{ name: 'renamed' }],
+      [{ description: 'ok', name: 'renamed' }],
+      [{ rules: 'Be kind' }],
+      [{ description: 'ok', rules: [{ title: 'Be kind' }] }],
+      [{ description: 'ok', creator_id: 'user-b' }],
+      [{ description: 'ok', unknown: true }],
+      [{ description: 'x'.repeat(16384) }],
+      [{ description: 'bell\u0007' }],
+      [{ description: null }],
+    ])('rejects the edit %o with 400 and writes nothing', async (body) => {
+      await send(
+        'patch',
+        '/communities/gardening',
+        'creator-token',
+        body,
+      ).expect(400);
+      expect(writes()).toEqual([]);
+      expect(gardening()).toMatchObject({
+        name: 'gardening',
+        description: 'Growing plants',
+      });
+    });
+
+    it.each([
+      ['patch', { description: 'Hijacked' }],
+      ['delete', { name: 'gardening' }],
+    ] as const)(
+      '%s answers 401, 400, 404 and 403 in that order of precedence',
+      async (method, body) => {
+        await send(method, '/communities/gardening', undefined, body).expect(
+          401,
+        );
+        await send(
+          method,
+          '/communities/bad.name',
+          'creator-token',
+          body,
+        ).expect(400);
+        await send(
+          method,
+          '/communities/unknown',
+          'moderator-token',
+          method === 'delete' ? { name: 'unknown' } : body,
+        ).expect(404);
+        for (const token of ['moderator-token', 'other-token', 'valid-token']) {
+          const refused = await send(
+            method,
+            '/communities/gardening',
+            token,
+            body,
+          ).expect(403);
+          expect((refused.body as { message: string }).message).toMatch(
+            /Only the community creator/,
+          );
+        }
+
+        expect(writes()).toEqual([]);
+        expect(gardening().description).toBe('Growing plants');
+        expect(gardening().deleted_at).toBeUndefined();
+      },
+    );
+
+    it('soft-deletes for the creator with a matching confirmation and destroys nothing', async () => {
+      await send(
+        'post',
+        '/communities/gardening/subscribe',
+        'valid-token',
+      ).expect(204);
+      await send(
+        'put',
+        '/communities/gardening/notification-preferences',
+        'valid-token',
+        { new_posts: false },
+      ).expect(200);
+      rules.publish('community-a');
+      const subscriptionsBefore = new Set(subscriptions);
+      const preferencesBefore = new Map(preferences);
+      const documentsBefore = JSON.stringify(rules.documents);
+      const acceptancesBefore = JSON.stringify(rules.acceptances);
+      queryCalls = [];
+
+      await send('delete', '/communities/gardening', 'creator-token', {
+        name: 'gardening',
+      }).expect(204);
+
+      expect(gardening()).toMatchObject({
+        deleted_at: expect.any(Date),
+        deleted_by: 'user-a',
+      });
+      expect(logEntries).toEqual([
+        {
+          community_id: 'community-a',
+          actor_id: 'user-a',
+          action: 'community_deleted',
+          target_type: 'community',
+          target_id: 'community-a',
+          metadata: null,
+        },
+      ]);
+      expect(queryCalls.some(({ sql }) => /^\s*DELETE\b/i.test(sql))).toBe(
+        false,
+      );
+      expect(communities).toHaveLength(3);
+      expect(subscriptions).toEqual(subscriptionsBefore);
+      expect(preferences).toEqual(preferencesBefore);
+      expect(JSON.stringify(rules.documents)).toBe(documentsBefore);
+      expect(JSON.stringify(rules.acceptances)).toBe(acceptancesBefore);
+    });
+
+    it.each([
+      [{ name: 'garden' }],
+      [{ name: 'Gardening' }],
+      [{ name: ' gardening' }],
+      [{}],
+      [undefined],
+      [{ name: 'gardening', force: true }],
+    ])(
+      'refuses the confirmation %o with 400 and deletes nothing',
+      async (body) => {
+        await send(
+          'delete',
+          '/communities/gardening',
+          'creator-token',
+          body,
+        ).expect(400);
+        expect(writes()).toEqual([]);
+        expect(gardening().deleted_at).toBeUndefined();
+      },
+    );
+
+    it('answers 404 to deleting an already-deleted community', async () => {
+      await send('delete', '/communities/gardening', 'creator-token', {
+        name: 'gardening',
+      }).expect(204);
+      queryCalls = [];
+
+      await send('delete', '/communities/gardening', 'creator-token', {
+        name: 'gardening',
+      }).expect(404);
+      expect(writes()).toEqual([]);
+      expect(logEntries).toHaveLength(1);
+    });
+
+    it.each([
+      ['patch', { description: 'Changed' }],
+      ['delete', { name: 'gardening' }],
+    ] as const)(
+      'rolls the %s back when its log entry cannot be written',
+      async (method, body) => {
+        failLogInsert = true;
+
+        await send(
+          method,
+          '/communities/gardening',
+          'creator-token',
+          body,
+        ).expect(500);
+
+        expect(transactions).toEqual({ committed: 0, rolledBack: 1 });
+        expect(gardening()).toMatchObject({ description: 'Growing plants' });
+        expect(gardening().deleted_at).toBeUndefined();
+        expect(logEntries).toEqual([]);
+      },
+    );
+
+    it('hides a deleted community from every read and refuses every write to it', async () => {
+      await send(
+        'post',
+        '/communities/gardening/subscribe',
+        'valid-token',
+      ).expect(204);
+      await send(
+        'post',
+        '/communities/cooking/subscribe',
+        'valid-token',
+      ).expect(204);
+      rules.publish('community-a');
+      await send('delete', '/communities/gardening', 'creator-token', {
+        name: 'gardening',
+      }).expect(204);
+
+      const listed = await send('get', '/communities?limit=100').expect(200);
+      const listedBody = listed.body as {
+        items: { id: string }[];
+        total: number;
+      };
+      expect(listedBody.items.map((item) => item.id)).toEqual([
+        'community-b',
+        'community-c',
+      ]);
+      expect(listedBody.total).toBe(2);
+
+      const searched = await send('get', '/communities?search=garden').expect(
+        200,
+      );
+      expect(searched.body).toMatchObject({
+        total: 1,
+        items: [{ id: 'community-b' }],
+      });
+
+      const subscribed = await send(
+        'get',
+        '/subscriptions',
+        'valid-token',
+      ).expect(200);
+      expect(communityIds(subscribed.body)).toEqual(['community-c']);
+      expect((subscribed.body as SubscriptionPage).total).toBe(1);
+
+      const gone: Array<
+        [Parameters<typeof send>[0], string, string | undefined, object?]
+      > = [
+        ['get', '/communities/gardening', undefined],
+        [
+          'patch',
+          '/communities/gardening',
+          'creator-token',
+          { description: 'x' },
+        ],
+        [
+          'delete',
+          '/communities/gardening',
+          'creator-token',
+          { name: 'gardening' },
+        ],
+        ['get', '/communities/gardening/subscription', 'valid-token'],
+        ['post', '/communities/gardening/subscribe', 'valid-token'],
+        ['delete', '/communities/gardening/subscribe', 'valid-token'],
+        [
+          'get',
+          '/communities/gardening/notification-preferences',
+          'valid-token',
+        ],
+        [
+          'put',
+          '/communities/gardening/notification-preferences',
+          'valid-token',
+          { new_posts: true },
+        ],
+        [
+          'post',
+          '/communities/gardening/moderators',
+          'creator-token',
+          { username: 'member' },
+        ],
+        [
+          'delete',
+          '/communities/gardening/moderators',
+          'creator-token',
+          { username: 'member' },
+        ],
+        ['get', '/communities/gardening/rules', undefined],
+        [
+          'put',
+          '/communities/gardening/rules',
+          'creator-token',
+          { items: [{ title: 'Be kind' }] },
+        ],
+        ['get', '/communities/gardening/rules/versions', undefined],
+        ['get', '/communities/gardening/rules/versions/1', undefined],
+        ['get', '/communities/gardening/rules/acceptance', 'valid-token'],
+        [
+          'post',
+          '/communities/gardening/rules/acceptance',
+          'valid-token',
+          { version: 1 },
+        ],
+        ['get', '/communities/gardening/moderation-log', 'creator-token'],
+      ];
+      queryCalls = [];
+      for (const [method, path, token, body] of gone) {
+        const response = await send(method, path, token, body);
+        expect([method, path, response.status]).toEqual([method, path, 404]);
+      }
+      expect(writes()).toEqual([]);
+
+      // The name stays taken: names are never reused.
+      await send('post', '/communities', 'valid-token', {
+        name: 'gardening',
+      }).expect(409);
     });
   });
 });
