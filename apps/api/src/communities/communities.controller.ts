@@ -31,10 +31,12 @@ import {
   CommunityMemberListResponse,
   CommunityModeratorListResponse,
   CommunityResponse,
+  CommunityStatsResponse,
   NotificationPreferencesResponse,
   SubscriptionStatusResponse,
 } from './communities.responses';
 import { CommunitiesService } from './communities.service';
+import { CommunityStatsService } from './community-stats.service';
 import { NotificationPreferencesService } from './notification-preferences.service';
 import { CreateCommunityDto } from './dto/create-community.dto';
 import { DeleteCommunityDto } from './dto/delete-community.dto';
@@ -44,6 +46,7 @@ import { ListCommunityModeratorsDto } from './dto/list-community-moderators.dto'
 import { ManageModeratorDto } from './dto/manage-moderator.dto';
 import { UpdateCommunityDto } from './dto/update-community.dto';
 import { UpdateNotificationPreferencesDto } from './dto/update-notification-preferences.dto';
+import { NoQueryParamsGuard } from '../common/no-query-params.guard';
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
 
 @ApiTags('communities')
@@ -52,6 +55,7 @@ export class CommunitiesController {
   constructor(
     private readonly communitiesService: CommunitiesService,
     private readonly notificationPreferencesService: NotificationPreferencesService,
+    private readonly communityStatsService: CommunityStatsService,
   ) {}
 
   @Get()
@@ -153,6 +157,29 @@ export class CommunitiesController {
     @Req() request: AuthenticatedRequest,
   ): Promise<void> {
     return this.communitiesService.remove(name, body.name, request.user.id);
+  }
+
+  // Public: the figures a community advertises about itself. No time range:
+  // an open range would make a public route an arbitrary aggregation service
+  // over the whole content history; /admin/analytics is where ranges live.
+  @Get(':name/stats')
+  @UseGuards(NoQueryParamsGuard)
+  @ApiOperation({
+    summary: 'Get community statistics',
+    description:
+      'Public. Point-in-time counts plus fixed 7-day activity windows on ' +
+      'the database clock; takes no query parameters. Counts only.',
+  })
+  @ApiRouteParam('name', 'communityName', 'Exact community name.')
+  @ApiOkResponse({ type: CommunityStatsResponse })
+  @ApiErrorResponses({
+    400: 'Invalid community name, or any query parameter.',
+    404: 'Community not found.',
+  })
+  getStats(
+    @Param('name', new SafeRouteParamPipe('communityName')) name: string,
+  ) {
+    return this.communityStatsService.get(name);
   }
 
   @Post(':name/subscribe')

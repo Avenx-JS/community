@@ -8,6 +8,7 @@ import { CommunityModerationLogService } from './community-moderation-log.servic
 import { CommunityRuleAcceptanceService } from './community-rule-acceptance.service';
 import { CommunityRulesController } from './community-rules.controller';
 import { CommunityRulesService } from './community-rules.service';
+import { CommunityStatsService } from './community-stats.service';
 import { NotificationPreferencesService } from './notification-preferences.service';
 import { SubscriptionsController } from './subscriptions.controller';
 
@@ -18,6 +19,7 @@ import { SubscriptionsController } from './subscriptions.controller';
     CommunityModerationLogService,
     CommunityRuleAcceptanceService,
     CommunityRulesService,
+    CommunityStatsService,
     NotificationPreferencesService,
   ],
   controllers: [

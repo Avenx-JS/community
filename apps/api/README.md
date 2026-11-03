@@ -1898,6 +1898,94 @@ also subscribed. The routes report membership only and say nothing about
 notification delivery. Like every other route except `GET /health`, both count
 against the API read rate limits.
 
+### Community statistics
+
+`GET /communities/:name/stats` is **public**: these are the figures a
+community advertises about itself, `GET /communities/:name` is already
+public, and gating them would leave a prospective member unable to tell an
+active community from a dead one. An unknown or deleted community returns
+`404`, an invalid name `400`.
+
+```json
+{
+  "member_count": 1280,
+  "moderator_count": 3,
+  "post_count": 4120,
+  "comment_count": 19873,
+  "created_at": "2026-01-14T09:12:00.000Z",
+  "last_post_at": "2026-10-31T18:04:11.000Z",
+  "posts_last_7_days": 86,
+  "comments_last_7_days": 412
+}
+```
+
+| Field                  | Definition                                                                                                                 |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `member_count`         | Subscription rows of live accounts. Equals the `total` of `GET /communities/:name/members`.                                |
+| `moderator_count`      | Appointed moderators with live accounts, excluding the creator. Equals the `total` of `GET /communities/:name/moderators`. |
+| `post_count`           | Posts in the community.                                                                                                    |
+| `comment_count`        | Comments, including replies, on the community's posts.                                                                     |
+| `created_at`           | When the community was created.                                                                                            |
+| `last_post_at`         | The newest post's `created_at`; `null`, never omitted, when there are no posts.                                            |
+| `posts_last_7_days`    | Posts with `created_at` in the last 7 days on the database clock.                                                          |
+| `comments_last_7_days` | Comments with `created_at` in the last 7 days on the database clock.                                                       |
+
+An empty community returns zeros and `last_post_at: null`, not `404`. The
+response carries counts only: no ids, usernames or per-row data.
+
+**The creator rule.** The creator is an implicit member but may have no
+subscription row. `member_count` counts subscription rows, so the creator
+counts only if subscribed; this keeps it equal to the member list instead of
+off by one in a way nobody can explain. Likewise the creator is never counted
+as a moderator, even if they appointed themselves. Both counts share their
+SQL with the lists (`MEMBERS_JOIN`, `MEMBERS_WHERE`, `MODERATORS_FROM` in
+`communities.service.ts`), so they cannot drift apart.
+
+**No time range.** The route takes no query parameters at all; any parameter
+returns `400`. `/admin/analytics` accepts arbitrary ranges because an
+administrator investigating an incident needs them; on a public summary an
+open range would turn the route into an arbitrary aggregation service over the
+whole content history. The two windows are fixed at 7 days in the server and
+computed in SQL from `UTC_TIMESTAMP()`, converted to the session time zone
+(`CONVERT_TZ(DATE_SUB(UTC_TIMESTAMP(), INTERVAL 7 DAY), '+00:00',
+@@session.time_zone)`), never from the application clock. A configurable
+window, if wanted, should be a small enum such as `7` or `30`, not a range.
+
+**Forward requirement.** `post_count`, `comment_count` and the windows count
+every stored row. Once posts and comments can be hidden by moderation
+(`removed_at`, migration `017`, not yet read by any route), these counts must
+exclude removed content in the same change, or they will silently include it.
+
+**Query plan.** The community is resolved once by name; every aggregate is
+bound to its id, and the name never reaches an aggregate query. Four
+statements then run concurrently (`CommunityStatsService`), each served by an
+index:
+
+| Figures                                           | Statement                     | Index                                                                                   |
+| ------------------------------------------------- | ----------------------------- | --------------------------------------------------------------------------------------- |
+| `member_count`                                    | subscriptions joined to users | `idx_community_subscriptions_community_created` (migration `024`), users by primary key |
+| `moderator_count`                                 | moderators joined to users    | `community_moderators` primary key `(community_id, user_id)`                            |
+| `post_count`, `last_post_at`, `posts_last_7_days` | one statement over posts      | `idx_posts_community_created`, index-only                                               |
+| `comment_count`, `comments_last_7_days`           | posts joined to comments      | `idx_posts_community_created`, then `idx_comments_post_created` per post                |
+
+`comments` has no community column, so the comment figures join through
+the community's posts: one index range per post, bounded by the post count.
+The escalation, if that join becomes a problem, is to denormalise
+`comments.community_id`, making the count a single index read. That needs a
+migration, a backfill and an insert-path change, so it is a separate issue to
+take only after measuring; it is deliberately not done here.
+`community-stats.mysql.spec.ts` asserts each plan on a seeded database.
+
+**No caching.** Each statement is index-served, the global read bucket bounds
+abuse, and a cache would need an invalidation story nothing else in this
+project has. A short-TTL cache is the obvious next step if the route becomes
+hot.
+
+**Rate limits.** The route uses the global read buckets (120 `GET` per IP
+per minute within the shared 300). It costs more than a row read, so it is the
+first candidate for an explicit, documented rate-limit override if traffic
+warrants one; it must never be exempted.
+
 ### Editing and deleting a community
 
 Both routes require a bearer token and are **creator only**: the community's
@@ -1974,6 +2062,8 @@ of these behaves as if the community did not exist:
 | `GET` and `PUT .../rules`, `GET .../rules/versions`, `GET .../rules/versions/:version` | `404`                                      |
 | `GET` and `POST .../rules/acceptance`                                                  | `404`                                      |
 | `GET .../moderation-log`                                                               | `404`                                      |
+| `GET .../moderators`, `GET .../members`                                                | `404`                                      |
+| `GET .../stats`                                                                        | `404`                                      |
 | `POST /posts` into it                                                                  | `404` (`Community not found`)              |
 | `GET /posts` (with or without `community_id`)                                          | its posts omitted from `items` and `total` |
 | `GET /posts/:id`, `DELETE /posts/:id`                                                  | `404` for its posts                        |

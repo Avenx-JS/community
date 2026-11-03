@@ -84,6 +84,19 @@ export interface SubscriptionStatusDto {
   subscribed_at: string | null;
 }
 
+// Who counts as a moderator or member. Shared by the moderator and member
+// lists and by CommunityStatsService, so the stats counts always equal the
+// lists' totals. Moderators: bind (community_id, creator_id); the creator is
+// reported separately, never as an appointed moderator. Members: bind
+// (community_id); subscription rows, so the creator counts only if
+// subscribed. Deleted accounts are excluded from both.
+export const MODERATORS_FROM = `FROM community_moderators m
+       JOIN users u ON u.id = m.user_id
+       WHERE m.community_id = ? AND m.user_id <> ? AND u.deleted_at IS NULL`;
+export const MEMBERS_JOIN = `FROM community_subscriptions s
+       JOIN users u ON u.id = s.user_id`;
+export const MEMBERS_WHERE = 's.community_id = ? AND u.deleted_at IS NULL';
+
 // Public people lists expose usernames and display names only: never ids,
 // email addresses, last_seen_at or users.role. The SELECT lists below are the
 // boundary; the mappers copy named fields so a wider SELECT cannot leak.
@@ -383,9 +396,7 @@ export class CommunitiesService {
       throw new NotFoundException('Community not found');
     }
 
-    const from = `FROM community_moderators m
-       JOIN users u ON u.id = m.user_id
-       WHERE m.community_id = ? AND m.user_id <> ? AND u.deleted_at IS NULL`;
+    const from = MODERATORS_FROM;
     const values = [community.id, community.creator_id];
     const [moderators] = await this.pool.execute<ModeratorRow[]>(
       `SELECT u.username, u.display_name, m.created_at AS since
@@ -454,7 +465,7 @@ export class CommunitiesService {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
     const offset = (page - 1) * limit;
-    let where = 's.community_id = ? AND u.deleted_at IS NULL';
+    let where = MEMBERS_WHERE;
     const values: string[] = [community.id];
     const search = query.search?.trim();
     if (search) {
@@ -468,8 +479,7 @@ export class CommunitiesService {
     const [members] = await this.pool.execute<MemberRow[]>(
       `SELECT u.username, u.display_name, s.created_at AS subscribed_at,
          m.user_id IS NOT NULL AS is_moderator
-       FROM community_subscriptions s
-       JOIN users u ON u.id = s.user_id
+       ${MEMBERS_JOIN}
        LEFT JOIN community_moderators m
          ON m.community_id = s.community_id AND m.user_id = s.user_id
        WHERE ${where}
@@ -478,13 +488,7 @@ export class CommunitiesService {
     );
     const [countRows] = await this.pool.execute<
       (RowDataPacket & { total: number | string })[]
-    >(
-      `SELECT COUNT(*) AS total
-       FROM community_subscriptions s
-       JOIN users u ON u.id = s.user_id
-       WHERE ${where}`,
-      values,
-    );
+    >(`SELECT COUNT(*) AS total ${MEMBERS_JOIN} WHERE ${where}`, values);
 
     return {
       items: members.map((member) => ({

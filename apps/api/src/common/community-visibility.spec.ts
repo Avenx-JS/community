@@ -6,6 +6,7 @@ import { CommunitiesService } from '../communities/communities.service';
 import { CommunityModerationLogService } from '../communities/community-moderation-log.service';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { CommunityRulesService } from '../communities/community-rules.service';
+import { CommunityStatsService } from '../communities/community-stats.service';
 import { ListCommunityModerationActionsDto } from '../communities/dto/list-community-moderation-actions.dto';
 import { NotificationPreferencesService } from '../communities/notification-preferences.service';
 import type { NotificationsService } from '../notifications/notifications.service';
@@ -63,6 +64,7 @@ function services(pool: Pool) {
     posts: new PostsService(pool, notifications, ruleAcceptance),
     comments: new CommentsService(pool, notifications, ruleAcceptance),
     votes: new VotesService(pool, ruleAcceptance),
+    stats: new CommunityStatsService(pool),
   };
 }
 
@@ -148,6 +150,7 @@ const lookups: Array<
     (s) => s.communities.listModerators('gone', { page: 1, limit: 20 }),
     BY_NAME,
   ],
+  ['GET /communities/:name/stats', (s) => s.stats.get('gone'), BY_NAME],
   [
     'GET /communities/:name/members',
     (s) =>

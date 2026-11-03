@@ -26,6 +26,7 @@ import {
   type CommunityModerationActionList,
   type CommunityModerationTarget,
 } from './community-moderation-log.service';
+import type { CommunityStatsDto } from './community-stats.service';
 import type { NotificationPreferencesDto } from './notification-preferences.service';
 
 export class CommunityResponse implements CommunityDto {
@@ -339,4 +340,54 @@ export class CommunityMemberListResponse implements CommunityMemberListDto {
 
   @ApiProperty({ type: 'integer' })
   total!: number;
+}
+
+export class CommunityStatsResponse implements CommunityStatsDto {
+  @ApiProperty({
+    type: 'integer',
+    description:
+      'Subscription rows of live accounts; equals the member list total. ' +
+      'The creator counts only if subscribed.',
+  })
+  member_count!: number;
+
+  @ApiProperty({
+    type: 'integer',
+    description:
+      'Appointed moderators of live accounts, excluding the creator; equals ' +
+      'the moderator list total.',
+  })
+  moderator_count!: number;
+
+  @ApiProperty({ type: 'integer' })
+  post_count!: number;
+
+  @ApiProperty({
+    type: 'integer',
+    description: "Comments, including replies, on the community's posts.",
+  })
+  comment_count!: number;
+
+  @ApiProperty({ format: 'date-time' })
+  created_at!: string;
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description: 'Newest post; null when the community has none.',
+  })
+  last_post_at!: string | null;
+
+  @ApiProperty({
+    type: 'integer',
+    description: 'Posts created in the last 7 days on the database clock.',
+  })
+  posts_last_7_days!: number;
+
+  @ApiProperty({
+    type: 'integer',
+    description: 'Comments created in the last 7 days on the database clock.',
+  })
+  comments_last_7_days!: number;
 }
