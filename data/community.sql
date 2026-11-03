@@ -131,6 +131,41 @@ CREATE TABLE community_rule_acceptances (
     FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE
 );
 
+CREATE TABLE community_moderation_actions (
+    id VARCHAR(36) PRIMARY KEY,
+    community_id VARCHAR(36) NOT NULL,
+    actor_id VARCHAR(36) NULL,
+    actor_username VARCHAR(50) NOT NULL,
+    action ENUM(
+        'post_locked',
+        'post_unlocked',
+        'post_removed',
+        'post_restored',
+        'post_pinned',
+        'post_unpinned',
+        'comment_locked',
+        'comment_unlocked',
+        'comment_removed',
+        'comment_restored',
+        'member_banned',
+        'member_unbanned',
+        'member_removed',
+        'moderator_added',
+        'moderator_removed',
+        'rules_published'
+    ) NOT NULL,
+    target_type ENUM('post', 'comment', 'user', 'rule_document') NOT NULL,
+    target_id VARCHAR(36) NOT NULL,
+    metadata JSON NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_community_moderation_actions_community (community_id, created_at, id),
+    INDEX idx_community_moderation_actions_actor (community_id, actor_username, created_at),
+    INDEX idx_community_moderation_actions_action (community_id, action, created_at),
+    INDEX idx_community_moderation_actions_target (target_type, target_id, created_at),
+    FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE,
+    FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
 CREATE TABLE posts (
     id VARCHAR(36) PRIMARY KEY,
     title VARCHAR(300) NOT NULL,
@@ -344,4 +379,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('017_add_post_and_comment_content_state'),
     ('018_add_content_listing_indexes'),
     ('019_add_user_profile_fields'),
-    ('020_add_user_account_deletion');
+    ('020_add_user_account_deletion'),
+    ('021_create_community_moderation_actions');

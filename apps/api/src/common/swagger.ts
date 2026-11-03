@@ -56,6 +56,11 @@ export function createOpenApiDocument(app: INestApplication): OpenAPIObject {
     .addTag('admin: reports', 'Report review queue.')
     .addTag('admin: restrictions', 'Suspensions and bans.')
     .addTag('admin: audit log', 'Append-only record of administrative actions.')
+    .addTag(
+      'community-moderation',
+      "Per-community record of moderator actions, for the community's " +
+        'creator and moderators.',
+    )
     .addTag('admin: analytics', 'Aggregate platform metrics.')
     .addBearerAuth({
       type: 'http',

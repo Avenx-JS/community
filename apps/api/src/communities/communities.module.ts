@@ -3,6 +3,8 @@ import { AuthModule } from '../auth/auth.module';
 import { DatabaseModule } from '../database/database.module';
 import { CommunitiesService } from './communities.service';
 import { CommunitiesController } from './communities.controller';
+import { CommunityModerationLogController } from './community-moderation-log.controller';
+import { CommunityModerationLogService } from './community-moderation-log.service';
 import { CommunityRuleAcceptanceService } from './community-rule-acceptance.service';
 import { CommunityRulesController } from './community-rules.controller';
 import { CommunityRulesService } from './community-rules.service';
@@ -13,15 +15,21 @@ import { SubscriptionsController } from './subscriptions.controller';
   imports: [AuthModule, DatabaseModule],
   providers: [
     CommunitiesService,
+    CommunityModerationLogService,
     CommunityRuleAcceptanceService,
     CommunityRulesService,
     NotificationPreferencesService,
   ],
   controllers: [
     CommunitiesController,
+    CommunityModerationLogController,
     CommunityRulesController,
     SubscriptionsController,
   ],
-  exports: [CommunitiesService, CommunityRuleAcceptanceService],
+  exports: [
+    CommunitiesService,
+    CommunityModerationLogService,
+    CommunityRuleAcceptanceService,
+  ],
 })
 export class CommunitiesModule {}

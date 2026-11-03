@@ -13,6 +13,14 @@ import type {
   CommunityRuleVersionListDto,
   RuleAcceptanceDto,
 } from './community-rules.service';
+import {
+  COMMUNITY_MODERATION_ACTIONS,
+  COMMUNITY_MODERATION_TARGETS,
+  type CommunityModerationAction,
+  type CommunityModerationActionItem,
+  type CommunityModerationActionList,
+  type CommunityModerationTarget,
+} from './community-moderation-log.service';
 import type { NotificationPreferencesDto } from './notification-preferences.service';
 
 export class CommunityResponse implements CommunityDto {
@@ -188,4 +196,51 @@ export class CommunityRuleAcceptanceResponse implements RuleAcceptanceDto {
     description: 'True until you accept the current version.',
   })
   acceptance_required!: boolean;
+}
+
+export class CommunityModerationActionResponse implements CommunityModerationActionItem {
+  @ApiProperty()
+  id!: string;
+
+  @ApiProperty({ enum: COMMUNITY_MODERATION_ACTIONS })
+  action!: CommunityModerationAction;
+
+  @ApiProperty({
+    description: 'Snapshot kept after the actor account is deleted.',
+  })
+  actor_username!: string;
+
+  @ApiProperty({ enum: COMMUNITY_MODERATION_TARGETS })
+  target_type!: CommunityModerationTarget;
+
+  @ApiProperty({
+    description: 'Raw id; the target may no longer exist.',
+  })
+  target_id!: string;
+
+  @ApiProperty({
+    type: 'object',
+    additionalProperties: true,
+    nullable: true,
+    description:
+      'Allowlisted, action-specific details; never a post or comment body.',
+  })
+  metadata!: Record<string, unknown> | null;
+
+  @ApiProperty({ format: 'date-time' })
+  created_at!: string;
+}
+
+export class CommunityModerationActionListResponse implements CommunityModerationActionList {
+  @ApiProperty({ type: [CommunityModerationActionResponse] })
+  items!: CommunityModerationActionResponse[];
+
+  @ApiProperty({ type: 'integer' })
+  page!: number;
+
+  @ApiProperty({ type: 'integer' })
+  limit!: number;
+
+  @ApiProperty({ type: 'integer' })
+  total!: number;
 }

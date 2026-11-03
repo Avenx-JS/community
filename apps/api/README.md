@@ -1921,7 +1921,140 @@ A deletion by a moderator or creator notifies the author without naming who
 removed it (see [Moderation notifications](#moderation-notifications)).
 No edit, lock, ban, or other moderator-only operations are exposed by this API
 yet; future such routes must enforce the same server-side, community-scoped
-checks.
+checks, and record what they do in the
+[community moderation log](#community-moderation-log).
+
+#### Community moderation log
+
+`community_moderation_actions` (migration
+`021_create_community_moderation_actions`) is the append-only record of what a
+community's creator and moderators did in that community. Every row carries
+its `community_id`, and the row is deleted with its community.
+
+**Why not `admin_actions`.** The [administrative audit
+log](#administrative-action-audit-log) is platform-scoped: its action and
+target enums describe platform decisions, it has no community column, and its
+reader `GET /admin/audit-log` is administrator-only. A community moderator
+could not read their own log there, and widening that route would expose
+platform-wide enforcement to community moderators. The two logs are therefore
+separate tables with separate readers.
+
+**Actions.** The `action` enum is the complete set of planned community
+moderator actions, including those whose endpoints do not exist yet:
+
+| Action                                                    | Target          | Allowed metadata                   |
+| --------------------------------------------------------- | --------------- | ---------------------------------- |
+| `post_locked`, `post_unlocked`, `post_restored`           | `post`          | none                               |
+| `post_pinned`, `post_unpinned`                            | `post`          | none                               |
+| `post_removed`                                            | `post`          | `reason`                           |
+| `comment_locked`, `comment_unlocked`, `comment_restored`  | `comment`       | none                               |
+| `comment_removed`                                         | `comment`       | `reason`                           |
+| `member_banned`                                           | `user`          | `username`, `reason`, `expires_at` |
+| `member_removed`                                          | `user`          | `username`, `reason`               |
+| `member_unbanned`, `moderator_added`, `moderator_removed` | `user`          | `username`                         |
+| `rules_published`                                         | `rule_document` | `version`                          |
+
+Declaring them up front means the endpoint issues that add locking, pinning,
+removal, bans and member removal do not each need an `ALTER TABLE ... MODIFY
+COLUMN` on the enum, which is the expensive kind of migration.
+`rules_published` covers the existing `PUT /communities/:name/rules`, and
+`moderator_added`/`moderator_removed` the existing moderator routes; none of
+them writes an entry yet.
+
+**Writers are wired up by the endpoint issues.** Nothing writes to the log
+yet. Each moderation endpoint calls `CommunityModerationLogService.record` as
+part of its own work; the existing rules-publish and moderator-management
+routes are retrofitted separately. `record` has the same two overloads as
+`AuditLogService.record`: pass the caller's `PoolConnection` so the action and
+its entry commit or roll back together, or pass only the entry to have the
+service acquire and release its own connection. Passing an entry where a
+connection is expected, or the reverse, throws `TypeError`. A failure to write
+the entry must fail the action.
+
+**Username snapshot, no joins.** The service resolves the actor's username
+from `users` and stores it in `actor_username`; an actor that cannot be
+resolved throws and writes nothing. `actor_id` is `ON DELETE SET NULL`, and
+self-deletion anonymises the `users` row in place, so the snapshot is the only
+reliable record of who acted. `target_id` is polymorphic with no foreign key,
+because a removed post may later be hard-deleted and its entry must survive.
+Readers must therefore never join `users` or the target to render a row.
+
+**Metadata allowlist, no content.** `buildCommunityModerationMetadata` keeps
+only the keys in the table above, drops every other key, throws on a
+non-object or array value or an invalid allowlisted value, and stores `NULL`
+when nothing survives. `reason` is moderator-written plain text of at most
+2000 characters; `username` follows the username rules; `expires_at` is an
+ISO 8601 timestamp; `version` is a positive integer. No action allows a post
+or comment body, title or link: the log is a record of decisions, not a
+content archive. The allowlist is the disclosure boundary of the read route,
+which returns metadata exactly as stored.
+
+##### `GET /communities/:name/moderation-log`
+
+Bearer token required. Only the community creator and its moderators may read
+the log, checked with the shared `canModerateCommunitySql` predicate. `401`
+without a valid token, `404` for an unknown community (reported before any
+`403`), `403` for anyone else, and `400` for an invalid name.
+
+- **Not public.** The log names moderators next to the content they acted on,
+  which would make it a target list. Notifications to an affected author
+  already withhold the moderator's identity (see
+  [Moderation notifications](#moderation-notifications)); a public log would
+  undo that.
+- **No platform administrators.** A platform administrator who neither
+  created nor moderates the community gets `403`. `/admin` is a separate
+  surface, and nothing requires administrators to read community logs.
+
+| Parameter        | Rules                                                                |
+| ---------------- | -------------------------------------------------------------------- |
+| `action`         | one of the actions above (shared `COMMUNITY_MODERATION_ACTIONS`)     |
+| `actor_username` | 3–50 of `[A-Za-z0-9_]`; exact match on the stored username snapshot  |
+| `target_type`    | `post`, `comment`, `user`, or `rule_document`                        |
+| `from`, `to`     | ISO 8601; half-open UTC interval `from <= created_at < to`           |
+| `page`           | integer 1–10000, default 1                                           |
+| `limit`          | integer 1–100, default 20                                            |
+| `sort`           | `new` (default, `created_at DESC, id DESC`) or `oldest` (`ASC, ASC`) |
+
+Unknown parameters and invalid values return `400`. The `id` tiebreaker gives
+a total order, so paging returns each entry exactly once.
+
+```json
+{
+  "items": [
+    {
+      "id": "entry-id",
+      "action": "post_removed",
+      "actor_username": "moderator_name",
+      "target_type": "post",
+      "target_id": "post-id",
+      "metadata": { "reason": "Spam" },
+      "created_at": "2026-10-28T10:00:00.000Z"
+    }
+  ],
+  "page": 1,
+  "limit": 20,
+  "total": 1
+}
+```
+
+`actor_username` is never `null`, even for a deleted actor. Items do not
+include `actor_id`. An entry whose target no longer exists is still listed
+with its raw `target_id`.
+
+Every index starts with `community_id` except the target index, which serves
+lookups of one target's history:
+
+| Filter present            | Index                                                                                                    |
+| ------------------------- | -------------------------------------------------------------------------------------------------------- |
+| none, or only `from`/`to` | `idx_community_moderation_actions_community` (`community_id, created_at, id`)                            |
+| `actor_username`          | `idx_community_moderation_actions_actor` (`community_id, actor_username, created_at`)                    |
+| `action`                  | `idx_community_moderation_actions_action` (`community_id, action, created_at`)                           |
+| `target_type`             | the community index; `idx_community_moderation_actions_target` is `(target_type, target_id, created_at)` |
+
+The actor index is on the username snapshot rather than `actor_id`, because
+that is what the filter matches; `admin_actions` needed migration `006` to
+correct the same mismatch. MySQL adds its own index on `actor_id` for the
+foreign key. Reads of the log are not themselves logged.
 
 ### Community notification preferences
 
