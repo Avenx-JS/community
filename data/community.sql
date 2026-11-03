@@ -76,6 +76,8 @@ CREATE TABLE community_subscriptions (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE
 );
+CREATE INDEX idx_community_subscriptions_community_created
+  ON community_subscriptions (community_id, created_at, user_id);
 
 CREATE TABLE community_moderators (
     community_id VARCHAR(36) NOT NULL,
@@ -389,4 +391,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('020_add_user_account_deletion'),
     ('021_create_community_moderation_actions'),
     ('022_add_community_deletion'),
-    ('023_add_community_moderation_community_actions');
+    ('023_add_community_moderation_community_actions'),
+    ('024_add_community_subscriptions_community_index');

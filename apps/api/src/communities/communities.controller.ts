@@ -28,6 +28,8 @@ import {
 } from '../common/openapi';
 import {
   CommunityListResponse,
+  CommunityMemberListResponse,
+  CommunityModeratorListResponse,
   CommunityResponse,
   NotificationPreferencesResponse,
   SubscriptionStatusResponse,
@@ -37,6 +39,8 @@ import { NotificationPreferencesService } from './notification-preferences.servi
 import { CreateCommunityDto } from './dto/create-community.dto';
 import { DeleteCommunityDto } from './dto/delete-community.dto';
 import { ListCommunitiesDto } from './dto/list-communities.dto';
+import { ListCommunityMembersDto } from './dto/list-community-members.dto';
+import { ListCommunityModeratorsDto } from './dto/list-community-moderators.dto';
 import { ManageModeratorDto } from './dto/manage-moderator.dto';
 import { UpdateCommunityDto } from './dto/update-community.dto';
 import { UpdateNotificationPreferencesDto } from './dto/update-notification-preferences.dto';
@@ -263,6 +267,60 @@ export class CommunitiesController {
     @Req() request: AuthenticatedRequest,
   ): Promise<void> {
     return this.communitiesService.unsubscribe(name, request.user.id);
+  }
+
+  // Public governance information: who removed a post, whom to ask. A public
+  // list is also a target list, but an unnameable moderator is worse, and
+  // their actions are attributable through the moderation log.
+  @Get(':name/moderators')
+  @ApiOperation({
+    summary: 'List the people who run a community',
+    description:
+      'Public. The creator is a separate top-level object on every page; ' +
+      'items, total and paging cover appointed moderators only, oldest ' +
+      'appointment first. Deleted accounts are omitted.',
+  })
+  @ApiRouteParam('name', 'communityName', 'Exact community name.')
+  @ApiOkResponse({ type: CommunityModeratorListResponse })
+  @ApiErrorResponses({
+    400: 'Invalid community name or query parameters.',
+    404: 'Community not found.',
+  })
+  listModerators(
+    @Param('name', new SafeRouteParamPipe('communityName')) name: string,
+    @Query() query: ListCommunityModeratorsDto,
+  ) {
+    return this.communitiesService.listModerators(name, query);
+  }
+
+  // A roster is a bulk extract of who belongs where, so only the people who
+  // moderate the community may read it. The global read rate limits apply;
+  // with limit capped at 100 no dedicated bucket is needed.
+  @Get(':name/members')
+  @UseGuards(AuthGuard)
+  @ApiOperation({
+    summary: 'List the members of a community',
+    description:
+      'Only the community creator and its moderators; platform ' +
+      'administrators are not granted access. Lists subscriptions, newest ' +
+      'first by default. An unknown community answers 404 before any 403.',
+  })
+  @ApiAuthenticated({
+    forbidden:
+      'Only the community creator or a moderator may list its members.',
+  })
+  @ApiRouteParam('name', 'communityName', 'Exact community name.')
+  @ApiOkResponse({ type: CommunityMemberListResponse })
+  @ApiErrorResponses({
+    400: 'Invalid community name or query parameters.',
+    404: 'Community not found.',
+  })
+  listMembers(
+    @Param('name', new SafeRouteParamPipe('communityName')) name: string,
+    @Query() query: ListCommunityMembersDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.communitiesService.listMembers(name, request.user.id, query);
   }
 
   @Post(':name/moderators')

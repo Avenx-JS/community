@@ -121,7 +121,7 @@ describe('community_moderation_actions in the snapshot', () => {
   it('records 021 through 023 in order', () => {
     expect(normalise(snapshot)).toContain(
       "('020_add_user_account_deletion'), ('021_create_community_moderation_actions'), " +
-        "('022_add_community_deletion'), ('023_add_community_moderation_community_actions');",
+        "('022_add_community_deletion'), ('023_add_community_moderation_community_actions')",
     );
   });
 });

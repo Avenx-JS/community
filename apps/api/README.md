@@ -2032,6 +2032,98 @@ yet; future such routes must enforce the same server-side, community-scoped
 checks, and record what they do in the
 [community moderation log](#community-moderation-log).
 
+#### Moderator and member lists
+
+Both lists name people by `username` and `display_name` only. Neither
+returns a user id, email address, `last_seen_at`, password hash or
+`users.role`: usernames are the public identifier everywhere else in this
+API (moderator management, report submission, the audit logs), and ids are
+internal. A deleted community answers `404` on both.
+
+**`GET /communities/:name/moderators` is public.** Who moderates a community
+is governance information: it answers "who removed my post" and "whom do I
+ask", and `GET /communities/:name` is already public. A public list is also
+a target list; that argument loses because an unnameable, unaccountable
+moderator is worse, and moderator actions are already attributable through
+the [community moderation log](#community-moderation-log) to the people who
+can read it.
+
+```json
+{
+  "creator": {
+    "username": "gardener",
+    "display_name": "Head Gardener",
+    "role": "creator",
+    "since": "2026-10-20T12:00:00.000Z"
+  },
+  "items": [
+    {
+      "username": "mod_mia",
+      "display_name": null,
+      "role": "moderator",
+      "since": "2026-10-22T08:00:00.000Z"
+    }
+  ],
+  "page": 1,
+  "limit": 20,
+  "total": 1
+}
+```
+
+The response deviates from the plain envelope with a top-level `creator`.
+The creator holds every moderator power, so omitting them would make the list
+wrong in the way that matters most, but they come from `communities`, not
+`community_moderators`. Making them the first item would shift every page by
+one and need a `UNION ALL` and a corrected `total`; a separate object
+sidesteps that. `creator` is therefore returned on every page, and `items`,
+`total` and paging cover appointed moderators only, excluding the creator
+even if they also appointed themselves. `since` is the appointment time for a
+moderator and the community's creation time for the creator. Moderators are
+ordered by appointment, oldest first (`created_at ASC, user_id ASC`).
+`page` is 1-10000 and `limit` 1-100 (default 20); anything else is `400`.
+
+**`GET /communities/:name/members` is for the community's moderators.** A
+bearer token is required, and only the community creator and its moderators
+may read it (the shared `canModerateCommunitySql` predicate). Anyone else,
+including subscribed members and platform administrators, gets `403`; an
+unknown community gets `404` before any `403`. A full roster is a bulk
+extract of who belongs where, so it is a moderation tool, not a social
+feature: making it public or members-only was rejected for the same reason
+#15 minimised PII in responses. A public member count, if wanted, belongs on
+a stats endpoint. `/admin` remains the administrators' surface.
+
+| Parameter | Rules                                                                                       |
+| --------- | ------------------------------------------------------------------------------------------- |
+| `search`  | up to 50 characters, plain text; case-insensitive username substring; `%`, `_`, `=` literal |
+| `page`    | integer 1-10000, default 1                                                                  |
+| `limit`   | integer 1-100, default 20                                                                   |
+| `sort`    | `new` (default, `created_at DESC, user_id DESC`) or `oldest` (`ASC, ASC`)                   |
+
+Each item is `{ username, display_name, subscribed_at, is_moderator }`, using
+the standard `{ items, page, limit, total }` envelope. `is_moderator` comes
+from a join to `community_moderators`, so a moderator sees roles without a
+second request. The list is of subscriptions: the creator, an implicit member,
+appears only if they also subscribed.
+
+**Deleted accounts are omitted from both lists**, rather than shown under
+their placeholder username. A deleted account can no longer act, account
+deletion already removes its subscriptions, and its moderator row is kept
+only as history; the moderation log keeps its username snapshot.
+
+**Index.** `community_subscriptions` has the primary key
+`(user_id, community_id)`, which cannot serve a `community_id` filter.
+Migration `024_add_community_subscriptions_community_index` adds
+`idx_community_subscriptions_community_created (community_id, created_at,
+user_id)`, so the member listing is read in index order without a filesort.
+The community-post notification fan-out reads subscriptions in the same
+direction and benefits too. The moderator list sorts the few rows of one
+community in memory; `community_moderators`' primary key
+`(community_id, user_id)` already narrows it to the community.
+
+**Rate limits.** Both routes use the global read buckets. The member list is a
+bulk read behind a moderator check, and `limit` is capped at 100, so no
+dedicated bucket was added.
+
 #### Community moderation log
 
 `community_moderation_actions` (migration

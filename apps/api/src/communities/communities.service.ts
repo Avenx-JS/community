@@ -14,6 +14,10 @@ import type {
   RowDataPacket,
 } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import {
+  canModerateCommunitySql,
+  isSqlTrue,
+} from '../common/community-moderation';
 import { escapeLikeSearch } from '../common/like-search';
 import {
   CommunityModerationLogService,
@@ -22,6 +26,8 @@ import {
 import { CommunityRuleAcceptanceService } from './community-rule-acceptance.service';
 import { CreateCommunityDto } from './dto/create-community.dto';
 import { ListCommunitiesDto } from './dto/list-communities.dto';
+import { ListCommunityMembersDto } from './dto/list-community-members.dto';
+import { ListCommunityModeratorsDto } from './dto/list-community-moderators.dto';
 import { ListSubscriptionsDto } from './dto/list-subscriptions.dto';
 import { UpdateCommunityDto } from './dto/update-community.dto';
 
@@ -76,6 +82,66 @@ export interface SubscriptionListDto {
 export interface SubscriptionStatusDto {
   subscribed: boolean;
   subscribed_at: string | null;
+}
+
+// Public people lists expose usernames and display names only: never ids,
+// email addresses, last_seen_at or users.role. The SELECT lists below are the
+// boundary; the mappers copy named fields so a wider SELECT cannot leak.
+interface PersonRow extends RowDataPacket {
+  username: string;
+  display_name: string | null;
+}
+
+interface CreatorRow extends PersonRow {
+  id: string;
+  created_at: Date | string;
+  creator_id: string;
+  creator_deleted_at: Date | string | null;
+}
+
+interface ModeratorRow extends PersonRow {
+  since: Date | string;
+}
+
+interface MemberRow extends PersonRow {
+  subscribed_at: Date | string;
+  is_moderator: number | string | boolean;
+}
+
+export interface CommunityModeratorDto {
+  username: string;
+  display_name: string | null;
+  role: 'moderator';
+  since: string;
+}
+
+export interface CommunityCreatorDto {
+  username: string;
+  display_name: string | null;
+  role: 'creator';
+  since: string;
+}
+
+export interface CommunityModeratorListDto {
+  creator: CommunityCreatorDto | null;
+  items: CommunityModeratorDto[];
+  page: number;
+  limit: number;
+  total: number;
+}
+
+export interface CommunityMemberDto {
+  username: string;
+  display_name: string | null;
+  subscribed_at: string;
+  is_moderator: boolean;
+}
+
+export interface CommunityMemberListDto {
+  items: CommunityMemberDto[];
+  page: number;
+  limit: number;
+  total: number;
 }
 
 @Injectable()
@@ -288,6 +354,149 @@ export class CommunitiesService {
       'DELETE FROM community_moderators WHERE community_id = ? AND user_id = (SELECT id FROM users WHERE username = ? LIMIT 1)',
       [community.id, username],
     );
+  }
+
+  // Public. The creator is a separate top-level object, not the first item:
+  // it comes from another table, so putting it in the paginated list would
+  // shift every page by one and need a UNION and a count correction. items
+  // and total therefore cover appointed moderators only, and exclude the
+  // creator even if also appointed. Deleted accounts are left out: they can
+  // no longer act, and the moderation log keeps their username snapshot.
+  async listModerators(
+    name: string,
+    query: ListCommunityModeratorsDto,
+  ): Promise<CommunityModeratorListDto> {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+    const offset = (page - 1) * limit;
+
+    const [communities] = await this.pool.execute<CreatorRow[]>(
+      `SELECT c.id, c.created_at, c.creator_id,
+         u.username, u.display_name, u.deleted_at AS creator_deleted_at
+       FROM communities c
+       JOIN users u ON u.id = c.creator_id
+       WHERE c.name = ? AND c.deleted_at IS NULL LIMIT 1`,
+      [name],
+    );
+    const community = communities[0];
+    if (!community) {
+      throw new NotFoundException('Community not found');
+    }
+
+    const from = `FROM community_moderators m
+       JOIN users u ON u.id = m.user_id
+       WHERE m.community_id = ? AND m.user_id <> ? AND u.deleted_at IS NULL`;
+    const values = [community.id, community.creator_id];
+    const [moderators] = await this.pool.execute<ModeratorRow[]>(
+      `SELECT u.username, u.display_name, m.created_at AS since
+       ${from}
+       ORDER BY m.created_at ASC, m.user_id ASC LIMIT ? OFFSET ?`,
+      [...values, limit, offset],
+    );
+    const [countRows] = await this.pool.execute<
+      (RowDataPacket & { total: number | string })[]
+    >(`SELECT COUNT(*) AS total ${from}`, values);
+
+    return {
+      // An account cannot be deleted while it created a live community, so
+      // this is null only for data written outside the API.
+      creator:
+        community.creator_deleted_at === null
+          ? {
+              username: community.username,
+              display_name: community.display_name,
+              role: 'creator',
+              since: new Date(community.created_at).toISOString(),
+            }
+          : null,
+      items: moderators.map((moderator) => ({
+        username: moderator.username,
+        display_name: moderator.display_name,
+        role: 'moderator',
+        since: new Date(moderator.since).toISOString(),
+      })),
+      page,
+      limit,
+      total: Number(countRows[0]?.total ?? 0),
+    };
+  }
+
+  // The creator and the community's moderators only: a roster is a bulk
+  // extract of who belongs where, so it is a moderation tool, not a public
+  // list. Platform administrators get no access here. Lists subscriptions,
+  // so the creator appears only if subscribed.
+  async listMembers(
+    name: string,
+    userId: string,
+    query: ListCommunityMembersDto,
+  ): Promise<CommunityMemberListDto> {
+    const [communities] = await this.pool.execute<
+      (RowDataPacket & {
+        id: string;
+        can_moderate: number | string | boolean;
+      })[]
+    >(
+      `SELECT c.id, ${canModerateCommunitySql('c.id')} AS can_moderate
+       FROM communities c
+       WHERE c.name = ? AND c.deleted_at IS NULL LIMIT 1`,
+      [userId, userId, name],
+    );
+    const community = communities[0];
+    if (!community) {
+      throw new NotFoundException('Community not found');
+    }
+    if (!isSqlTrue(community.can_moderate)) {
+      throw new ForbiddenException(
+        'Only the community creator and moderators can list members',
+      );
+    }
+
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+    const offset = (page - 1) * limit;
+    let where = 's.community_id = ? AND u.deleted_at IS NULL';
+    const values: string[] = [community.id];
+    const search = query.search?.trim();
+    if (search) {
+      where += " AND LOWER(u.username) LIKE LOWER(?) ESCAPE '='";
+      values.push(`%${escapeLikeSearch(search)}%`);
+    }
+    // Served by idx_community_subscriptions_community_created (migration 024)
+    // in index order; user_id is the tiebreaker.
+    const order = query.sort === 'oldest' ? 'ASC' : 'DESC';
+
+    const [members] = await this.pool.execute<MemberRow[]>(
+      `SELECT u.username, u.display_name, s.created_at AS subscribed_at,
+         m.user_id IS NOT NULL AS is_moderator
+       FROM community_subscriptions s
+       JOIN users u ON u.id = s.user_id
+       LEFT JOIN community_moderators m
+         ON m.community_id = s.community_id AND m.user_id = s.user_id
+       WHERE ${where}
+       ORDER BY s.created_at ${order}, s.user_id ${order} LIMIT ? OFFSET ?`,
+      [...values, limit, offset],
+    );
+    const [countRows] = await this.pool.execute<
+      (RowDataPacket & { total: number | string })[]
+    >(
+      `SELECT COUNT(*) AS total
+       FROM community_subscriptions s
+       JOIN users u ON u.id = s.user_id
+       WHERE ${where}`,
+      values,
+    );
+
+    return {
+      items: members.map((member) => ({
+        username: member.username,
+        display_name: member.display_name,
+        subscribed_at: new Date(member.subscribed_at).toISOString(),
+        is_moderator: isSqlTrue(member.is_moderator),
+      })),
+      page,
+      limit,
+      total: Number(countRows[0]?.total ?? 0),
+    };
   }
 
   // Creator only. Edits a community's public identity, so moderators are

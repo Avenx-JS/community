@@ -144,6 +144,21 @@ const lookups: Array<
     BY_NAME,
   ],
   [
+    'GET /communities/:name/moderators',
+    (s) => s.communities.listModerators('gone', { page: 1, limit: 20 }),
+    BY_NAME,
+  ],
+  [
+    'GET /communities/:name/members',
+    (s) =>
+      s.communities.listMembers('gone', 'u', {
+        page: 1,
+        limit: 20,
+        sort: 'new',
+      }),
+    BY_NAME,
+  ],
+  [
     'GET /communities/:name/moderation-log',
     (s) =>
       s.moderationLog.findAll(

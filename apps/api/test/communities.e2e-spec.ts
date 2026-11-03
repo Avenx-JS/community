@@ -49,6 +49,8 @@ const tokenUsers: Record<string, string> = {
   // user-a created "gardening"; user-m moderates it.
   'creator-token': 'user-a',
   'moderator-token': 'user-m',
+  // A platform administrator with no role in any community.
+  'admin-token': 'platform-admin',
 };
 
 interface SubscriptionPage {
@@ -75,6 +77,17 @@ describe('Community endpoints (e2e)', () => {
   let logEntries: LogEntry[];
   let failLogInsert: boolean;
   let transactions: { committed: number; rolledBack: number };
+  let users: Record<
+    string,
+    {
+      username: string;
+      display_name?: string;
+      role?: string;
+      deleted_at?: Date;
+    }
+  >;
+  // community_moderators: "community:user" -> appointment time.
+  let moderators: Map<string, Date>;
 
   beforeEach(async () => {
     communities = [
@@ -117,6 +130,32 @@ describe('Community endpoints (e2e)', () => {
     logEntries = [];
     failLogInsert = false;
     transactions = { committed: 0, rolledBack: 0 };
+    users = {
+      'user-a': { username: 'gardener', display_name: 'Head Gardener' },
+      'user-b': { username: 'bob' },
+      'user-c': { username: 'cook' },
+      'user-m': { username: 'mod_mia', display_name: 'Mia' },
+      'authenticated-user': { username: 'plain_member' },
+      'platform-admin': { username: 'alice_ops', role: 'admin' },
+      'user-gone': {
+        username: 'deleted_user-gone',
+        deleted_at: new Date('2026-10-30T00:00:00.000Z'),
+      },
+      ...Object.fromEntries(
+        Array.from({ length: 20 }, (_, index) => {
+          const n = String(index + 1).padStart(2, '0');
+          return [`member-${n}`, { username: `member_${n}` }];
+        }),
+      ),
+    };
+    moderators = new Map([
+      // The creator appointed themselves; the list must not repeat them.
+      ['community-a:user-a', new Date('2026-10-01T00:00:00.000Z')],
+      ['community-a:user-gone', new Date('2026-10-01T12:00:00.000Z')],
+      // Same time: user_id orders member-01 before user-m.
+      ['community-a:user-m', new Date('2026-10-02T00:00:00.000Z')],
+      ['community-a:member-01', new Date('2026-10-02T00:00:00.000Z')],
+    ]);
 
     const isDeleted = (value: unknown) =>
       communities.some(
@@ -139,6 +178,11 @@ describe('Community endpoints (e2e)', () => {
           values.some(isDeleted)
         ) {
           return [[], []];
+        }
+
+        const people = peopleAnswer(sql, values);
+        if (people) {
+          return people;
         }
 
         const ruleAnswer = rules.handle(sql, values);
@@ -398,6 +442,131 @@ describe('Community endpoints (e2e)', () => {
       }),
     );
     await app.init();
+
+    // users rows as the people lists read them. Every row carries the
+    // private columns too, so the tests prove the API never maps them.
+    function userRow(id: string) {
+      const user = users[id];
+      return {
+        id,
+        user_id: id,
+        username: user.username,
+        display_name: user.display_name ?? null,
+        email: `${user.username}@example.com`,
+        password_hash: '$argon2id$private',
+        last_seen_at: new Date('2026-11-01T00:00:00.000Z'),
+        role: user.role ?? 'user',
+      };
+    }
+
+    function page<T>(rows: T[], sql: string, values: unknown[]) {
+      if (sql.startsWith('SELECT COUNT(*)')) {
+        return [[{ total: rows.length }], []];
+      }
+      const limit = Number(values[values.length - 2]);
+      const offset = Number(values[values.length - 1]);
+      return [rows.slice(offset, offset + limit), []];
+    }
+
+    // Answers the four statements of the moderator and member lists.
+    function peopleAnswer(sql: string, values: unknown[]) {
+      const live = (id: string) =>
+        !(sql.includes('u.deleted_at IS NULL') && users[id]?.deleted_at);
+
+      if (sql.includes('JOIN users u ON u.id = c.creator_id')) {
+        const community = communities.find((entry) => entry.name === values[0]);
+        if (!community) return [[], []];
+        const creator = userRow(community.creator_id);
+        return [
+          [
+            {
+              ...creator,
+              id: community.id,
+              created_at: community.created_at,
+              creator_id: community.creator_id,
+              creator_deleted_at:
+                users[community.creator_id].deleted_at ?? null,
+            },
+          ],
+          [],
+        ];
+      }
+
+      if (sql.includes('FROM community_moderators m')) {
+        const [communityId, creatorId] = values as [string, string];
+        const rows = [...moderators.entries()]
+          .map(([key, since]) => {
+            const [community, userId] = key.split(':');
+            return { community, userId, since };
+          })
+          .filter(
+            (row) =>
+              row.community === communityId &&
+              row.userId !== creatorId &&
+              live(row.userId),
+          )
+          .sort(
+            (left, right) =>
+              left.since.getTime() - right.since.getTime() ||
+              left.userId.localeCompare(right.userId),
+          )
+          .map((row) => ({ ...userRow(row.userId), since: row.since }));
+        return page(rows, sql, values);
+      }
+
+      if (
+        sql.includes('AS can_moderate') &&
+        sql.includes('FROM communities c')
+      ) {
+        const [userId, , name] = values as [string, string, string];
+        const community = communities.find((entry) => entry.name === name);
+        if (!community) return [[], []];
+        const canModerate =
+          community.creator_id === userId ||
+          moderators.has(`${community.id}:${userId}`);
+        return [[{ id: community.id, can_moderate: canModerate ? 1 : 0 }], []];
+      }
+
+      if (
+        sql.includes('FROM community_subscriptions s') &&
+        sql.includes('JOIN users u ON u.id = s.user_id')
+      ) {
+        const communityId = values[0] as string;
+        // Undo the LIKE pattern: strip the wildcards, then the = escapes.
+        const search = sql.includes(' LIKE ')
+          ? String(values[1]).slice(1, -1).replace(/=(.)/g, '$1').toLowerCase()
+          : null;
+        const direction = sql.includes('s.created_at ASC') ? 1 : -1;
+        const rows = [...subscribedAt.entries()]
+          .map(([key, subscribed]) => {
+            const [userId, community] = key.split(':');
+            return { userId, community, subscribed };
+          })
+          .filter(
+            (row) =>
+              row.community === communityId &&
+              live(row.userId) &&
+              (search === null ||
+                users[row.userId].username.toLowerCase().includes(search)),
+          )
+          .sort(
+            (left, right) =>
+              direction *
+              (left.subscribed.getTime() - right.subscribed.getTime() ||
+                left.userId.localeCompare(right.userId)),
+          )
+          .map((row) => ({
+            ...userRow(row.userId),
+            subscribed_at: row.subscribed,
+            is_moderator: moderators.has(`${communityId}:${row.userId}`)
+              ? 1
+              : 0,
+          }));
+        return page(rows, sql, values);
+      }
+
+      return undefined;
+    }
 
     function userSubscriptions(userId: string, sql: string) {
       const live = sql.includes('c.deleted_at IS NULL');
@@ -1368,6 +1537,8 @@ describe('Community endpoints (e2e)', () => {
           { version: 1 },
         ],
         ['get', '/communities/gardening/moderation-log', 'creator-token'],
+        ['get', '/communities/gardening/moderators', undefined],
+        ['get', '/communities/gardening/members', 'creator-token'],
       ];
       queryCalls = [];
       for (const [method, path, token, body] of gone) {
@@ -1380,6 +1551,282 @@ describe('Community endpoints (e2e)', () => {
       await send('post', '/communities', 'valid-token', {
         name: 'gardening',
       }).expect(409);
+    });
+  });
+  describe('people of a community', () => {
+    const get = (path: string, token?: string) => {
+      const call = request(app.getHttpServer()).get(path);
+      return token ? call.set('Authorization', `Bearer ${token}`) : call;
+    };
+    interface ModeratorList {
+      creator: Record<string, unknown> | null;
+      items: Array<{ username: string; role: string; since: string }>;
+      page: number;
+      limit: number;
+      total: number;
+    }
+    interface MemberList {
+      items: Array<{
+        username: string;
+        display_name: string | null;
+        subscribed_at: string;
+        is_moderator: boolean;
+      }>;
+      page: number;
+      limit: number;
+      total: number;
+    }
+    const moderatorList = async (path: string) =>
+      (await get(path).expect(200)).body as ModeratorList;
+    const memberList = async (path: string, token = 'creator-token') =>
+      (await get(path, token).expect(200)).body as MemberList;
+    const MEMBERS = '/communities/gardening/members';
+    const MODERATORS = '/communities/gardening/moderators';
+
+    // No private column, id or platform role may appear in a response.
+    function expectNoPrivateData(body: unknown, allowRoleKey: boolean) {
+      const serialised = JSON.stringify(body);
+      expect(serialised).not.toMatch(
+        /@|\$argon2|password|last_seen|"(id|user_id|email|creator_id)"|"(user|member|platform)-[\w-]+"/,
+      );
+      expect(serialised).not.toContain('admin');
+      if (!allowRoleKey) {
+        expect(serialised).not.toContain('"role"');
+      }
+    }
+
+    beforeEach(() => {
+      // 20 members subscribed in pairs per minute, so the user_id tiebreaker
+      // decides real orders, plus the moderator, a plain member and an
+      // account that was deleted (its subscription left behind).
+      for (let n = 1; n <= 20; n += 1) {
+        const id = `member-${String(n).padStart(2, '0')}`;
+        subscribedAt.set(
+          `${id}:community-a`,
+          new Date(Date.UTC(2026, 9, 1, 0, Math.floor(n / 2))),
+        );
+      }
+      for (const id of ['user-m', 'authenticated-user', 'user-gone']) {
+        subscribedAt.set(`${id}:community-a`, new Date('2026-09-01T00:00:00Z'));
+      }
+    });
+
+    describe('GET /communities/:name/moderators', () => {
+      it('is public and returns the creator separately from the appointed moderators', async () => {
+        const body = await moderatorList(MODERATORS);
+
+        expect(body).toEqual({
+          creator: {
+            username: 'gardener',
+            display_name: 'Head Gardener',
+            role: 'creator',
+            since: '2026-10-20T12:00:00.000Z',
+          },
+          // Oldest appointment first, user_id breaking the tie; the creator's
+          // own appointment and the deleted account are left out.
+          items: [
+            {
+              username: 'member_01',
+              display_name: null,
+              role: 'moderator',
+              since: '2026-10-02T00:00:00.000Z',
+            },
+            {
+              username: 'mod_mia',
+              display_name: 'Mia',
+              role: 'moderator',
+              since: '2026-10-02T00:00:00.000Z',
+            },
+          ],
+          page: 1,
+          limit: 20,
+          total: 2,
+        });
+        expectNoPrivateData(body, true);
+      });
+
+      it('repeats the creator on every page and never counts or pages it', async () => {
+        const pages: ModeratorList[] = [];
+        for (const pageNumber of [1, 2, 3]) {
+          pages.push(
+            await moderatorList(`${MODERATORS}?limit=1&page=${pageNumber}`),
+          );
+        }
+
+        expect(pages.map((body) => body.creator?.username)).toEqual([
+          'gardener',
+          'gardener',
+          'gardener',
+        ]);
+        expect(
+          pages.map((body) => body.items.map((item) => item.username)),
+        ).toEqual([['member_01'], ['mod_mia'], []]);
+        expect(pages.every((body) => body.total === 2)).toBe(true);
+        expect(
+          pages
+            .flatMap((body) => body.items)
+            .some((item) => item.role === 'creator'),
+        ).toBe(false);
+      });
+
+      it('returns the creator and an empty collection with no appointed moderators', async () => {
+        const body = await moderatorList('/communities/cooking/moderators');
+
+        expect(body).toEqual({
+          creator: {
+            username: 'cook',
+            display_name: null,
+            role: 'creator',
+            since: '2026-10-19T12:00:00.000Z',
+          },
+          items: [],
+          page: 1,
+          limit: 20,
+          total: 0,
+        });
+      });
+
+      it.each([
+        ['/communities/unknown/moderators', 404],
+        ['/communities/bad.name/moderators', 400],
+        [`${MODERATORS}?limit=101`, 400],
+        [`${MODERATORS}?page=0`, 400],
+        [`${MODERATORS}?page=10001`, 400],
+        [`${MODERATORS}?sort=new`, 400],
+        [`${MODERATORS}?unknown=1`, 400],
+      ])('answers %s with %i', async (path, status) => {
+        await get(path).expect(status);
+      });
+    });
+
+    describe('GET /communities/:name/members', () => {
+      it.each(['creator-token', 'moderator-token'])(
+        'returns the roster to %s',
+        async (token) => {
+          const body = await memberList(MEMBERS, token);
+          expect(body).toMatchObject({ page: 1, limit: 20, total: 22 });
+          expect(body.items).toHaveLength(20);
+        },
+      );
+
+      it('refuses everyone else, answering 404 before any 403', async () => {
+        await get(MEMBERS).expect(401);
+        for (const token of ['valid-token', 'other-token', 'admin-token']) {
+          await get(MEMBERS, token).expect(403);
+          await get('/communities/unknown/members', token).expect(404);
+        }
+        await get('/communities/bad.name/members', 'creator-token').expect(400);
+      });
+
+      it('marks moderators and plain members accurately', async () => {
+        const body = await memberList(`${MEMBERS}?limit=100`);
+        const flags = Object.fromEntries(
+          body.items.map((item) => [item.username, item.is_moderator]),
+        );
+
+        expect(flags).toMatchObject({
+          mod_mia: true,
+          member_01: true,
+          plain_member: false,
+          member_02: false,
+        });
+        expect(
+          body.items
+            .filter((item) => item.is_moderator)
+            .map((item) => item.username),
+        ).toEqual(['member_01', 'mod_mia']);
+      });
+
+      it('omits deleted accounts from items and total', async () => {
+        const body = await memberList(`${MEMBERS}?limit=100`);
+
+        expect(body.total).toBe(22);
+        expect(body.items.map((item) => item.username)).not.toContain(
+          'deleted_user-gone',
+        );
+      });
+
+      it.each(['new', 'oldest'] as const)(
+        'pages a stable %s order that returns each member exactly once',
+        async (sort) => {
+          const seen: string[] = [];
+          for (const pageNumber of [1, 2, 3]) {
+            const body = await memberList(
+              `${MEMBERS}?sort=${sort}&limit=10&page=${pageNumber}`,
+            );
+            expect(body.total).toBe(22);
+            seen.push(...body.items.map((item) => item.username));
+          }
+
+          expect(seen).toHaveLength(22);
+          expect(new Set(seen).size).toBe(22);
+          const expectedFirst = ['member_20', 'member_01'];
+          expect(seen[0]).toBe(
+            sort === 'new' ? expectedFirst[0] : 'plain_member',
+          );
+          // member_02 and member_03 subscribed in the same minute; user_id
+          // orders them, reversed between the two directions.
+          const pair = ['member_02', 'member_03'].map((name) =>
+            seen.indexOf(name),
+          );
+          expect(Math.abs(pair[0] - pair[1])).toBe(1);
+          expect(pair[0] < pair[1]).toBe(sort === 'oldest');
+        },
+      );
+
+      it('searches usernames case-insensitively with escaped wildcards', async () => {
+        const matched = await memberList(
+          `${MEMBERS}?search=MEMBER_0&limit=100`,
+        );
+        expect(matched.total).toBe(9);
+        expect(
+          matched.items.every((item) => item.username.startsWith('member_0')),
+        ).toBe(true);
+
+        for (const literal of ['%25', '_', '=', 'member%25']) {
+          const none = await memberList(`${MEMBERS}?search=${literal}x`);
+          expect(none).toEqual({ items: [], page: 1, limit: 20, total: 0 });
+        }
+        // An unescaped _ would match any character, and so every member_NN.
+        const underscore = await memberList(
+          `${MEMBERS}?search=member_&limit=100`,
+        );
+        expect(underscore.total).toBe(20);
+        const noMatch = await memberList(`${MEMBERS}?search=nobody`);
+        expect(noMatch).toEqual({ items: [], page: 1, limit: 20, total: 0 });
+      });
+
+      it.each([
+        'page=0',
+        'page=10001',
+        'limit=0',
+        'limit=101',
+        'sort=username',
+        `search=${'x'.repeat(51)}`,
+        'role=admin',
+        'user_id=member-01',
+        'unknown=1',
+      ])('rejects %s with 400', async (query) => {
+        await get(`${MEMBERS}?${query}`, 'creator-token').expect(400);
+      });
+
+      it('never returns an email, id, last_seen_at, password hash or platform role', async () => {
+        const bodies = [
+          await memberList(`${MEMBERS}?limit=100`),
+          await memberList(`${MEMBERS}?search=mod`, 'moderator-token'),
+        ];
+        for (const body of bodies) {
+          expectNoPrivateData(body, false);
+          for (const item of body.items) {
+            expect(Object.keys(item).sort()).toEqual([
+              'display_name',
+              'is_moderator',
+              'subscribed_at',
+              'username',
+            ]);
+          }
+        }
+      });
     });
   });
 });

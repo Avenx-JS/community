@@ -84,6 +84,9 @@ describe('migration ordering and application', () => {
     expect(position('023_add_community_moderation_community_actions')).toBe(
       position('022_add_community_deletion') + 1,
     );
+    expect(position('024_add_community_subscriptions_community_index')).toBe(
+      position('023_add_community_moderation_community_actions') + 1,
+    );
     expect(new Set(versions).size).toBe(versions.length);
   });
 

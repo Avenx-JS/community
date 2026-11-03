@@ -1,7 +1,12 @@
 import { ApiProperty } from '@nestjs/swagger';
 import type {
+  CommunityCreatorDto,
   CommunityDto,
   CommunityListDto,
+  CommunityMemberDto,
+  CommunityMemberListDto,
+  CommunityModeratorDto,
+  CommunityModeratorListDto,
   SubscriptionDto,
   SubscriptionListDto,
   SubscriptionStatusDto,
@@ -234,6 +239,97 @@ export class CommunityModerationActionResponse implements CommunityModerationAct
 export class CommunityModerationActionListResponse implements CommunityModerationActionList {
   @ApiProperty({ type: [CommunityModerationActionResponse] })
   items!: CommunityModerationActionResponse[];
+
+  @ApiProperty({ type: 'integer' })
+  page!: number;
+
+  @ApiProperty({ type: 'integer' })
+  limit!: number;
+
+  @ApiProperty({ type: 'integer' })
+  total!: number;
+}
+
+// People lists: usernames and display names only, never ids.
+
+export class CommunityCreatorResponse implements CommunityCreatorDto {
+  @ApiProperty()
+  username!: string;
+
+  @ApiProperty({ type: String, nullable: true })
+  display_name!: string | null;
+
+  @ApiProperty({ enum: ['creator'] })
+  role!: 'creator';
+
+  @ApiProperty({
+    format: 'date-time',
+    description: 'When the community was created.',
+  })
+  since!: string;
+}
+
+export class CommunityModeratorResponse implements CommunityModeratorDto {
+  @ApiProperty()
+  username!: string;
+
+  @ApiProperty({ type: String, nullable: true })
+  display_name!: string | null;
+
+  @ApiProperty({ enum: ['moderator'] })
+  role!: 'moderator';
+
+  @ApiProperty({ format: 'date-time', description: 'When appointed.' })
+  since!: string;
+}
+
+export class CommunityModeratorListResponse implements CommunityModeratorListDto {
+  @ApiProperty({
+    type: CommunityCreatorResponse,
+    nullable: true,
+    description:
+      'Returned on every page and not counted in total. Null only if the ' +
+      "creator's account was deleted, which the API does not allow while " +
+      'the community exists.',
+  })
+  creator!: CommunityCreatorResponse | null;
+
+  @ApiProperty({
+    type: [CommunityModeratorResponse],
+    description: 'Appointed moderators, oldest appointment first.',
+  })
+  items!: CommunityModeratorResponse[];
+
+  @ApiProperty({ type: 'integer' })
+  page!: number;
+
+  @ApiProperty({ type: 'integer' })
+  limit!: number;
+
+  @ApiProperty({
+    type: 'integer',
+    description: 'Appointed moderators; excludes the creator.',
+  })
+  total!: number;
+}
+
+export class CommunityMemberResponse implements CommunityMemberDto {
+  @ApiProperty()
+  username!: string;
+
+  @ApiProperty({ type: String, nullable: true })
+  display_name!: string | null;
+
+  @ApiProperty({ format: 'date-time' })
+  subscribed_at!: string;
+
+  @ApiProperty()
+  is_moderator!: boolean;
+}
+
+export class CommunityMemberListResponse implements CommunityMemberListDto {
+  @ApiProperty({ type: [CommunityMemberResponse] })
+  items!: CommunityMemberResponse[];
 
   @ApiProperty({ type: 'integer' })
   page!: number;

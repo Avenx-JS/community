@@ -7,9 +7,12 @@ import {
 import { Test, TestingModule } from '@nestjs/testing';
 import { MYSQL_POOL } from '../auth/auth.service';
 import type { PoolConnection } from 'mysql2/promise';
+import { canModerateCommunitySql } from '../common/community-moderation';
 import { CommunitiesService } from './communities.service';
 import { CommunityModerationLogService } from './community-moderation-log.service';
 import { CommunityRuleAcceptanceService } from './community-rule-acceptance.service';
+import { ListCommunityMembersDto } from './dto/list-community-members.dto';
+import { ListCommunityModeratorsDto } from './dto/list-community-moderators.dto';
 
 describe('CommunitiesService', () => {
   let service: CommunitiesService;
@@ -344,6 +347,275 @@ describe('CommunitiesService', () => {
       expect(queries).toHaveLength(1);
       expect(queries[0].sql).toContain('name = ? AND deleted_at IS NULL');
     }
+  });
+
+  describe('listModerators', () => {
+    const creatorRow = {
+      id: 'community-1',
+      created_at: new Date('2026-01-01T00:00:00.000Z'),
+      creator_id: 'creator-id',
+      username: 'creator',
+      display_name: 'The Creator',
+      creator_deleted_at: null,
+      // Columns a wider SELECT might return; none may reach the response.
+      email: 'creator@example.com',
+      role: 'admin',
+    };
+    const moderatorRow = (n: number) => ({
+      username: `mod_${n}`,
+      display_name: null,
+      since: new Date(Date.UTC(2026, 1, n)),
+      user_id: `mod-${n}-id`,
+      email: `mod${n}@example.com`,
+      last_seen_at: new Date(),
+    });
+
+    it('returns the creator separately and pages only appointed moderators', async () => {
+      results = [
+        [creatorRow],
+        [moderatorRow(3), moderatorRow(4)],
+        [{ total: '7' }],
+      ];
+
+      const result = await service.listModerators('gardening', {
+        page: 2,
+        limit: 2,
+      });
+
+      expect(result).toEqual({
+        creator: {
+          username: 'creator',
+          display_name: 'The Creator',
+          role: 'creator',
+          since: '2026-01-01T00:00:00.000Z',
+        },
+        items: [
+          {
+            username: 'mod_3',
+            display_name: null,
+            role: 'moderator',
+            since: '2026-02-03T00:00:00.000Z',
+          },
+          {
+            username: 'mod_4',
+            display_name: null,
+            role: 'moderator',
+            since: '2026-02-04T00:00:00.000Z',
+          },
+        ],
+        page: 2,
+        limit: 2,
+        total: 7,
+      });
+      expect(queries[0].sql).toContain(
+        'WHERE c.name = ? AND c.deleted_at IS NULL',
+      );
+      // The creator is excluded from items and total even if appointed, and
+      // so can never be duplicated or pushed to a later page.
+      for (const query of queries.slice(1)) {
+        expect(query.sql).toContain('m.user_id <> ?');
+        expect(query.sql).toContain('u.deleted_at IS NULL');
+      }
+      expect(queries[1].sql).toContain(
+        'ORDER BY m.created_at ASC, m.user_id ASC LIMIT ? OFFSET ?',
+      );
+      expect(queries[1].values).toEqual(['community-1', 'creator-id', 2, 2]);
+      expect(queries[2].values).toEqual(['community-1', 'creator-id']);
+      expect(JSON.stringify(result)).not.toMatch(/@|-id|admin|last_seen|email/);
+    });
+
+    it('returns the creator and an empty collection with no appointed moderators', async () => {
+      results = [[creatorRow], [], [{ total: 0 }]];
+
+      const result = await service.listModerators(
+        'gardening',
+        new ListCommunityModeratorsDto(),
+      );
+
+      expect(result.creator?.username).toBe('creator');
+      expect(result).toMatchObject({ items: [], page: 1, limit: 20, total: 0 });
+      expect(queries[1].values).toEqual(['community-1', 'creator-id', 20, 0]);
+    });
+
+    it('renders a creator whose account was deleted as null without throwing', async () => {
+      results = [
+        [{ ...creatorRow, creator_deleted_at: new Date() }],
+        [],
+        [{ total: 0 }],
+      ];
+
+      await expect(
+        service.listModerators('gardening', new ListCommunityModeratorsDto()),
+      ).resolves.toMatchObject({ creator: null });
+    });
+
+    it('answers 404 for an unknown or deleted community without listing', async () => {
+      results = [[]];
+
+      await expect(
+        service.listModerators('missing', new ListCommunityModeratorsDto()),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(queries).toHaveLength(1);
+    });
+  });
+
+  describe('listMembers', () => {
+    const access = (canModerate: number | string) => [
+      { id: 'community-1', can_moderate: canModerate },
+    ];
+    const memberRow = (n: number, isModerator: number | string) => ({
+      username: `member_${n}`,
+      display_name: n === 1 ? 'Member One' : null,
+      subscribed_at: new Date(Date.UTC(2026, 2, n)),
+      is_moderator: isModerator,
+      email: `m${n}@example.com`,
+      role: 'admin',
+      user_id: `user-${n}`,
+    });
+
+    it('authorizes with the shared moderation predicate in one lookup', async () => {
+      results = [access(1), [], [{ total: 0 }]];
+
+      await service.listMembers(
+        'gardening',
+        'mod-id',
+        new ListCommunityMembersDto(),
+      );
+
+      expect(queries[0].sql).toContain(canModerateCommunitySql('c.id'));
+      expect(queries[0].sql).toContain(
+        'WHERE c.name = ? AND c.deleted_at IS NULL',
+      );
+      expect(queries[0].values).toEqual(['mod-id', 'mod-id', 'gardening']);
+    });
+
+    it('answers 404 before any 403, and 403 for anyone who does not moderate', async () => {
+      results = [[]];
+      await expect(
+        service.listMembers(
+          'missing',
+          'member-id',
+          new ListCommunityMembersDto(),
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(queries).toHaveLength(1);
+
+      for (const denied of [0, '0']) {
+        queries = [];
+        results = [access(denied)];
+        await expect(
+          service.listMembers(
+            'gardening',
+            'member-id',
+            new ListCommunityMembersDto(),
+          ),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(queries).toHaveLength(1);
+      }
+    });
+
+    it('maps is_moderator from the moderator join and exposes only documented fields', async () => {
+      results = [
+        access('1'),
+        [memberRow(1, 1), memberRow(2, 0)],
+        [{ total: 2 }],
+      ];
+
+      const result = await service.listMembers(
+        'gardening',
+        'creator-id',
+        new ListCommunityMembersDto(),
+      );
+
+      expect(result).toEqual({
+        items: [
+          {
+            username: 'member_1',
+            display_name: 'Member One',
+            subscribed_at: '2026-03-01T00:00:00.000Z',
+            is_moderator: true,
+          },
+          {
+            username: 'member_2',
+            display_name: null,
+            subscribed_at: '2026-03-02T00:00:00.000Z',
+            is_moderator: false,
+          },
+        ],
+        page: 1,
+        limit: 20,
+        total: 2,
+      });
+      expect(queries[1].sql).toContain(
+        'LEFT JOIN community_moderators m\n         ON m.community_id = s.community_id AND m.user_id = s.user_id',
+      );
+      // The SELECT list is the boundary: no id, email, last_seen_at or role.
+      const selected = queries[1].sql.slice(0, queries[1].sql.indexOf('FROM'));
+      expect(selected).not.toMatch(
+        /\b(id|user_id|email|role|last_seen_at)\b(?! IS NOT NULL)/,
+      );
+      expect(selected).toMatch(
+        /^SELECT u\.username, u\.display_name, s\.created_at AS subscribed_at,\s+m\.user_id IS NOT NULL AS is_moderator\s*$/,
+      );
+      expect(JSON.stringify(result)).not.toMatch(/@|admin|user-\d/);
+    });
+
+    it.each([
+      ['new', 'DESC'],
+      ['oldest', 'ASC'],
+    ] as const)(
+      'orders %s with the user_id tiebreaker and pages by LIMIT/OFFSET',
+      async (sort, direction) => {
+        results = [access(1), [], [{ total: 0 }]];
+
+        await service.listMembers('gardening', 'creator-id', {
+          sort,
+          page: 3,
+          limit: 25,
+        });
+
+        expect(queries[1].sql).toContain(
+          `ORDER BY s.created_at ${direction}, s.user_id ${direction} LIMIT ? OFFSET ?`,
+        );
+        expect(queries[1].values).toEqual(['community-1', 25, 50]);
+        expect(queries[2].values).toEqual(['community-1']);
+      },
+    );
+
+    it('escapes LIKE wildcards in the username search and applies it to the count', async () => {
+      results = [access(1), [], [{ total: 0 }]];
+
+      await service.listMembers(
+        'gardening',
+        'creator-id',
+        Object.assign(new ListCommunityMembersDto(), {
+          search: ' 100%_mod= ',
+        }),
+      );
+
+      for (const query of queries.slice(1)) {
+        expect(query.sql).toContain(
+          "AND LOWER(u.username) LIKE LOWER(?) ESCAPE '='",
+        );
+        expect(query.values[1]).toBe('%100=%=_mod==%');
+      }
+    });
+
+    it('excludes deleted accounts from items and total', async () => {
+      results = [access(1), [], [{ total: 0 }]];
+
+      await service.listMembers(
+        'gardening',
+        'creator-id',
+        new ListCommunityMembersDto(),
+      );
+
+      for (const query of queries.slice(1)) {
+        expect(query.sql).toContain(
+          's.community_id = ? AND u.deleted_at IS NULL',
+        );
+      }
+    });
   });
 
   describe('update and remove', () => {
