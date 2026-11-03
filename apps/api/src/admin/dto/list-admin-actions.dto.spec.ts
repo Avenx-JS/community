@@ -34,6 +34,28 @@ describe('ListAdminActionsDto', () => {
     }
   });
 
+  // The filters validate against the constants the write path uses, so the
+  // community values added with migration 025 are accepted with no DTO change.
+  it.each([
+    { action: 'community_suspended' },
+    { action: 'community_restored' },
+    { action: 'community_updated' },
+    { target_type: 'community' },
+    { target_type: 'community', target_id: 'community-1' },
+    { action: 'community_suspended', target_type: 'community' },
+  ])('accepts the community filter %o', async (query) => {
+    await expect(validateQuery(query)).resolves.toMatchObject(query);
+  });
+
+  it.each([
+    { action: 'community_deleted' },
+    { action: 'community_banned' },
+    { target_type: 'communities' },
+    { target_type: 'post' },
+  ])('still rejects the unknown filter %o', async (query) => {
+    await expect(validateQuery(query)).rejects.toThrow();
+  });
+
   it('accepts target_id together with target_type', async () => {
     await expect(
       validateQuery({ target_type: 'user', target_id: 'user-1' }),

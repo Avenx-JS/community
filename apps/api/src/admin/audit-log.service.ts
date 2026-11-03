@@ -2,22 +2,34 @@ import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { hasControlCharacters } from '../common/safe-text.constraint';
+import { EDITABLE_COMMUNITY_FIELDS } from '../communities/community-moderation-log.service';
 import type { ReportStatus } from '../reports/report.constants';
 import type { PlatformRole } from '../users/users.service';
 
 // Mirrors the admin_actions.action and target_type enums; read filters
 // validate against these lists so they cannot drift from what is written.
+// Append only, in the same order as the migration: never reorder or remove a
+// member (see 025_add_community_suspension.sql).
 export const ADMIN_ACTIONS = [
   'report_status_changed',
   'user_suspended',
   'user_banned',
   'restriction_lifted',
   'user_role_changed',
+  'community_suspended',
+  'community_restored',
+  'community_updated',
 ] as const;
 
 export type AdminAction = (typeof ADMIN_ACTIONS)[number];
 
-export const ADMIN_ACTION_TARGETS = ['user', 'report', 'restriction'] as const;
+export const ADMIN_ACTION_TARGETS = [
+  'user',
+  'report',
+  'restriction',
+  'community',
+] as const;
 
 export type AdminActionTarget = (typeof ADMIN_ACTION_TARGETS)[number];
 
@@ -79,7 +91,44 @@ export type AuditEntry =
         from_role?: PlatformRole;
         to_role?: PlatformRole;
       };
+    }
+  // community_name snapshots the name, so an entry stays readable after the
+  // community is gone, as actor_username does for the actor.
+  | {
+      actorId: string;
+      action: 'community_suspended';
+      targetType: 'community';
+      targetId: string;
+      metadata?: {
+        community_name?: string;
+        reason?: string;
+      };
+    }
+  | {
+      actorId: string;
+      action: 'community_restored';
+      targetType: 'community';
+      targetId: string;
+      metadata?: {
+        community_name?: string;
+      };
+    }
+  | {
+      actorId: string;
+      action: 'community_updated';
+      targetType: 'community';
+      targetId: string;
+      metadata?: {
+        community_name?: string;
+        // Which fields changed, never their old or new values.
+        fields?: string;
+      };
     };
+
+// communities.name is VARCHAR(50) with the route-name character set.
+const COMMUNITY_NAME = /^[A-Za-z0-9_-]{1,50}$/;
+// The suspension reason, bounded like a restriction reason.
+const MAX_REASON_LENGTH = 2000;
 
 interface ActorRow extends RowDataPacket {
   username: string;
@@ -190,6 +239,46 @@ function enumValue(
   return value;
 }
 
+function communityNameValue(
+  metadata: Record<string, unknown>,
+): string | undefined {
+  const value = requiredString(metadata, 'community_name');
+  if (value !== undefined && !COMMUNITY_NAME.test(value)) {
+    throw new TypeError('Invalid audit metadata field: community_name');
+  }
+  return value;
+}
+
+function reasonValue(metadata: Record<string, unknown>): string | undefined {
+  const value = requiredString(metadata, 'reason');
+  if (
+    value !== undefined &&
+    (value.trim().length === 0 ||
+      value.length > MAX_REASON_LENGTH ||
+      hasControlCharacters(value, true))
+  ) {
+    throw new TypeError('Invalid audit metadata field: reason');
+  }
+  return value;
+}
+
+// A comma-separated list of distinct editable community fields.
+function fieldsValue(metadata: Record<string, unknown>): string | undefined {
+  const value = requiredString(metadata, 'fields');
+  if (value === undefined) {
+    return undefined;
+  }
+  const fields = value.split(',');
+  const editable: readonly string[] = EDITABLE_COMMUNITY_FIELDS;
+  if (
+    new Set(fields).size !== fields.length ||
+    !fields.every((field) => editable.includes(field))
+  ) {
+    throw new TypeError('Invalid audit metadata field: fields');
+  }
+  return value;
+}
+
 export function buildAuditMetadata(
   entry: AuditEntry,
 ): Record<string, string | null> | null {
@@ -243,6 +332,25 @@ export function buildAuditMetadata(
       const toRole = enumValue(metadata, 'to_role', platformRoles);
       if (fromRole !== undefined) result.from_role = fromRole;
       if (toRole !== undefined) result.to_role = toRole;
+      break;
+    }
+    case 'community_suspended': {
+      const communityName = communityNameValue(metadata);
+      const reason = reasonValue(metadata);
+      if (communityName !== undefined) result.community_name = communityName;
+      if (reason !== undefined) result.reason = reason;
+      break;
+    }
+    case 'community_restored': {
+      const communityName = communityNameValue(metadata);
+      if (communityName !== undefined) result.community_name = communityName;
+      break;
+    }
+    case 'community_updated': {
+      const communityName = communityNameValue(metadata);
+      const fields = fieldsValue(metadata);
+      if (communityName !== undefined) result.community_name = communityName;
+      if (fields !== undefined) result.fields = fields;
       break;
     }
   }

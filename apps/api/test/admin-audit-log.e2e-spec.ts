@@ -449,6 +449,19 @@ describe('Admin audit log API (e2e)', () => {
     expect(listQueries).toHaveLength(0);
   });
 
+  // Migration 025 values: accepted as filters, matching no fixture yet.
+  it.each([
+    'action=community_suspended',
+    'action=community_restored',
+    'action=community_updated',
+    'target_type=community',
+    'target_type=community&target_id=community-1',
+  ])('accepts the community filter %s', async (query) => {
+    const body = await list(`/admin/audit-log?${query}`);
+    expect(body).toMatchObject({ items: [], total: 0 });
+    expect(listQueries).toHaveLength(1);
+  });
+
   it.each(['patch', 'put', 'delete'] as const)(
     'exposes no %s route on the audit log',
     async (method) => {

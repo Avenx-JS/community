@@ -164,6 +164,151 @@ describe('AuditLogService', () => {
     ).toThrow('Invalid audit metadata field: expires_at');
   });
 
+  describe('community actions', () => {
+    // Keys a caller might pass through; none may be stored for any action.
+    const leaked = {
+      email: 'private@example.com',
+      password_hash: 'private-hash',
+      token: 'secret-token',
+      description: 'the old community description',
+      old_description: 'before',
+      new_description: 'after',
+      unexpected: 'discard me',
+    };
+
+    it.each([
+      [
+        'community_suspended',
+        { community_name: 'spam-hub', reason: 'Coordinated spam network' },
+      ],
+      ['community_restored', { community_name: 'spam-hub' }],
+      [
+        'community_updated',
+        { community_name: 'spam-hub', fields: 'description' },
+      ],
+    ] as const)(
+      'writes %s against the community target with only its allowlisted metadata',
+      async (action, metadata) => {
+        const calls: Array<{ sql: string; values?: unknown[] }> = [];
+        const connection = fakeConnection((sql, values) => {
+          calls.push({ sql, values });
+          return Promise.resolve(
+            sql.startsWith('SELECT username')
+              ? [actorRow, []]
+              : [{ affectedRows: 1 }, []],
+          );
+        });
+
+        await service.record(connection, {
+          actorId: 'admin-1',
+          action,
+          targetType: 'community',
+          targetId: 'community-1',
+          metadata: { ...metadata, ...leaked },
+        } as unknown as AuditEntry);
+
+        expect(calls).toHaveLength(2);
+        expect(calls[1]?.sql).toContain('INSERT INTO admin_actions');
+        expect(calls[1]?.values).toEqual([
+          expect.any(String),
+          'admin-1',
+          'moderator',
+          action,
+          'community',
+          'community-1',
+          JSON.stringify(metadata),
+        ]);
+        expect(String(calls[1]?.values?.[6])).not.toMatch(
+          /email|password|token|old community|before|after|unexpected/,
+        );
+      },
+    );
+
+    it('stores NULL metadata when nothing survives the allowlist', () => {
+      expect(
+        buildAuditMetadata({
+          actorId: 'admin-1',
+          action: 'community_restored',
+          targetType: 'community',
+          targetId: 'community-1',
+          metadata: { unexpected: 'x' } as never,
+        }),
+      ).toBeNull();
+    });
+
+    it('never stores a reason for restore or update', () => {
+      for (const action of ['community_restored', 'community_updated']) {
+        expect(
+          buildAuditMetadata({
+            actorId: 'admin-1',
+            action,
+            targetType: 'community',
+            targetId: 'community-1',
+            metadata: { community_name: 'spam-hub', reason: 'free text' },
+          } as unknown as AuditEntry),
+        ).toEqual({ community_name: 'spam-hub' });
+      }
+    });
+
+    it.each([
+      ['community_suspended', 'a string'],
+      ['community_restored', ['community_name']],
+      ['community_updated', 42],
+      ['community_suspended', null],
+    ])('rejects %s with non-object metadata %p', (action, metadata) => {
+      expect(() =>
+        buildAuditMetadata({
+          actorId: 'admin-1',
+          action,
+          targetType: 'community',
+          targetId: 'community-1',
+          metadata,
+        } as unknown as AuditEntry),
+      ).toThrow('Audit metadata must be an object');
+    });
+
+    it.each([
+      [
+        'community_suspended',
+        { community_name: 'x'.repeat(51) },
+        'community_name',
+      ],
+      ['community_restored', { community_name: '' }, 'community_name'],
+      ['community_updated', { community_name: 'bad name' }, 'community_name'],
+      ['community_suspended', { community_name: 7 }, 'community_name'],
+      ['community_suspended', { reason: 'x'.repeat(2001) }, 'reason'],
+      ['community_suspended', { reason: '   ' }, 'reason'],
+      ['community_suspended', { reason: 'bell\u0007' }, 'reason'],
+      ['community_updated', { fields: 'name' }, 'fields'],
+      ['community_updated', { fields: 'rules' }, 'fields'],
+      ['community_updated', { fields: 'description,description' }, 'fields'],
+      ['community_updated', { fields: '' }, 'fields'],
+      ['community_updated', { fields: 'Hello, new description' }, 'fields'],
+    ])('rejects %s metadata %o', (action, metadata, key) => {
+      expect(() =>
+        buildAuditMetadata({
+          actorId: 'admin-1',
+          action,
+          targetType: 'community',
+          targetId: 'community-1',
+          metadata,
+        } as unknown as AuditEntry),
+      ).toThrow(`Invalid audit metadata field: ${key}`);
+    });
+
+    it('accepts a community name at the 50-character column width', () => {
+      expect(
+        buildAuditMetadata({
+          actorId: 'admin-1',
+          action: 'community_restored',
+          targetType: 'community',
+          targetId: 'community-1',
+          metadata: { community_name: 'x'.repeat(50) },
+        }),
+      ).toEqual({ community_name: 'x'.repeat(50) });
+    });
+  });
+
   it('uses the supplied connection, resolves the actor from the database, and inserts a UUID', async () => {
     const calls: Array<{ sql: string; values?: unknown[] }> = [];
     const connection = fakeConnection((sql, values) => {

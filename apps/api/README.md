@@ -263,18 +263,46 @@ key, so readers must handle deleted targets without assuming they exist.
 
 Only the following metadata keys may be recorded:
 
-| Action                  | Allowed metadata                            |
-| ----------------------- | ------------------------------------------- |
-| `report_status_changed` | `from_status`, `to_status`, `resolution`    |
-| `user_suspended`        | `restriction_id`, `expires_at`, `report_id` |
-| `user_banned`           | `restriction_id`, `report_id`               |
-| `restriction_lifted`    | `restriction_id`, `restriction_type`        |
-| `user_role_changed`     | `from_role`, `to_role`                      |
+| Action                  | Target        | Allowed metadata                            |
+| ----------------------- | ------------- | ------------------------------------------- |
+| `report_status_changed` | `report`      | `from_status`, `to_status`, `resolution`    |
+| `user_suspended`        | `user`        | `restriction_id`, `expires_at`, `report_id` |
+| `user_banned`           | `user`        | `restriction_id`, `report_id`               |
+| `restriction_lifted`    | `restriction` | `restriction_id`, `restriction_type`        |
+| `user_role_changed`     | `user`        | `from_role`, `to_role`                      |
+| `community_suspended`   | `community`   | `community_name`, `reason`                  |
+| `community_restored`    | `community`   | `community_name`                            |
+| `community_updated`     | `community`   | `community_name`, `fields`                  |
 
-The service builds metadata from this allowlist and drops extra runtime keys.
-Passwords and hashes, tokens, session identifiers, email addresses, and free
-text such as `reason`, `lift_reason`, or `resolution_note` are never copied to
-audit metadata. Audit entries themselves are sensitive and may only be exposed
+The three `community_*` actions and the `community` target were added by
+migration `025_add_community_suspension`. No endpoint writes them yet; they
+exist so the community-administration endpoints that follow need no enum
+migration of their own. `community_name` is a snapshot of the name (1-50 of
+`[A-Za-z0-9_-]`, the column width), so an entry stays readable after the
+community is gone, as `actor_username` does for the actor. `reason` is the
+suspension reason, plain text of at most 2,000 characters. `fields` names
+which fields changed, as a comma-separated list of editable fields (today only
+`description`), never their old or new values: the log records that a change
+happened, not a content diff. The `AuditEntry` type pairs each action with its
+target, so a community action with any other `target_type` does not compile.
+
+**Both enums are append-only.** `admin_actions.action` and `target_type` may
+only ever gain members at the end, in the same order as `ADMIN_ACTIONS` and
+`ADMIN_ACTION_TARGETS` in `audit-log.service.ts`. Appending is an in-place
+change in MySQL 8 that keeps every stored value; inserting elsewhere renumbers
+stored values and rebuilds the table, and removing a member breaks existing
+rows. The constants, the `AuditEntry` union, the metadata allowlist and the
+migration change together. `ListAdminActionsDto` validates its filters against
+the same constants, so `GET /admin/audit-log` accepts every new value as a
+filter without a code change.
+
+The service builds metadata from this allowlist and drops extra runtime keys
+(an unknown key is never stored; an invalid value for an allowlisted key, or a
+non-object metadata value, throws). Passwords and hashes, tokens, session
+identifiers, email addresses, and free text such as `lift_reason` or
+`resolution_note` are never copied to audit metadata; the only free text
+allowed is `reason` on `community_suspended`, which no other action accepts.
+Audit entries themselves are sensitive and may only be exposed
 through future admin-authorized read routes. Do not log the contents of an
 audit entry to application logs. Database grants or a trigger can additionally
 enforce append-only behavior at deployment time.
@@ -1897,6 +1925,42 @@ implicit member (see below) but is reported as subscribed only if they have
 also subscribed. The routes report membership only and say nothing about
 notification delivery. Like every other route except `GET /health`, both count
 against the API read rate limits.
+
+### Community suspension
+
+**Nothing enforces suspension yet.** Migration `025_add_community_suspension`
+adds the schema only: no endpoint sets or clears these columns and no read
+excludes a suspended community, so a suspended community behaves exactly like
+an active one. The endpoint that writes them must enforce them in the same
+change and must not be merged without that enforcement.
+
+`communities` gains three columns, all `NULL` for every existing community:
+
+- `suspended_at`: when a platform administrator suspended the community;
+  `suspended_at IS NULL` is the "not suspended" predicate.
+- `suspended_by`: the administrator. `ON DELETE SET NULL`, so the suspension
+  survives the removal of that account.
+- `suspension_reason`: free text.
+
+`chk_communities_suspension` rejects an actor or reason without a timestamp,
+like `chk_user_restrictions_lift`, and `idx_communities_suspended_at` serves
+the predicate.
+
+**Suspension is indefinite by design.** There is no expiry column: a
+community suspension lasts until an administrator restores it. A user
+suspension needs an end date, but a timed community suspension has no clear
+product meaning (the content is either acceptable or it is not), and adding
+the column later is cheap.
+
+**Suspension and deletion are separate facts.** `deleted_at` (migration
+`022`) records the creator's own soft deletion; `suspended_at` records a
+platform administrator's decision. They have different authority and
+different remedies: the creator must never be able to clear a suspension, and
+only an administrator could undo a deletion. A single status column would make
+"who may change this" ambiguous, so they are two columns, and once suspension
+is enforced every community read must check both predicates, alongside the
+existing `deleted_at IS NULL` (see
+[Editing and deleting a community](#editing-and-deleting-a-community)).
 
 ### Community statistics
 

@@ -39,7 +39,7 @@ describe('migration 024 (community subscriptions index)', () => {
 
   it('records the version in the snapshot', () => {
     expect(normalise(snapshot)).toContain(
-      "('023_add_community_moderation_community_actions'), ('024_add_community_subscriptions_community_index');",
+      "('023_add_community_moderation_community_actions'), ('024_add_community_subscriptions_community_index')",
     );
   });
 });

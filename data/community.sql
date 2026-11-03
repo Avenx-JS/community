@@ -59,12 +59,21 @@ CREATE TABLE communities (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     deleted_at TIMESTAMP NULL DEFAULT NULL,
     deleted_by VARCHAR(36) NULL,
+    suspended_at TIMESTAMP NULL DEFAULT NULL,
+    suspended_by VARCHAR(36) NULL,
+    suspension_reason TEXT NULL,
     INDEX idx_communities_creator_id (creator_id),
     CONSTRAINT fk_communities_deleted_by FOREIGN KEY (deleted_by) REFERENCES users(id) ON DELETE SET NULL,
     CONSTRAINT chk_communities_deletion CHECK ((deleted_at IS NULL AND deleted_by IS NULL) OR deleted_at IS NOT NULL),
+    CONSTRAINT fk_communities_suspended_by FOREIGN KEY (suspended_by) REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT chk_communities_suspension CHECK (
+        (suspended_at IS NULL AND suspended_by IS NULL AND suspension_reason IS NULL)
+        OR suspended_at IS NOT NULL
+    ),
     FOREIGN KEY (creator_id) REFERENCES users(id) ON DELETE CASCADE
 );
 CREATE INDEX idx_communities_deleted_at ON communities (deleted_at);
+CREATE INDEX idx_communities_suspended_at ON communities (suspended_at);
 CREATE FULLTEXT INDEX ft_communities_name_description
   ON communities (name, description);
 
@@ -320,9 +329,12 @@ CREATE TABLE admin_actions (
         'user_suspended',
         'user_banned',
         'restriction_lifted',
-        'user_role_changed'
+        'user_role_changed',
+        'community_suspended',
+        'community_restored',
+        'community_updated'
     ) NOT NULL,
-    target_type ENUM('user', 'report', 'restriction') NOT NULL,
+    target_type ENUM('user', 'report', 'restriction', 'community') NOT NULL,
     target_id VARCHAR(36) NOT NULL,
     metadata JSON NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -392,4 +404,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('021_create_community_moderation_actions'),
     ('022_add_community_deletion'),
     ('023_add_community_moderation_community_actions'),
-    ('024_add_community_subscriptions_community_index');
+    ('024_add_community_subscriptions_community_index'),
+    ('025_add_community_suspension');
