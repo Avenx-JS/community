@@ -1,13 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { ValidationPipe } from '@nestjs/common';
-import type { INestApplication } from '@nestjs/common';
+import type { ExecutionContext, INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { HttpAdapterHost } from '@nestjs/core';
 import { createHash } from 'node:crypto';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
+import { of } from 'rxjs';
+import { AuthRateLimitService } from '../src/auth/auth-rate-limit.service';
 import { MYSQL_POOL } from '../src/auth/auth.service';
+import { ApiRateLimitInterceptor } from '../src/common/api-rate-limit.interceptor';
 import { SafeApiExceptionFilter } from '../src/common/safe-api-exception.filter';
 import type { PlatformRole } from '../src/users/users.service';
 
@@ -75,6 +78,7 @@ describe('Admin audit log API (e2e)', () => {
   let actions: ActionFixture[];
   let roles: Map<string, PlatformRole>;
   let listQueries: Array<{ sql: string; values: unknown[] }>;
+  let detailQueries: Array<{ sql: string; values: unknown[] }>;
 
   beforeEach(async () => {
     roles = new Map([
@@ -87,7 +91,13 @@ describe('Admin audit log API (e2e)', () => {
       [hashToken('moderator-token'), 'moderator-id'],
       [hashToken('user-token'), 'user-id'],
     ]);
+    // An administrator's session past its expiry: the session query's
+    // `expires_at > UTC_TIMESTAMP()` condition excludes it.
+    const expiredSessions = new Map([
+      [hashToken('expired-admin-token'), 'admin-id'],
+    ]);
     listQueries = [];
+    detailQueries = [];
 
     // 25 entries one hour apart, plus a pair written in the same second.
     actions = Array.from({ length: 25 }, (_, index) => {
@@ -195,7 +205,10 @@ describe('Admin audit log API (e2e)', () => {
       Promise.resolve([value, []] as [unknown, unknown]);
     const execute = (sql: string, values: unknown[]) => {
       if (sql.startsWith('SELECT auth_sessions.user_id AS id')) {
-        const userId = sessions.get(String(values[0]));
+        expect(sql).toContain('expires_at > UTC_TIMESTAMP()');
+        const userId = expiredSessions.has(String(values[0]))
+          ? undefined
+          : sessions.get(String(values[0]));
         return result(
           userId
             ? [
@@ -214,6 +227,13 @@ describe('Admin audit log API (e2e)', () => {
       if (sql === 'SELECT role FROM users WHERE id = ? LIMIT 1') {
         const role = roles.get(String(values[0]));
         return result(role ? [{ role }] : []);
+      }
+      // Must precede the list branch: both queries share the same SELECT.
+      if (/FROM admin_actions\s+WHERE id = \? LIMIT 1$/.test(sql)) {
+        detailQueries.push({ sql, values });
+        return result(
+          actions.filter((row) => row.id === values[0]).slice(0, 1),
+        );
       }
       if (sql.startsWith('SELECT id, actor_id, actor_username')) {
         listQueries.push({ sql, values });
@@ -506,5 +526,172 @@ describe('Admin audit log API (e2e)', () => {
         'to_status',
       ].sort(),
     );
+  });
+
+  describe('GET /admin/audit-log/:id', () => {
+    type Item = AuditLogResponse['items'][0];
+    const detail = async (id: string) =>
+      (await get(`/admin/audit-log/${id}`).expect(200)).body as Item;
+
+    it('returns the entry to a platform administrator', async () => {
+      const body = await detail('action-25');
+
+      expect(body).toEqual({
+        id: 'action-25',
+        actor_username: 'admin',
+        actor_id: 'admin-id',
+        action: 'report_status_changed',
+        target_type: 'report',
+        target_id: 'report-24',
+        metadata: {
+          from_status: 'open',
+          to_status: 'resolved',
+          resolution: 'user_banned',
+        },
+        created_at: '2026-01-02T00:00:00.000Z',
+      });
+      expect(detailQueries).toEqual([
+        { sql: expect.any(String), values: ['action-25'] },
+      ]);
+    });
+
+    it('is field-for-field identical to the list item for every entry', async () => {
+      const listed = (await list('/admin/audit-log?limit=100')).items;
+      expect(listed).toHaveLength(actions.length);
+
+      for (const item of listed) {
+        const single = await get(`/admin/audit-log/${item.id}`).expect(200);
+        expect(single.body).toStrictEqual(item);
+      }
+    });
+
+    it('returns 404 for an unknown id', async () => {
+      const response = await get('/admin/audit-log/no-such-entry').expect(404);
+      expect(response.body).toMatchObject({
+        statusCode: 404,
+        message: 'Audit entry not found',
+      });
+    });
+
+    it.each([
+      ['a path separator', 'action%2F01'],
+      ['a dot', 'action.01'],
+      ['an apostrophe', "action-01'"],
+      ['more than 36 characters', 'a'.repeat(37)],
+    ])('returns 400 for an id with %s', async (_label, id) => {
+      await get(`/admin/audit-log/${id}`).expect(400);
+      expect(detailQueries).toHaveLength(0);
+    });
+
+    it.each([
+      ['no token', undefined],
+      ['a malformed header', 'Token admin-token'],
+      ['an unknown token', 'Bearer not-a-session'],
+      ['an expired token', 'Bearer expired-admin-token'],
+    ])('returns 401 with %s', async (_label, authorization) => {
+      const call = request(app.getHttpServer()).get(
+        '/admin/audit-log/action-01',
+      );
+      if (authorization) call.set('Authorization', authorization);
+      const response = await call.expect(401);
+
+      expect(JSON.stringify(response.body)).not.toContain('action-01');
+      expect(detailQueries).toHaveLength(0);
+    });
+
+    it.each(['user-token', 'moderator-token'])(
+      'returns 403 for a non-administrator (%s)',
+      async (token) => {
+        const response = await get('/admin/audit-log/action-01', token).expect(
+          403,
+        );
+        expect(JSON.stringify(response.body)).not.toContain('departed_admin');
+        expect(detailQueries).toHaveLength(0);
+      },
+    );
+
+    it('returns an entry whose actor was deleted with the username snapshot', async () => {
+      const body = await detail('action-01');
+
+      expect(body).toMatchObject({
+        actor_id: null,
+        actor_username: 'departed_admin',
+      });
+    });
+
+    it('returns an entry whose target no longer exists, without a join', async () => {
+      const body = await detail('action-03');
+
+      expect(body).toMatchObject({
+        target_type: 'user',
+        target_id: 'deleted-user',
+        metadata: { restriction_id: 'restriction-2', report_id: 'report-0' },
+      });
+      expect(Object.keys(body)).toHaveLength(8);
+      expect(detailQueries[0].sql).not.toMatch(/\bJOIN\b/i);
+      expect(detailQueries[0].sql).not.toMatch(
+        /\b(users|user_reports|user_restrictions)\b/,
+      );
+    });
+
+    it('returns metadata: null for an entry without metadata', async () => {
+      const response = await get('/admin/audit-log/same-second-b').expect(200);
+
+      expect(response.text).toContain('"metadata":null');
+      expect((response.body as Item).metadata).toBeNull();
+    });
+
+    it('never returns personal data or credentials', async () => {
+      for (const id of [
+        'action-01',
+        'action-03',
+        'action-25',
+        'same-second-b',
+      ]) {
+        const body = await detail(id);
+        const keys = collectKeys(body);
+        for (const forbidden of FORBIDDEN_KEYS) {
+          expect(keys).not.toContain(forbidden);
+        }
+        expect(JSON.stringify(body)).not.toMatch(/@|\$argon2|password/i);
+      }
+    });
+  });
+});
+
+describe('Admin audit log detail rate limiting', () => {
+  it('passes GET /admin/audit-log/:id through the global read buckets', async () => {
+    const calls: unknown[][] = [];
+    const interceptor = new ApiRateLimitInterceptor({
+      enforceApiRequest: (...args: unknown[]) => {
+        calls.push(args);
+        return Promise.resolve(30);
+      },
+    } as unknown as AuthRateLimitService);
+    const headers: Record<string, unknown> = {};
+    const context = {
+      switchToHttp: () => ({
+        getRequest: () => ({
+          method: 'GET',
+          path: '/admin/audit-log/action-01',
+          ip: '203.0.113.7',
+          socket: {},
+          user: { id: 'admin-id' },
+        }),
+        getResponse: () => ({
+          setHeader: (name: string, value: unknown) => {
+            headers[name] = value;
+          },
+        }),
+      }),
+    } as unknown as ExecutionContext;
+
+    await expect(
+      interceptor.intercept(context, { handle: () => of(null) }),
+    ).rejects.toMatchObject({ status: 429 });
+    expect(calls).toEqual([
+      ['203.0.113.7', 'GET', '/admin/audit-log/action-01', 'admin-id'],
+    ]);
+    expect(headers['Retry-After']).toBe(30);
   });
 });

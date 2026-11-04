@@ -183,6 +183,88 @@ describe('AdminAuditLogService', () => {
       },
     ]);
   });
+
+  describe('findOne', () => {
+    const fixture = (overrides: Record<string, unknown> = {}) => ({
+      id: 'action-1',
+      actor_id: 'admin-id',
+      actor_username: 'admin',
+      action: 'user_suspended',
+      target_type: 'user',
+      target_id: 'target-user',
+      metadata: {
+        restriction_id: 'r-1',
+        expires_at: '2026-04-01T00:00:00.000Z',
+        report_id: null,
+      },
+      created_at: new Date('2026-03-01T12:34:56Z'),
+      ...overrides,
+    });
+
+    it('looks up one entry by primary key with the id bound and LIMIT 1', async () => {
+      rows = [fixture()];
+
+      await service.findOne('action-1');
+
+      expect(calls).toHaveLength(1);
+      const sql = calls[0].sql.replace(/\s+/g, ' ').trim();
+      expect(sql).toBe(
+        'SELECT id, actor_id, actor_username, action, target_type, target_id, ' +
+          'metadata, created_at FROM admin_actions WHERE id = ? LIMIT 1',
+      );
+      expect(calls[0].values).toEqual(['action-1']);
+    });
+
+    it('never joins the target or any other table', async () => {
+      rows = [fixture()];
+
+      await service.findOne('action-1');
+
+      expect(calls[0].sql).not.toMatch(/\bJOIN\b/i);
+      expect(calls[0].sql).not.toMatch(
+        /\b(users|user_reports|user_restrictions)\b/,
+      );
+    });
+
+    it('throws 404 for an unknown id', async () => {
+      rows = [];
+
+      await expect(service.findOne('missing')).rejects.toMatchObject({
+        status: 404,
+        message: 'Audit entry not found',
+      });
+    });
+
+    it('maps an entry whose actor was deleted', async () => {
+      rows = [fixture({ actor_id: null, actor_username: 'departed_admin' })];
+
+      await expect(service.findOne('action-1')).resolves.toMatchObject({
+        actor_id: null,
+        actor_username: 'departed_admin',
+      });
+    });
+
+    it('returns metadata: null rather than {} or an omitted key', async () => {
+      rows = [fixture({ metadata: null })];
+
+      const item = await service.findOne('action-1');
+
+      expect(item).toHaveProperty('metadata');
+      expect(item.metadata).toBeNull();
+    });
+
+    it('returns the same item as the list for the same row', async () => {
+      const row = fixture();
+      rows = [row];
+      count = 1;
+
+      const listed = (await service.findAll(query())).items[0];
+      const detail = await service.findOne('action-1');
+
+      expect(detail).toStrictEqual(listed);
+      expect(detail).toStrictEqual(toAdminActionItem(row as AdminActionRow));
+    });
+  });
 });
 
 describe('toAdminActionItem', () => {

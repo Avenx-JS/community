@@ -398,6 +398,40 @@ follow up with `GET /admin/users/:id` or `GET /admin/reports/:id`; deleted
 targets return `404` there. Entries whose target no longer exists are still
 listed.
 
+#### `GET /admin/audit-log/:id`
+
+Returns a single entry, so that a report's history, a restriction's
+provenance, or a link in an incident write-up can point at one entry. List
+URLs cannot do that reliably, because page offsets shift as new actions are
+recorded. The route sits on the same controller and guards as the list:
+`401` for a missing, malformed or expired token, and `403` for members and
+platform moderators. An `id` that fails the route-parameter pattern
+(1–36 of `[A-Za-z0-9_-]`) returns `400`. An unknown `id` returns
+`404 Audit entry not found`. Every administrator can see the whole table, so
+nothing is owner-scoped and there is no reason to hide a `403` behind a `404`.
+
+**The item is identical to the list item.** The route returns the same object
+that `GET /admin/audit-log` returns in `items[]`, field for field, including
+`metadata` and the `created_at` format. Both routes use one mapper
+(`toAdminActionItem`) and one OpenAPI class (`AdminActionItemResponse`). A test
+fetches every entry both ways and compares the results. `metadata` is the
+stored allowlisted JSON, or `null`. It was validated when it was written, and
+it is not re-validated or re-shaped when it is read.
+
+**The target is never resolved.** The lookup is a primary-key
+`SELECT … FROM admin_actions WHERE id = ? LIMIT 1` with no join to `users`,
+`user_reports` or `user_restrictions`. `target_id` is polymorphic and has no
+foreign key on purpose, so that an entry outlives the thing it refers to. A
+nested target object would have nothing to show once the target is deleted,
+so the detail route returns the raw id, just as the list does. The actor is
+treated the same way: `actor_id` becomes `null` when the account is deleted,
+and `actor_username` keeps the snapshot.
+
+**Entries are immutable.** There is no `PATCH`, `PUT` or `DELETE` on
+`/admin/audit-log/:id`, and adding one is out of scope by design, not an
+omission. The route falls under the global read rate-limit buckets, with no
+dedicated bucket and no exemption.
+
 Index use per filter (MySQL picks one index; other conditions filter its
 rows):
 

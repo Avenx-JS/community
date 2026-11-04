@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { Pool, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import type { AdminAction, AdminActionTarget } from './audit-log.service';
@@ -136,5 +136,23 @@ export class AdminAuditLogService {
         sort: query.sort ?? 'new',
       },
     };
+  }
+
+  // A primary-key lookup with no join: target_id is polymorphic with no
+  // foreign key, so the target may be gone and the entry must still render.
+  // The item comes from the same mapper as the list, so the two cannot drift.
+  async findOne(id: string): Promise<AdminActionItem> {
+    const [rows] = await this.pool.execute<AdminActionRow[]>(
+      `SELECT id, actor_id, actor_username, action, target_type, target_id,
+         metadata, created_at
+       FROM admin_actions
+       WHERE id = ? LIMIT 1`,
+      [id],
+    );
+    const row = rows[0];
+    if (!row) {
+      throw new NotFoundException('Audit entry not found');
+    }
+    return toAdminActionItem(row);
   }
 }
