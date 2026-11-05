@@ -6,6 +6,7 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  Patch,
   Put,
   Query,
   Req,
@@ -23,8 +24,16 @@ import {
   ApiErrorResponses,
   ApiRouteParam,
 } from '../common/openapi';
-import { CommentReplyListResponse } from './comments.responses';
-import { CommentsService, type CommentReplyListDto } from './comments.service';
+import {
+  CommentReplyListResponse,
+  CommentReplyResponse,
+} from './comments.responses';
+import {
+  CommentsService,
+  type CommentReplyDto,
+  type CommentReplyListDto,
+} from './comments.service';
+import { UpdateCommentDto } from './dto/update-comment.dto';
 import { ListCommentRepliesDto } from './dto/list-comment-replies.dto';
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
 import { CastVoteDto } from '../votes/dto/cast-vote.dto';
@@ -69,6 +78,32 @@ export class CommentsController {
     @Query() query: ListCommentRepliesDto,
   ): Promise<CommentReplyListDto> {
     return this.commentsService.findReplies(id, query);
+  }
+
+  @Patch(':id')
+  @UseGuards(AuthGuard)
+  @ApiOperation({
+    summary: 'Edit your comment',
+    description:
+      'Author only: unlike DELETE /comments/{id}, moderators and the ' +
+      'community creator may not edit. Only content is editable; parent_id ' +
+      'is immutable. Submitting the stored content changes nothing and ' +
+      'leaves edited_at unchanged. Not gated on rule acceptance.',
+  })
+  @ApiAuthenticated({ forbidden: 'Only the author may edit this content.' })
+  @ApiRouteParam('id', 'id', 'Comment ID.')
+  @ApiOkResponse({ type: CommentReplyResponse })
+  @ApiErrorResponses({
+    400: 'Invalid comment ID or comment data, or a non-editable property.',
+    404: 'Comment not found, or its community is deleted or suspended.',
+    409: 'The comment or its post was removed, or the discussion is locked.',
+  })
+  update(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Body() body: UpdateCommentDto,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<CommentReplyDto> {
+    return this.commentsService.update(id, body, request.user.id);
   }
 
   @Put(':id/vote')

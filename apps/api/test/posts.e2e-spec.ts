@@ -47,6 +47,8 @@ interface TestPost {
   pinned_at: Date | null;
   pinned_by: string | null;
   removed_at?: Date | null;
+  locked_at?: Date | null;
+  edited_at?: Date | null;
 }
 
 interface TestModerationEntry {
@@ -67,9 +69,12 @@ describe('Post endpoints (e2e)', () => {
   let rules: RulesStore;
   let openConnections: number;
   let deletedCommunities: Set<string>;
+  let suspendedCommunities: Set<string>;
   let moderationLog: TestModerationEntry[];
   let failModerationLog: boolean;
   let pinClock: number;
+  // The database clock of UTC_TIMESTAMP() in an edit.
+  const editClock = '2026-11-05T12:00:00.000Z';
   const communities = [
     'community-1',
     'community-2',
@@ -134,6 +139,7 @@ describe('Post endpoints (e2e)', () => {
     });
     openConnections = 0;
     deletedCommunities = new Set();
+    suspendedCommunities = new Set();
     moderationLog = [];
     failModerationLog = false;
     pinClock = 0;
@@ -143,6 +149,10 @@ describe('Post endpoints (e2e)', () => {
       !(
         sql.includes('deleted_at IS NULL') &&
         deletedCommunities.has(post.community_id)
+      ) &&
+      !(
+        sql.includes('suspended_at IS NULL') &&
+        suspendedCommunities.has(post.community_id)
       );
 
     // Evaluates the fan-out's recipient selection over the shared fixture;
@@ -283,6 +293,37 @@ describe('Post endpoints (e2e)', () => {
           const limit = values[values.length - 2] as number;
           const offset = values[values.length - 1] as number;
           return [rows.slice(offset, offset + limit), []];
+        }
+        // PATCH /posts/:id: the locking read and the dynamic update. The
+        // update replaces the row object, so a rollback's snapshot restores
+        // the previous version.
+        if (sql.startsWith('SELECT id, author_id, type, title, content')) {
+          const [id] = values as [string];
+          return [
+            posts
+              .filter((post) => post.id === id && visible(post, sql))
+              .map((post) => ({
+                ...post,
+                locked_at: post.locked_at ?? null,
+                removed_at: post.removed_at ?? null,
+              })),
+            [],
+          ];
+        }
+        if (/^UPDATE posts SET (title|content) = \?/.test(sql)) {
+          const id = values[values.length - 1] as string;
+          const columns = [...sql.matchAll(/(title|content) = \?/g)].map(
+            (match) => match[1] as 'title' | 'content',
+          );
+          const changes = Object.fromEntries(
+            columns.map((column, index) => [column, values[index]]),
+          );
+          posts = posts.map((post) =>
+            post.id === id
+              ? { ...post, ...changes, edited_at: new Date(editClock) }
+              : post,
+          );
+          return [{ affectedRows: 1 }, []];
         }
         if (sql.startsWith('SELECT id, title, content, type')) {
           const [id] = values as [string];
@@ -599,6 +640,7 @@ describe('Post endpoints (e2e)', () => {
           'id',
           'pinned_at',
           'pinned_by',
+          'edited_at',
           'score',
           'title',
           'type',
@@ -1101,6 +1143,7 @@ describe('Post endpoints (e2e)', () => {
           community_id: 'community-1',
           created_at: '2026-10-22T08:00:00.000Z',
           pinned_at: '2026-11-01T08:01:00.000Z',
+          edited_at: null,
           pinned_by: userId,
           score: 0,
         });
@@ -1372,6 +1415,246 @@ describe('Post endpoints (e2e)', () => {
         .expect(201);
       expect(created.body).toMatchObject({ score: 0 });
       expect(scoreQueries()).toHaveLength(0);
+    });
+  });
+
+  describe('PATCH /posts/:id', () => {
+    const patch = (path: string, body: object, token?: string) => {
+      const call = request(app.getHttpServer()).patch(path).send(body);
+      return token ? call.set('Authorization', `Bearer ${token}`) : call;
+    };
+    const stored = (id: string) => posts.find((post) => post.id === id);
+    const edits = () =>
+      queryCalls.filter(({ sql }) =>
+        /^UPDATE posts SET (title|content)/.test(sql),
+      );
+    const addLinkPost = (id: string, type: 'link' | 'media') =>
+      posts.push({
+        id,
+        title: 'A link',
+        content: 'https://example.com/original',
+        type,
+        author_id: 'user-1',
+        community_id: 'community-1',
+        created_at: new Date('2026-10-20T08:00:00.000Z'),
+        pinned_at: null,
+        pinned_by: null,
+      });
+
+    afterEach(() => {
+      expect(openConnections).toBe(0);
+    });
+
+    it('lets the author edit the title alone, keeping content, id and created_at', async () => {
+      const response = await patch(
+        '/posts/post-1',
+        { title: '  Corrected  ' },
+        'valid-token',
+      ).expect(200);
+      expect(response.body).toEqual({
+        id: 'post-1',
+        title: 'Corrected',
+        content: 'First body',
+        type: 'text',
+        author_id: 'user-1',
+        community_id: 'community-1',
+        created_at: '2026-10-22T08:00:00.000Z',
+        pinned_at: null,
+        pinned_by: null,
+        edited_at: editClock,
+        score: 0,
+      });
+      expect(stored('post-1')).toMatchObject({
+        title: 'Corrected',
+        content: 'First body',
+      });
+    });
+
+    it('lets the author edit the content alone', async () => {
+      await patch('/posts/post-1', { content: 'New body' }, 'valid-token')
+        .expect(200)
+        .expect(({ body }) =>
+          expect(body).toMatchObject({ title: 'First', content: 'New body' }),
+        );
+    });
+
+    it('preserves the id, created_at and votes of the post', async () => {
+      votes.push(
+        { user_id: 'u1', target_type: 'post', target_id: 'post-1', value: 1 },
+        { user_id: 'u2', target_type: 'post', target_id: 'post-1', value: 1 },
+      );
+      const before = { ...stored('post-1') };
+      const response = await patch(
+        '/posts/post-1',
+        { title: 'T', content: 'C' },
+        'valid-token',
+      ).expect(200);
+      expect(response.body).toMatchObject({
+        id: before.id,
+        created_at: before.created_at?.toISOString(),
+        score: 2,
+      });
+      expect(votes).toHaveLength(2);
+      // An edit is an UPDATE, never a delete and re-insert.
+      expect(
+        queryCalls.some(({ sql }) =>
+          /^(DELETE FROM posts|INSERT INTO posts)/.test(sql),
+        ),
+      ).toBe(false);
+    });
+
+    it('answers identical values with 200 and leaves edited_at null', async () => {
+      const response = await patch(
+        '/posts/post-1',
+        { title: ' First ', content: 'First body' },
+        'valid-token',
+      ).expect(200);
+      expect(response.body).toMatchObject({ edited_at: null });
+      expect(edits()).toHaveLength(0);
+    });
+
+    it.each([
+      [{}, 'an empty body'],
+      [{ title: '' }, 'an empty title'],
+      [{ content: '   ' }, 'blank content'],
+      [{ title: 'x'.repeat(301) }, 'a long title'],
+      [{ title: 'T', type: 'link' }, 'type'],
+      [{ title: 'T', community_id: 'community-2' }, 'community_id'],
+      [{ title: 'T', author_id: 'user-2' }, 'author_id'],
+      [{ title: 'T', created_at: '2020-01-01T00:00:00Z' }, 'created_at'],
+      [{ title: 'T', pinned_at: null }, 'an unknown property'],
+    ] as [object, string][])(
+      'refuses %o (%s) with 400 and writes nothing',
+      async (body) => {
+        await patch('/posts/post-1', body, 'valid-token').expect(400);
+        expect(edits()).toHaveLength(0);
+        expect(stored('post-1')?.title).toBe('First');
+      },
+    );
+
+    it.each([
+      ['moderator-token', 'a community moderator'],
+      ['creator-token', 'the community creator'],
+      ['other-moderator-token', 'an unrelated user'],
+    ])('answers %s (%s) with 403', async (token) => {
+      const response = await patch(
+        '/posts/post-1',
+        { title: 'Hijacked' },
+        token,
+      ).expect(403);
+      expect((response.body as { message: string }).message).toBe(
+        'Only the author may edit this post',
+      );
+      expect(stored('post-1')?.title).toBe('First');
+    });
+
+    it('lets the same moderator delete the post they may not edit', async () => {
+      await patch('/posts/post-1', { title: 'x' }, 'moderator-token').expect(
+        403,
+      );
+      await request(app.getHttpServer())
+        .delete('/posts/post-1')
+        .set('Authorization', 'Bearer moderator-token')
+        .expect(204);
+    });
+
+    it('answers 401 without a token, 404 for an unknown post and 400 for a malformed id', async () => {
+      await patch('/posts/post-1', { title: 'T' }).expect(401);
+      await patch('/posts/missing', { title: 'T' }, 'valid-token').expect(404);
+      await patch(
+        '/posts/post-1%27%20OR%201%3D1',
+        { title: 'T' },
+        'valid-token',
+      ).expect(400);
+    });
+
+    it('answers 409 for a post removed by moderation', async () => {
+      stored('post-1')!.removed_at = new Date('2026-11-01T00:00:00.000Z');
+      await patch('/posts/post-1', { title: 'Rewrite' }, 'valid-token').expect(
+        409,
+      );
+      expect(edits()).toHaveLength(0);
+    });
+
+    it('answers 404 in a deleted or suspended community', async () => {
+      deletedCommunities.add('community-1');
+      await patch('/posts/post-1', { title: 'T' }, 'valid-token').expect(404);
+      deletedCommunities.clear();
+      suspendedCommunities.add('community-1');
+      await patch('/posts/post-1', { title: 'T' }, 'valid-token').expect(404);
+      expect(edits()).toHaveLength(0);
+    });
+
+    it('lets the author edit their own locked post', async () => {
+      stored('post-1')!.locked_at = new Date('2026-11-01T00:00:00.000Z');
+      await patch('/posts/post-1', { content: 'Fixed' }, 'valid-token').expect(
+        200,
+      );
+    });
+
+    it('succeeds for an author who has not accepted the current rules', async () => {
+      rules.publish('community-1');
+      await patch('/posts/post-1', { title: 'Fixed' }, 'valid-token').expect(
+        200,
+      );
+      // The same author may no longer create a post there.
+      await request(app.getHttpServer())
+        .post('/posts')
+        .set('Authorization', 'Bearer valid-token')
+        .send({
+          title: 'New',
+          content: 'Body',
+          type: 'text',
+          community_id: 'community-1',
+        })
+        .expect(403);
+    });
+
+    describe.each(['link', 'media'] as const)(
+      "a %s post's content, validated against its stored type",
+      (type) => {
+        const id = `${type}-post`;
+        beforeEach(() => {
+          addLinkPost(id, type);
+        });
+
+        it('accepts an HTTP(S) URL', async () => {
+          await patch(
+            `/posts/${id}`,
+            { content: 'https://example.org/new' },
+            'valid-token',
+          ).expect(200);
+        });
+
+        it.each([
+          'plain text, not a URL',
+          'https://user:pass@example.com/',
+          'ftp://example.com/file',
+          'javascript:alert(1)',
+          'https://example.com/a\\b',
+          'https://example.com/\u0007',
+        ])('refuses %j with 400 and writes nothing', async (content) => {
+          await patch(`/posts/${id}`, { content }, 'valid-token').expect(400);
+          expect(edits()).toHaveLength(0);
+          expect(stored(id)?.content).toBe('https://example.com/original');
+        });
+
+        it('accepts a title-only edit without a URL check', async () => {
+          await patch(
+            `/posts/${id}`,
+            { title: 'Renamed' },
+            'valid-token',
+          ).expect(200);
+        });
+      },
+    );
+
+    it('accepts arbitrary text on a text post', async () => {
+      await patch(
+        '/posts/post-1',
+        { content: 'Not a URL, and fine for a text post' },
+        'valid-token',
+      ).expect(200);
     });
   });
 });

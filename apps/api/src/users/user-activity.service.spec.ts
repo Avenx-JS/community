@@ -131,6 +131,7 @@ describe('UserActivityService', () => {
           created_at: '2026-10-22T08:00:00.000Z',
           pinned_at: null,
           pinned_by: null,
+          edited_at: null,
           score: 0,
         },
       ]);

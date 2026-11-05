@@ -47,6 +47,16 @@ export class PostResponse implements PostDto {
   pinned_by!: string | null;
 
   @ApiProperty({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description:
+      "When the author last changed the post's title or content; null if " +
+      'never edited.',
+  })
+  edited_at!: string | null;
+
+  @ApiProperty({
     type: 'integer',
     description: 'Sum of all vote values on the post; 0 without votes.',
   })

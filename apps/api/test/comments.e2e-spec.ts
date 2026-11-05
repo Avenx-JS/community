@@ -42,6 +42,8 @@ interface TestComment {
   content: string;
   created_at: Date;
   removed_at?: Date | null;
+  locked_at?: Date | null;
+  edited_at?: Date | null;
 }
 
 interface ListedComment {
@@ -76,6 +78,11 @@ describe('Comment endpoints (e2e)', () => {
   let openConnections: number;
   let rules: RulesStore;
   let deletedCommunities: Set<string>;
+  let suspendedCommunities: Set<string>;
+  let lockedPosts: Set<string>;
+  let removedPosts: Set<string>;
+  // The database clock of UTC_TIMESTAMP() in an edit.
+  const editClock = '2026-11-05T12:00:00.000Z';
   const postIds = ['post-1', 'post-2'];
   const postAuthors = new Map([
     ['post-1', 'user-2'],
@@ -137,6 +144,9 @@ describe('Comment endpoints (e2e)', () => {
     failNotificationWrite = false;
     openConnections = 0;
     deletedCommunities = new Set();
+    suspendedCommunities = new Set();
+    lockedPosts = new Set();
+    removedPosts = new Set();
     // A statement that excludes deleted communities does not see a post in
     // one; a statement that forgets the exclusion still does.
     const visiblePost = (postId: string, sql: string) =>
@@ -176,6 +186,68 @@ describe('Comment endpoints (e2e)', () => {
         const ruleAnswer = rules.handle(sql, values);
         if (ruleAnswer) {
           return ruleAnswer;
+        }
+        // PATCH /comments/:id: the locking read (with its post's state),
+        // the update and the re-read. The update replaces the row object, so
+        // a rollback's snapshot restores the previous version.
+        if (
+          sql.startsWith('SELECT comments.id, comments.author_id') &&
+          sql.includes('comments.locked_at')
+        ) {
+          const [id] = values as [string];
+          const comment = comments.find((entry) => entry.id === id);
+          const suspended =
+            comment !== undefined &&
+            sql.includes('suspended_at IS NULL') &&
+            suspendedCommunities.has(
+              postCommunities.get(comment.post_id) as string,
+            );
+          return [
+            comment && visiblePost(comment.post_id, sql) && !suspended
+              ? [
+                  {
+                    ...comment,
+                    locked_at: comment.locked_at ?? null,
+                    removed_at: comment.removed_at ?? null,
+                    post_locked_at: lockedPosts.has(comment.post_id)
+                      ? new Date('2026-11-01T00:00:00.000Z')
+                      : null,
+                    post_removed_at: removedPosts.has(comment.post_id)
+                      ? new Date('2026-11-01T00:00:00.000Z')
+                      : null,
+                  },
+                ]
+              : [],
+            [],
+          ];
+        }
+        if (
+          sql ===
+          'UPDATE comments SET content = ?, edited_at = UTC_TIMESTAMP() WHERE id = ?'
+        ) {
+          const [content, id] = values as [string, string];
+          comments = comments.map((comment) =>
+            comment.id === id
+              ? { ...comment, content, edited_at: new Date(editClock) }
+              : comment,
+          );
+          return [{ affectedRows: 1 }, []];
+        }
+        if (
+          sql.startsWith(
+            'SELECT id, post_id, parent_id, author_id, content, created_at, edited_at FROM comments WHERE id = ?',
+          )
+        ) {
+          const [id] = values as [string];
+          return [
+            comments
+              .filter((comment) => comment.id === id)
+              .map((comment) => ({
+                ...comment,
+                edited_at: comment.edited_at ?? null,
+              })),
+            [],
+          ];
         }
         if (sql.startsWith('SELECT comments.id FROM comments')) {
           const [id] = values as [string];
@@ -458,6 +530,7 @@ describe('Comment endpoints (e2e)', () => {
       'valid-token': 'user-1',
       'moderator-token': 'user-mod',
       'post-author-token': 'user-2',
+      'creator-token': 'creator-1',
     };
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
@@ -544,6 +617,7 @@ describe('Comment endpoints (e2e)', () => {
         'parent_id',
         'post_id',
         'replies',
+        'edited_at',
         'score',
       ].sort(),
     );
@@ -1321,6 +1395,176 @@ describe('Comment endpoints (e2e)', () => {
         .expect(201);
       expect(created.body).toMatchObject({ score: 0, replies: [] });
       expect(scoreQueries()).toHaveLength(0);
+    });
+  });
+
+  describe('PATCH /comments/:id', () => {
+    const patch = (path: string, body: object, token?: string) => {
+      const call = request(app.getHttpServer()).patch(path).send(body);
+      return token ? call.set('Authorization', `Bearer ${token}`) : call;
+    };
+    const stored = (id: string) =>
+      comments.find((comment) => comment.id === id);
+    const edits = () =>
+      queryCalls.filter(({ sql }) => sql.startsWith('UPDATE comments'));
+
+    afterEach(() => {
+      expect(openConnections).toBe(0);
+    });
+
+    it('lets the author edit the content, keeping its place in the thread', async () => {
+      const response = await patch(
+        '/comments/root-1',
+        { content: '  Corrected  ' },
+        'valid-token',
+      ).expect(200);
+      expect(response.body).toEqual({
+        id: 'root-1',
+        post_id: 'post-1',
+        parent_id: null,
+        author_id: 'user-1',
+        content: 'Corrected',
+        created_at: '2026-10-22T08:00:00.000Z',
+        edited_at: editClock,
+        reply_count: 1,
+        score: 0,
+      });
+
+      // The reply chain beneath it is untouched.
+      const thread = await request(app.getHttpServer())
+        .get('/posts/post-1/comments')
+        .expect(200);
+      expect(
+        (thread.body as { comments: CommentNode[] }).comments[0],
+      ).toMatchObject({
+        id: 'root-1',
+        edited_at: editClock,
+        replies: [{ id: 'reply-1', replies: [{ id: 'nested-reply' }] }],
+      });
+    });
+
+    it('answers identical content with 200 and leaves edited_at null', async () => {
+      await patch(
+        '/comments/root-1',
+        { content: 'Root comment' },
+        'valid-token',
+      )
+        .expect(200)
+        .expect(({ body }) => expect(body).toMatchObject({ edited_at: null }));
+      expect(edits()).toHaveLength(0);
+    });
+
+    it.each([
+      [{}, 'an empty body'],
+      [{ content: '  ' }, 'blank content'],
+      [{ content: 'x'.repeat(16384) }, 'long content'],
+      [{ content: 'Moved', parent_id: 'root-2' }, 'parent_id'],
+      [{ content: 'Moved', post_id: 'post-2' }, 'post_id'],
+      [{ content: 'Mine', author_id: 'user-2' }, 'author_id'],
+    ] as [object, string][])(
+      'refuses %o (%s) with 400 and writes nothing',
+      async (body) => {
+        await patch('/comments/root-1', body, 'valid-token').expect(400);
+        expect(edits()).toHaveLength(0);
+        expect(stored('root-1')).toMatchObject({
+          content: 'Root comment',
+          parent_id: null,
+        });
+      },
+    );
+
+    it.each([
+      ['moderator-token', 'a community moderator'],
+      ['creator-token', 'the community creator'],
+      ['post-author-token', 'an unrelated user'],
+    ])('answers %s (%s) with 403', async (token) => {
+      const response = await patch(
+        '/comments/root-1',
+        { content: 'Hijacked' },
+        token,
+      ).expect(403);
+      expect((response.body as { message: string }).message).toBe(
+        'Only the author may edit this comment',
+      );
+      expect(stored('root-1')?.content).toBe('Root comment');
+    });
+
+    it('lets the same moderator delete the comment they may not edit', async () => {
+      await patch(
+        '/comments/root-1',
+        { content: 'x' },
+        'moderator-token',
+      ).expect(403);
+      await request(app.getHttpServer())
+        .delete('/comments/root-1')
+        .set('Authorization', 'Bearer moderator-token')
+        .expect(204);
+    });
+
+    it('answers 401 without a token, 404 for an unknown comment and 400 for a malformed id', async () => {
+      await patch('/comments/root-1', { content: 'x' }).expect(401);
+      await patch('/comments/missing', { content: 'x' }, 'valid-token').expect(
+        404,
+      );
+      await patch(
+        '/comments/root-1%27%20OR%201%3D1',
+        { content: 'x' },
+        'valid-token',
+      ).expect(400);
+    });
+
+    it.each([
+      [
+        'the comment is removed',
+        () => {
+          stored('root-1')!.removed_at = new Date('2026-11-01T00:00:00.000Z');
+        },
+      ],
+      ['its post is removed', () => removedPosts.add('post-1')],
+      [
+        'the comment is locked',
+        () => {
+          stored('root-1')!.locked_at = new Date('2026-11-01T00:00:00.000Z');
+        },
+      ],
+      ['its post is locked', () => lockedPosts.add('post-1')],
+    ] as [string, () => void][])(
+      'answers 409 when %s',
+      async (_label, arrange) => {
+        arrange();
+        await patch('/comments/root-1', { content: 'x' }, 'valid-token').expect(
+          409,
+        );
+        expect(edits()).toHaveLength(0);
+      },
+    );
+
+    it('answers 404 in a deleted or suspended community', async () => {
+      deletedCommunities.add('community-1');
+      await patch('/comments/root-1', { content: 'x' }, 'valid-token').expect(
+        404,
+      );
+      deletedCommunities.clear();
+      suspendedCommunities.add('community-1');
+      await patch('/comments/root-1', { content: 'x' }, 'valid-token').expect(
+        404,
+      );
+      expect(edits()).toHaveLength(0);
+    });
+
+    it('succeeds for an author who has not accepted the current rules', async () => {
+      rules.publish('community-1');
+      await patch(
+        '/comments/root-1',
+        { content: 'Fixed' },
+        'valid-token',
+      ).expect(200);
+      // The same author may no longer reply there.
+      await request(app.getHttpServer())
+        .post('/posts/post-1/comments')
+        .set('Authorization', 'Bearer valid-token')
+        .send({ content: 'New' })
+        .expect(403);
     });
   });
 });

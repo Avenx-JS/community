@@ -1,4 +1,5 @@
 import {
+  ConflictException,
   ForbiddenException,
   Inject,
   Injectable,
@@ -6,17 +7,26 @@ import {
   PayloadTooLargeException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
+import type {
+  Pool,
+  PoolConnection,
+  ResultSetHeader,
+  RowDataPacket,
+} from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import {
   canModerateCommunitySql,
   isSqlTrue,
 } from '../common/community-moderation';
-import { activeCommunitySql } from '../common/community-visibility';
+import {
+  activeCommunitySql,
+  listedCommunitySql,
+} from '../common/community-visibility';
 import type { NotificationEntry } from '../notifications/notification-metadata';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreateCommentDto } from './dto/create-comment.dto';
+import { UpdateCommentDto } from './dto/update-comment.dto';
 import type {
   CommentListSort,
   ListCommentRepliesDto,
@@ -30,7 +40,23 @@ interface CommentRow extends RowDataPacket {
   parent_id: string | null;
   content: string;
   created_at: Date | string;
+  edited_at?: Date | string | null;
 }
+
+interface EditableCommentRow extends RowDataPacket {
+  id: string;
+  author_id: string;
+  content: string;
+  locked_at: Date | string | null;
+  removed_at: Date | string | null;
+  post_locked_at: Date | string | null;
+  post_removed_at: Date | string | null;
+}
+
+type Executor = Pick<Pool | PoolConnection, 'execute'>;
+
+const toIsoOrNull = (value: Date | string | null | undefined): string | null =>
+  value === null || value === undefined ? null : new Date(value).toISOString();
 
 interface RemovableCommentRow extends RowDataPacket {
   id: string;
@@ -78,6 +104,8 @@ export interface CommentDto {
   parent_id: string | null;
   content: string;
   created_at: string;
+  // When the author last changed the content; null if never edited.
+  edited_at: string | null;
   // Sum of all vote values; 0 without votes.
   score: number;
   replies: CommentDto[];
@@ -124,7 +152,7 @@ export class CommentsService {
   async findThread(postId: string): Promise<CommentThreadDto> {
     await this.ensurePostExists(postId);
     const [rows] = await this.pool.execute<CommentRow[]>(
-      'SELECT id, post_id, author_id, parent_id, content, created_at FROM comments WHERE post_id = ? ORDER BY created_at ASC, id ASC LIMIT ?',
+      'SELECT id, post_id, author_id, parent_id, content, created_at, edited_at FROM comments WHERE post_id = ? ORDER BY created_at ASC, id ASC LIMIT ?',
       [postId, MAX_COMMENTS_PER_THREAD + 1],
     );
     if (rows.length > MAX_COMMENTS_PER_THREAD) {
@@ -146,6 +174,7 @@ export class CommentsService {
         parent_id: row.parent_id,
         content: row.content,
         created_at: new Date(row.created_at).toISOString(),
+        edited_at: toIsoOrNull(row.edited_at),
         score: scores.get(row.id) ?? 0,
         replies: [],
       });
@@ -235,25 +264,8 @@ export class CommentsService {
     const [countRows] = await this.pool.execute<
       (RowDataPacket & { total: number | string })[]
     >(`SELECT COUNT(*) AS total FROM comments WHERE ${where}`, values);
-    const ids = rows.map((row) => row.id);
-    const replyCounts = await this.countReplies(ids);
-    const scores = await loadVoteScores(this.pool, 'comment', ids);
-
     return {
-      items: rows.map((row) => ({
-        id: row.id,
-        post_id: row.post_id,
-        parent_id: row.parent_id,
-        author_id: row.author_id,
-        content: row.content,
-        created_at: new Date(row.created_at).toISOString(),
-        edited_at:
-          row.edited_at === null || row.edited_at === undefined
-            ? null
-            : new Date(row.edited_at).toISOString(),
-        reply_count: replyCounts.get(row.id) ?? 0,
-        score: scores.get(row.id) ?? 0,
-      })),
+      items: await this.toReplyDtos(this.pool, rows),
       page,
       limit,
       total: Number(countRows[0]?.total ?? 0),
@@ -261,20 +273,124 @@ export class CommentsService {
     };
   }
 
+  // Flat comments with their reply counts and scores: two grouped queries
+  // over the rows' ids, whatever their number.
+  private async toReplyDtos(
+    executor: Executor,
+    rows: CommentReplyRow[],
+  ): Promise<CommentReplyDto[]> {
+    const ids = rows.map((row) => row.id);
+    const replyCounts = await this.countReplies(executor, ids);
+    const scores = await loadVoteScores(executor, 'comment', ids);
+    return rows.map((row) => ({
+      id: row.id,
+      post_id: row.post_id,
+      parent_id: row.parent_id,
+      author_id: row.author_id,
+      content: row.content,
+      created_at: new Date(row.created_at).toISOString(),
+      edited_at: toIsoOrNull(row.edited_at),
+      reply_count: replyCounts.get(row.id) ?? 0,
+      score: scores.get(row.id) ?? 0,
+    }));
+  }
+
   // Visible direct replies per comment id: one grouped query over the
   // page's ids, not a subquery per row. An id absent from the result has
   // no replies.
-  private async countReplies(ids: string[]): Promise<Map<string, number>> {
+  private async countReplies(
+    executor: Executor,
+    ids: string[],
+  ): Promise<Map<string, number>> {
     if (ids.length === 0) {
       return new Map();
     }
-    const [rows] = await this.pool.execute<
+    const [rows] = await executor.execute<
       (RowDataPacket & { parent_id: string; reply_count: number | string })[]
     >(
       `SELECT parent_id, COUNT(*) AS reply_count FROM comments WHERE parent_id IN (${ids.map(() => '?').join(', ')}) AND ${VISIBLE_COMMENT_SQL} GROUP BY parent_id`,
       ids,
     );
     return new Map(rows.map((row) => [row.parent_id, Number(row.reply_count)]));
+  }
+
+  // PATCH /comments/:id. Only the author may edit, never a moderator or the
+  // community creator (unlike remove(), where moderators may act). Not gated
+  // on rule acceptance: correcting existing content is not new
+  // participation. Order: 404 (unknown, or deleted or suspended community),
+  // 403 (not the author), 409 (the comment or its post removed, or the
+  // comment or its post locked: a lock closes the discussion, which a
+  // comment is part of). Submitting the stored content changes nothing and
+  // leaves edited_at untouched. Returns the flat comment, not a thread node
+  // with an empty replies array that would misrepresent its replies.
+  async update(
+    id: string,
+    input: UpdateCommentDto,
+    actorId: string,
+  ): Promise<CommentReplyDto> {
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+
+      const [comments] = await connection.execute<EditableCommentRow[]>(
+        `SELECT comments.id, comments.author_id, comments.content,
+           comments.locked_at, comments.removed_at,
+           posts.locked_at AS post_locked_at, posts.removed_at AS post_removed_at
+         FROM comments
+         INNER JOIN posts ON posts.id = comments.post_id
+         WHERE comments.id = ? AND ${listedCommunitySql('posts.community_id')}
+         LIMIT 1 FOR UPDATE OF comments`,
+        [id],
+      );
+      const comment = comments[0];
+      if (!comment) {
+        throw new NotFoundException('Comment not found');
+      }
+      if (comment.author_id !== actorId) {
+        throw new ForbiddenException('Only the author may edit this comment');
+      }
+      if (comment.removed_at || comment.post_removed_at) {
+        throw new ConflictException(
+          comment.removed_at
+            ? 'This comment was removed by a moderator and cannot be edited'
+            : 'The post of this comment was removed and its comments cannot be edited',
+        );
+      }
+      if (comment.locked_at || comment.post_locked_at) {
+        throw new ConflictException(
+          'This discussion is locked; its comments cannot be edited',
+        );
+      }
+
+      if (input.content !== comment.content) {
+        await connection.execute<ResultSetHeader>(
+          'UPDATE comments SET content = ?, edited_at = UTC_TIMESTAMP() WHERE id = ?',
+          [input.content, id],
+        );
+      }
+
+      const [rows] = await connection.execute<CommentReplyRow[]>(
+        `SELECT ${COMMENT_REPLY_COLUMNS} FROM comments WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      if (!rows[0]) {
+        throw new Error('Edited comment could not be retrieved');
+      }
+      const [dto] = await this.toReplyDtos(connection, [rows[0]]);
+
+      await connection.commit();
+      return dto;
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
   }
 
   // Exactly one notification per comment: a top-level comment notifies the
@@ -337,7 +453,7 @@ export class CommentsService {
       );
 
       const [comments] = await connection.execute<CommentRow[]>(
-        'SELECT id, post_id, author_id, parent_id, content, created_at FROM comments WHERE id = ? LIMIT 1',
+        'SELECT id, post_id, author_id, parent_id, content, created_at, edited_at FROM comments WHERE id = ? LIMIT 1',
         [id],
       );
       const comment = comments[0];
@@ -383,6 +499,7 @@ export class CommentsService {
         parent_id: comment.parent_id,
         content: comment.content,
         created_at: new Date(comment.created_at).toISOString(),
+        edited_at: toIsoOrNull(comment.edited_at),
         // A new comment has no votes yet.
         score: 0,
         replies: [],

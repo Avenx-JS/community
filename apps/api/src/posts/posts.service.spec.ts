@@ -276,6 +276,7 @@ describe('PostsService.create notifications', () => {
       ...createdPost,
       id: postId,
       created_at: '2026-10-30T08:00:00.000Z',
+      edited_at: null,
       score: 0,
     });
     expect(queries[1].values[0]).toBe(postId);
@@ -1296,5 +1297,307 @@ describe('PostsService.pin and unpin', () => {
       expect(store.posts.get('post-1')?.pinned_by).toBe('moderator');
       expectRolledBackAndReleased();
     });
+  });
+});
+
+describe('PostsService.update', () => {
+  type StoredPost = {
+    id: string;
+    author_id: string;
+    type: 'text' | 'link' | 'media';
+    title: string;
+    content: string;
+    community_id: string;
+    created_at: Date;
+    locked_at: Date | null;
+    removed_at: Date | null;
+    edited_at: Date | null;
+  };
+  let service: PostsService;
+  let posts: Map<string, StoredPost>;
+  let queries: Array<{ sql: string; values: unknown[] }>;
+  let hidden: boolean;
+  let failUpdate: boolean;
+  let connection: {
+    beginTransaction: jest.Mock;
+    commit: jest.Mock;
+    rollback: jest.Mock;
+    release: jest.Mock;
+    execute: (sql: string, values: unknown[]) => Promise<[unknown, unknown]>;
+  };
+  const clock = new Date('2026-11-05T12:00:00.000Z');
+
+  const addPost = (
+    id: string,
+    type: StoredPost['type'],
+    content: string,
+    overrides: Partial<StoredPost> = {},
+  ) =>
+    posts.set(id, {
+      id,
+      author_id: 'author',
+      type,
+      title: 'Title',
+      content,
+      community_id: 'community-1',
+      created_at: new Date('2026-10-22T08:00:00.000Z'),
+      locked_at: null,
+      removed_at: null,
+      edited_at: null,
+      ...overrides,
+    });
+
+  beforeEach(async () => {
+    posts = new Map();
+    queries = [];
+    hidden = false;
+    failUpdate = false;
+    addPost('text-post', 'text', 'Body');
+    addPost('link-post', 'link', 'https://example.com/a');
+    addPost('media-post', 'media', 'https://example.com/a.png');
+    connection = {
+      beginTransaction: jest.fn().mockResolvedValue(undefined),
+      commit: jest.fn().mockResolvedValue(undefined),
+      rollback: jest.fn().mockResolvedValue(undefined),
+      release: jest.fn(),
+      execute: (sql, values) => {
+        queries.push({ sql, values });
+        if (sql.startsWith('SELECT id, author_id, type, title, content')) {
+          const post = posts.get(values[0] as string);
+          return Promise.resolve([post && !hidden ? [{ ...post }] : [], []]);
+        }
+        if (sql.startsWith('UPDATE posts SET')) {
+          if (failUpdate) {
+            return Promise.reject(new Error('write failed'));
+          }
+          const id = values[values.length - 1] as string;
+          const post = posts.get(id)!;
+          const columns = [...sql.matchAll(/(title|content) = \?/g)].map(
+            (match) => match[1] as 'title' | 'content',
+          );
+          columns.forEach((column, index) => {
+            post[column] = values[index] as string;
+          });
+          post.edited_at = clock;
+          return Promise.resolve([{ affectedRows: 1 }, []]);
+        }
+        if (sql.startsWith('SELECT id, title, content, type')) {
+          const post = posts.get(values[0] as string);
+          return Promise.resolve([
+            post ? [{ ...post, pinned_at: null, pinned_by: null }] : [],
+            [],
+          ]);
+        }
+        if (sql.startsWith('SELECT target_id, SUM(value) AS score')) {
+          return Promise.resolve([[{ target_id: values[1], score: 4 }], []]);
+        }
+        return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
+      },
+    };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        PostsService,
+        {
+          provide: MYSQL_POOL,
+          useValue: { getConnection: () => Promise.resolve(connection) },
+        },
+        { provide: NotificationsService, useValue: {} },
+        // Editing is not participation: the rule gate must never be asked.
+        {
+          provide: CommunityRuleAcceptanceService,
+          useValue: {
+            assertAcceptedOrThrow: () =>
+              Promise.reject(new Error('rule gate consulted')),
+          },
+        },
+        unusedModerationLog,
+      ],
+    }).compile();
+    service = module.get(PostsService);
+  });
+
+  const updates = () =>
+    queries.filter(({ sql }) => sql.startsWith('UPDATE posts'));
+  const expectCommittedAndReleased = () => {
+    expect(connection.commit).toHaveBeenCalledTimes(1);
+    expect(connection.rollback).not.toHaveBeenCalled();
+    expect(connection.release).toHaveBeenCalledTimes(1);
+  };
+  const expectRolledBackAndReleased = () => {
+    expect(connection.commit).not.toHaveBeenCalled();
+    expect(connection.rollback).toHaveBeenCalledTimes(1);
+    expect(connection.release).toHaveBeenCalledTimes(1);
+    expect(updates()).toHaveLength(0);
+  };
+
+  it('locks the row first, excluding deleted and suspended communities', async () => {
+    await service.update('text-post', { title: 'New' }, 'author');
+    const [read] = queries;
+    expect(read.values).toEqual(['text-post']);
+    expect(read.sql).toContain('FOR UPDATE');
+    expect(read.sql).toContain('communities.deleted_at IS NULL');
+    expect(read.sql).toContain('communities.suspended_at IS NULL');
+  });
+
+  it('updates only the title, keeping content, id and created_at, and stamps edited_at', async () => {
+    const result = await service.update(
+      'text-post',
+      { title: 'New title' },
+      'author',
+    );
+    expect(updates()).toEqual([
+      {
+        sql: 'UPDATE posts SET title = ?, edited_at = UTC_TIMESTAMP() WHERE id = ?',
+        values: ['New title', 'text-post'],
+      },
+    ]);
+    expect(result).toMatchObject({
+      id: 'text-post',
+      title: 'New title',
+      content: 'Body',
+      created_at: '2026-10-22T08:00:00.000Z',
+      edited_at: clock.toISOString(),
+      score: 4,
+    });
+    expectCommittedAndReleased();
+  });
+
+  it('updates only the content, or both, with a dynamic SET list', async () => {
+    await service.update('text-post', { content: 'New body' }, 'author');
+    await service.update(
+      'link-post',
+      { title: 'T2', content: 'https://example.com/b' },
+      'author',
+    );
+    expect(updates().map(({ sql }) => sql)).toEqual([
+      'UPDATE posts SET content = ?, edited_at = UTC_TIMESTAMP() WHERE id = ?',
+      'UPDATE posts SET title = ?, content = ?, edited_at = UTC_TIMESTAMP() WHERE id = ?',
+    ]);
+    expect(updates()[1].values).toEqual([
+      'T2',
+      'https://example.com/b',
+      'link-post',
+    ]);
+  });
+
+  it('writes only the fields that changed', async () => {
+    await service.update(
+      'text-post',
+      { title: 'Title', content: 'Changed' },
+      'author',
+    );
+    expect(updates()[0].sql).toBe(
+      'UPDATE posts SET content = ?, edited_at = UTC_TIMESTAMP() WHERE id = ?',
+    );
+  });
+
+  it('skips the write for identical values, leaving edited_at null', async () => {
+    const result = await service.update(
+      'text-post',
+      { title: 'Title', content: 'Body' },
+      'author',
+    );
+    expect(updates()).toHaveLength(0);
+    expect(result.edited_at).toBeNull();
+    expectCommittedAndReleased();
+  });
+
+  it.each(['moderator', 'creator-1', 'stranger'])(
+    'refuses %s with 403, writing nothing',
+    async (actor) => {
+      await expect(
+        service.update('text-post', { title: 'Hijack' }, actor),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expectRolledBackAndReleased();
+    },
+  );
+
+  it('answers 404 for an unknown post or one in a hidden community', async () => {
+    await expect(
+      service.update('missing', { title: 'T' }, 'author'),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expectRolledBackAndReleased();
+
+    hidden = true;
+    connection.rollback.mockClear();
+    connection.release.mockClear();
+    await expect(
+      service.update('text-post', { title: 'T' }, 'author'),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('refuses a removed post with 409 after the author check', async () => {
+    addPost('removed', 'text', 'Body', { removed_at: clock });
+    await expect(
+      service.update('removed', { title: 'T' }, 'stranger'),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    connection.rollback.mockClear();
+    connection.release.mockClear();
+    await expect(
+      service.update('removed', { title: 'T' }, 'author'),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expectRolledBackAndReleased();
+  });
+
+  it('lets the author edit their own locked post', async () => {
+    addPost('locked', 'text', 'Body', { locked_at: clock });
+    await expect(
+      service.update('locked', { content: 'Corrected' }, 'author'),
+    ).resolves.toMatchObject({ content: 'Corrected' });
+  });
+
+  describe('validates content against the stored type', () => {
+    it('accepts arbitrary text on a text post', async () => {
+      await expect(
+        service.update('text-post', { content: 'not a url at all' }, 'author'),
+      ).resolves.toMatchObject({ content: 'not a url at all' });
+    });
+
+    it.each(['link-post', 'media-post'])(
+      'accepts an HTTP(S) URL on a %s',
+      async (id) => {
+        await expect(
+          service.update(id, { content: 'http://example.org/x' }, 'author'),
+        ).resolves.toMatchObject({ content: 'http://example.org/x' });
+      },
+    );
+
+    it.each([
+      ['link-post', 'just some text'],
+      ['link-post', 'https://user:secret@example.com/'],
+      ['link-post', 'ftp://example.com/file'],
+      ['link-post', 'javascript:alert(1)'],
+      ['link-post', 'https://example.com\\evil'],
+      ['media-post', 'https://example.com/a\u0007.png'],
+      ['media-post', 'not-a-url.png'],
+    ])('refuses on %s: %j, with 400', async (id, content) => {
+      await expect(
+        service.update(id, { content }, 'author'),
+      ).rejects.toMatchObject({
+        status: 400,
+        response: {
+          message: [
+            'content must be an HTTP or HTTPS URL for link and media posts',
+          ],
+        },
+      });
+      expectRolledBackAndReleased();
+    });
+
+    it('does not check a title-only edit of a link post against the URL rule', async () => {
+      await expect(
+        service.update('link-post', { title: 'Plain title' }, 'author'),
+      ).resolves.toMatchObject({ title: 'Plain title' });
+    });
+  });
+
+  it('rolls back and releases when the write fails', async () => {
+    failUpdate = true;
+    await expect(
+      service.update('text-post', { title: 'T' }, 'author'),
+    ).rejects.toThrow('write failed');
+    expect(connection.commit).not.toHaveBeenCalled();
+    expect(connection.rollback).toHaveBeenCalledTimes(1);
+    expect(connection.release).toHaveBeenCalledTimes(1);
   });
 });

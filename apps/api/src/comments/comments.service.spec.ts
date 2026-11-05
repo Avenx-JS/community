@@ -1,4 +1,5 @@
 import {
+  ConflictException,
   ForbiddenException,
   NotFoundException,
   PayloadTooLargeException,
@@ -276,6 +277,7 @@ describe('CommentsService.create notifications', () => {
       parent_id: null,
       content: 'Mine ripened early.',
       created_at: '2026-10-30T08:00:00.000Z',
+      edited_at: null,
       score: 0,
       replies: [],
     });
@@ -970,5 +972,218 @@ describe('CommentsService paginated listings', () => {
         'GET /posts/:postId/comments/top-level and GET /comments/:id/replies',
       ) as unknown,
     });
+  });
+});
+
+describe('CommentsService.update', () => {
+  type StoredComment = {
+    id: string;
+    post_id: string;
+    parent_id: string | null;
+    author_id: string;
+    content: string;
+    created_at: Date;
+    edited_at: Date | null;
+    locked_at: Date | null;
+    removed_at: Date | null;
+    post_locked_at: Date | null;
+    post_removed_at: Date | null;
+  };
+  let service: CommentsService;
+  let comments: Map<string, StoredComment>;
+  let queries: Array<{ sql: string; values: unknown[] }>;
+  let failUpdate: boolean;
+  let connection: {
+    beginTransaction: jest.Mock;
+    commit: jest.Mock;
+    rollback: jest.Mock;
+    release: jest.Mock;
+    execute: (sql: string, values: unknown[]) => Promise<[unknown, unknown]>;
+  };
+  const clock = new Date('2026-11-05T12:00:00.000Z');
+
+  const addComment = (id: string, overrides: Partial<StoredComment> = {}) =>
+    comments.set(id, {
+      id,
+      post_id: 'post-1',
+      parent_id: 'root',
+      author_id: 'author',
+      content: 'Original',
+      created_at: new Date('2026-10-22T08:00:00.000Z'),
+      edited_at: null,
+      locked_at: null,
+      removed_at: null,
+      post_locked_at: null,
+      post_removed_at: null,
+      ...overrides,
+    });
+
+  beforeEach(async () => {
+    comments = new Map();
+    queries = [];
+    failUpdate = false;
+    addComment('comment-1');
+    connection = {
+      beginTransaction: jest.fn().mockResolvedValue(undefined),
+      commit: jest.fn().mockResolvedValue(undefined),
+      rollback: jest.fn().mockResolvedValue(undefined),
+      release: jest.fn(),
+      execute: (sql, values) => {
+        queries.push({ sql, values });
+        const comment = comments.get(values[0] as string);
+        if (sql.startsWith('SELECT comments.id, comments.author_id')) {
+          return Promise.resolve([comment ? [{ ...comment }] : [], []]);
+        }
+        if (sql.startsWith('UPDATE comments SET')) {
+          if (failUpdate) {
+            return Promise.reject(new Error('write failed'));
+          }
+          const target = comments.get(values[1] as string)!;
+          target.content = values[0] as string;
+          target.edited_at = clock;
+          return Promise.resolve([{ affectedRows: 1 }, []]);
+        }
+        if (sql.startsWith('SELECT id, post_id, parent_id, author_id')) {
+          return Promise.resolve([comment ? [{ ...comment }] : [], []]);
+        }
+        if (sql.startsWith('SELECT parent_id, COUNT(*) AS reply_count')) {
+          return Promise.resolve([
+            [{ parent_id: values[0], reply_count: 2 }],
+            [],
+          ]);
+        }
+        if (sql.startsWith('SELECT target_id, SUM(value) AS score')) {
+          return Promise.resolve([[{ target_id: values[1], score: 3 }], []]);
+        }
+        return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
+      },
+    };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        CommentsService,
+        {
+          provide: MYSQL_POOL,
+          useValue: { getConnection: () => Promise.resolve(connection) },
+        },
+        { provide: NotificationsService, useValue: {} },
+        // Editing is not participation: the rule gate must never be asked.
+        {
+          provide: CommunityRuleAcceptanceService,
+          useValue: {
+            assertAcceptedOrThrow: () =>
+              Promise.reject(new Error('rule gate consulted')),
+          },
+        },
+      ],
+    }).compile();
+    service = module.get(CommentsService);
+  });
+
+  const updates = () =>
+    queries.filter(({ sql }) => sql.startsWith('UPDATE comments'));
+  const expectRolledBackAndReleased = () => {
+    expect(connection.commit).not.toHaveBeenCalled();
+    expect(connection.rollback).toHaveBeenCalledTimes(1);
+    expect(connection.release).toHaveBeenCalledTimes(1);
+    expect(updates()).toHaveLength(0);
+  };
+
+  it('locks the comment row, joining its post, excluding hidden communities', async () => {
+    await service.update('comment-1', { content: 'Fixed' }, 'author');
+    const [read] = queries;
+    expect(read.values).toEqual(['comment-1']);
+    expect(read.sql).toContain('FOR UPDATE OF comments');
+    expect(read.sql).toContain(
+      'INNER JOIN posts ON posts.id = comments.post_id',
+    );
+    expect(read.sql).toContain('communities.deleted_at IS NULL');
+    expect(read.sql).toContain('communities.suspended_at IS NULL');
+  });
+
+  it('updates the content and stamps edited_at, returning the flat comment', async () => {
+    const result = await service.update(
+      'comment-1',
+      { content: 'Fixed' },
+      'author',
+    );
+    expect(updates()).toEqual([
+      {
+        sql: 'UPDATE comments SET content = ?, edited_at = UTC_TIMESTAMP() WHERE id = ?',
+        values: ['Fixed', 'comment-1'],
+      },
+    ]);
+    expect(result).toEqual({
+      id: 'comment-1',
+      post_id: 'post-1',
+      parent_id: 'root',
+      author_id: 'author',
+      content: 'Fixed',
+      created_at: '2026-10-22T08:00:00.000Z',
+      edited_at: clock.toISOString(),
+      reply_count: 2,
+      score: 3,
+    });
+    expect(result).not.toHaveProperty('replies');
+    expect(connection.commit).toHaveBeenCalledTimes(1);
+    expect(connection.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips the write for identical content, leaving edited_at null', async () => {
+    const result = await service.update(
+      'comment-1',
+      { content: 'Original' },
+      'author',
+    );
+    expect(updates()).toHaveLength(0);
+    expect(result.edited_at).toBeNull();
+    expect(connection.commit).toHaveBeenCalledTimes(1);
+    expect(connection.release).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['moderator', 'creator-1', 'stranger'])(
+    'refuses %s with 403, writing nothing',
+    async (actor) => {
+      await expect(
+        service.update('comment-1', { content: 'Hijack' }, actor),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expectRolledBackAndReleased();
+    },
+  );
+
+  it('answers 404 for an unknown comment', async () => {
+    await expect(
+      service.update('missing', { content: 'x' }, 'author'),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expectRolledBackAndReleased();
+  });
+
+  it.each([
+    ['the comment is removed', { removed_at: clock }],
+    ['its post is removed', { post_removed_at: clock }],
+    ['the comment is locked', { locked_at: clock }],
+    ['its post is locked', { post_locked_at: clock }],
+  ])('refuses with 409 when %s', async (_label, state) => {
+    addComment('comment-1', state);
+    await expect(
+      service.update('comment-1', { content: 'x' }, 'author'),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expectRolledBackAndReleased();
+  });
+
+  it('answers 403, not 409, to a non-author of a removed comment', async () => {
+    addComment('comment-1', { removed_at: clock });
+    await expect(
+      service.update('comment-1', { content: 'x' }, 'stranger'),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('rolls back and releases when the write fails', async () => {
+    failUpdate = true;
+    await expect(
+      service.update('comment-1', { content: 'Fixed' }, 'author'),
+    ).rejects.toThrow('write failed');
+    expect(connection.commit).not.toHaveBeenCalled();
+    expect(connection.rollback).toHaveBeenCalledTimes(1);
+    expect(connection.release).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Inject,
@@ -18,12 +19,20 @@ import {
   canModerateCommunitySql,
   isSqlTrue,
 } from '../common/community-moderation';
-import { activeCommunitySql } from '../common/community-visibility';
+import {
+  activeCommunitySql,
+  listedCommunitySql,
+} from '../common/community-visibility';
 import { readPositiveInteger } from '../common/read-positive-integer';
 import { CommunityModerationLogService } from '../communities/community-moderation-log.service';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { CreatePostDto } from './dto/create-post.dto';
+import {
+  CreatePostDto,
+  isValidPostContent,
+  POST_CONTENT_URL_MESSAGE,
+} from './dto/create-post.dto';
+import { UpdatePostDto } from './dto/update-post.dto';
 import { ListPostsDto } from './dto/list-posts.dto';
 import { loadVoteScores } from '../votes/vote-scores';
 
@@ -37,6 +46,8 @@ export interface PostRow extends RowDataPacket {
   created_at: Date | string;
   pinned_at: Date | string | null;
   pinned_by: string | null;
+  // NULL until the author's first effective edit (migration 017).
+  edited_at: Date | string | null;
 }
 
 // Every column of a post DTO, in DTO order.
@@ -44,7 +55,18 @@ export interface PostRow extends RowDataPacket {
 export const VISIBLE_POST_SQL = 'posts.removed_at IS NULL';
 
 export const POST_COLUMNS =
-  'id, title, content, type, author_id, community_id, created_at, pinned_at, pinned_by';
+  'id, title, content, type, author_id, community_id, created_at, pinned_at, pinned_by, edited_at';
+
+interface EditablePostRow extends RowDataPacket {
+  id: string;
+  author_id: string;
+  type: 'text' | 'link' | 'media';
+  title: string;
+  content: string | null;
+  locked_at: Date | string | null;
+  removed_at: Date | string | null;
+  community_id: string;
+}
 
 interface PinnablePostRow extends RowDataPacket {
   id: string;
@@ -73,6 +95,8 @@ export interface PostDto {
   pinned_at: string | null;
   // NULL on a pinned post once the pinning moderator's account is deleted.
   pinned_by: string | null;
+  // When the author last changed the post; null if never edited.
+  edited_at: string | null;
   // Sum of all vote values; 0 without votes.
   score: number;
 }
@@ -298,6 +322,92 @@ export class PostsService {
     }
   }
 
+  // PATCH /posts/:id. Authorship, not moderation: only the author may edit,
+  // never a moderator or the community creator (unlike remove(), where
+  // moderators may act): rewriting someone's words under their name is
+  // impersonation, and moderators have removal for content they object to.
+  // Not gated on rule acceptance: correcting existing content is not new
+  // participation. Order: 404 (unknown, or deleted or suspended community),
+  // 403 (not the author), 409 (removed), 400 (content not valid for the
+  // stored type). A locked post may still be edited by its author: a lock
+  // closes discussion, it does not freeze the original text. Submitting the
+  // stored values changes nothing and leaves edited_at untouched.
+  async update(
+    id: string,
+    input: UpdatePostDto,
+    actorId: string,
+  ): Promise<PostDto> {
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+
+      const [posts] = await connection.execute<EditablePostRow[]>(
+        `SELECT id, author_id, type, title, content, locked_at, removed_at, community_id
+         FROM posts
+         WHERE id = ? AND ${listedCommunitySql('posts.community_id')}
+         LIMIT 1 FOR UPDATE`,
+        [id],
+      );
+      const post = posts[0];
+      if (!post) {
+        throw new NotFoundException('Post not found');
+      }
+      if (post.author_id !== actorId) {
+        throw new ForbiddenException('Only the author may edit this post');
+      }
+      if (post.removed_at) {
+        throw new ConflictException(
+          'This post was removed by a moderator and cannot be edited',
+        );
+      }
+      // The type is immutable and not in the body, so the URL rule of link
+      // and media posts is applied here, against the stored type.
+      if (
+        input.content !== undefined &&
+        !isValidPostContent(post.type, input.content)
+      ) {
+        throw new BadRequestException([POST_CONTENT_URL_MESSAGE]);
+      }
+
+      // Only fields that differ from the stored values are written.
+      const changes: [column: 'title' | 'content', value: string][] = [];
+      if (input.title !== undefined && input.title !== post.title) {
+        changes.push(['title', input.title]);
+      }
+      if (input.content !== undefined && input.content !== post.content) {
+        changes.push(['content', input.content]);
+      }
+      if (changes.length > 0) {
+        await connection.execute<ResultSetHeader>(
+          `UPDATE posts SET ${changes.map(([column]) => `${column} = ?`).join(', ')}, edited_at = UTC_TIMESTAMP() WHERE id = ?`,
+          [...changes.map(([, value]) => value), id],
+        );
+      }
+
+      const [rows] = await connection.execute<PostRow[]>(
+        `SELECT ${POST_COLUMNS} FROM posts WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      if (!rows[0]) {
+        throw new Error('Edited post could not be retrieved');
+      }
+      const [dto] = await toPostDtos(connection, [rows[0]]);
+
+      await connection.commit();
+      return dto;
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
   // Pinning is a moderation power, not an authorship one: only the post's
   // community creator or a moderator of that community may pin or unpin. The
   // post's author may not, unlike editing and deleting, where the author may
@@ -467,6 +577,7 @@ export function toPostDto(post: PostRow, score: number): PostDto {
     created_at: new Date(post.created_at).toISOString(),
     pinned_at: post.pinned_at ? new Date(post.pinned_at).toISOString() : null,
     pinned_by: post.pinned_by ?? null,
+    edited_at: post.edited_at ? new Date(post.edited_at).toISOString() : null,
     score,
   };
 }

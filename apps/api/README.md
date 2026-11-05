@@ -2373,9 +2373,9 @@ of these behaves as if the community did not exist:
 | `GET .../stats`                                                                        | `404`                                      |
 | `POST /posts` into it                                                                  | `404` (`Community not found`)              |
 | `GET /posts` (with or without `community_id`)                                          | its posts omitted from `items` and `total` |
-| `GET /posts/:id`, `DELETE /posts/:id`                                                  | `404` for its posts                        |
+| `GET /posts/:id`, `PATCH /posts/:id`, `DELETE /posts/:id`                              | `404` for its posts                        |
 | `GET` and `POST /posts/:postId/comments`                                               | `404` for its posts                        |
-| `DELETE /comments/:id`                                                                 | `404` for comments on its posts            |
+| `PATCH /comments/:id`, `DELETE /comments/:id`                                          | `404` for comments on its posts            |
 | `POST /votes`; `PUT`, `DELETE` and `GET /posts/:id/vote` and `/comments/:id/vote`     | `404` for its posts and their comments     |
 
 Content queries apply the shared `activeCommunitySql` predicate
@@ -3102,6 +3102,9 @@ check. A guard would repeat those lookups outside that transaction.
 - **`DELETE /posts/:id` and `DELETE /comments/:id`.** Removing content is not
   participation. An author who declines new rules can still withdraw what they
   wrote under the old ones, and a moderator can still remove content.
+- **`PATCH /posts/:id` and `PATCH /comments/:id`.** Editing existing content is
+  not new participation: an author who declines new rules can still correct
+  what they wrote (see [Editing posts and comments](#editing-posts-and-comments)).
 - **`DELETE /communities/:name/subscribe`.** Leaving must never require
   acceptance, or a user who declines the rules is trapped in the community.
 - **`DELETE /posts/:id/vote` and `DELETE /comments/:id/vote`.** Withdrawing a
@@ -3272,7 +3275,10 @@ rejected. Successful creation returns HTTP `201` and the post DTO.
 to delete their post, or a moderator/creator of that post's community to
 moderate it. It returns HTTP `204` with no body; a user without permission
 returns `403`, and an unknown post returns `404`. The database cascades deletion
-to the post's comments.
+to the post's comments. To correct a post without losing them, the author
+uses `PATCH /posts/:id` (see
+[Editing posts and comments](#editing-posts-and-comments)); moderators may
+delete a post but never edit it.
 
 Post responses use this DTO:
 
@@ -3287,13 +3293,128 @@ Post responses use this DTO:
   "created_at": "2026-10-22T08:00:00.000Z",
   "pinned_at": null,
   "pinned_by": null,
+  "edited_at": null,
   "score": 3
 }
 ```
 
 `pinned_at` and `pinned_by` are present on every post response and are `null`
-on a post that is not pinned. `score` is the sum of the post's votes, `0`
-without votes (see [Scores on content](#scores-on-content)).
+on a post that is not pinned. `edited_at` is `null` until the author's first
+effective edit (see [Editing posts and comments](#editing-posts-and-comments)).
+`score` is the sum of the post's votes, `0` without votes (see
+[Scores on content](#scores-on-content)).
+
+### Editing posts and comments
+
+`PATCH /posts/:id` and `PATCH /comments/:id` let an author correct their own
+content in place. Without them the only fix for a typo was to delete and
+repost, which discards everything that cascades from the row: a post's
+comments (`comments.post_id ON DELETE CASCADE`), its votes, its id and its
+`created_at`, and the reply chain beneath a comment. An edit is an `UPDATE` of
+the same row, so all of these survive (`content-editing.mysql.spec.ts` asserts
+it against a real database).
+
+| Route | Body | Success |
+| --- | --- | --- |
+| `PATCH /posts/:id` | `UpdatePostDto`: `title` and/or `content`, at least one | `200`, `PostResponse` |
+| `PATCH /comments/:id` | `UpdateCommentDto`: `content`, required | `200`, the flat `CommentReplyResponse` |
+
+Both require a bearer token. The fields carry exactly the validators of
+`CreatePostDto` and `CreateCommentDto` (bounds, trimming, `PlainTextConstraint`).
+An absent post field is left unchanged; an empty `PATCH /posts/:id` body is
+`400` (`PostUpdateHasFieldConstraint`, so the validation pipe answers, as for
+`PATCH /users/me`). A comment edit returns the flat comment with `reply_count`
+and `score` rather than a thread node, whose empty `replies` array would
+misrepresent a comment that has replies.
+
+**Immutable fields.** Only `title` and `content` of a post, and `content` of a
+comment, are editable. `type`, `community_id`, `author_id`, `created_at`,
+`parent_id`, `post_id` and any other property are rejected with `400` by the
+global `ValidationPipe` (`forbidNonWhitelisted`) and nothing is written.
+`parent_id` in particular can never change: re-parenting would move a subtree
+and could create a cycle.
+
+**Content is validated against the stored type.** `CreatePostDto` requires an
+HTTP(S) URL with a host, no credentials, no backslash and no control
+characters for `link` and `media` posts, deciding by the `type` in the body. An
+edit has no `type` in its body, so that rule (`isValidPostContent`, the one copy
+shared with `CreatePostDto`) runs in `PostsService.update` against the type
+loaded with the locked row, and still answers `400`. Without this a link post's
+content could be edited to arbitrary text, past the URL rules. Requiring `type`
+in the body as an assertion was considered and rejected: it adds a field whose
+only purpose is to be checked. A title-only edit of a link post is not
+URL-checked; a text post accepts any plain text.
+
+**Author only.** Only the author may edit: a community moderator, the community
+creator and anyone else get `403` ("Only the author may edit this post" or
+"comment"). This deliberately differs from `DELETE /posts/:id` and
+`DELETE /comments/:id`, which moderators and the creator may use. Moderators
+hold content-removal powers, not content-authorship powers: rewriting someone's
+words under their name is impersonation, and moderators already have removal
+(and locking) for content they object to. Platform administrators get no
+bypass either; `/admin` has no content-editing route.
+
+**Flow.** Each edit runs in a transaction. It reads the row `FOR UPDATE` (a
+comment `FOR UPDATE OF comments`, joined to its post), then checks in this
+order:
+
+| Status | When |
+| --- | --- |
+| `404` | Unknown id, or the community is deleted or suspended (`listedCommunitySql`) |
+| `403` | The caller is not the author |
+| `409` | The post or comment was removed by moderation (`removed_at`); for a comment, also when its post was removed, or the comment or its post is locked |
+| `400` | Post content that is not valid for the stored type |
+
+Only then does it write, commit, roll back on any error, and release the
+connection in `finally`. A non-author therefore learns nothing about the
+content's moderation state. A removed post or comment is refused so that an
+author cannot rewrite content a moderator removed before any restoration.
+
+**Locks: a locked post stays editable by its author; comments on it do not.**
+A lock closes the discussion; it does not freeze the original text, so the
+author of a locked post may still correct it. A comment is part of the
+discussion, so a comment on a locked post, or a locked comment, is `409`. Only
+the comment's own lock and its post's lock are consulted. A comment's
+`locked_at` is meant to lock its subtree, but locks on ancestor comments are not
+consulted, because the lock endpoint that defines subtree locking does not
+exist yet.
+
+**`edited_at` and the no-op rule.** A successful edit sets `edited_at` from the
+database clock (`UTC_TIMESTAMP()`), on every effective edit. The trimmed
+submitted values are compared with the stored ones and only fields that differ
+are written. If nothing differs, nothing is written: the route answers `200`
+with the unchanged content and `edited_at` keeps its previous value (`null` if
+never edited), because marking unchanged content as edited would be
+misleading. `edited_at` is on every post and comment response
+(`PostResponse`, `CommentResponse`, `CommentReplyResponse`,
+`UserCommentResponse`), so clients can mark edited content.
+
+**Not gated on rule acceptance.** Editing existing content is not new
+participation, for the same reason `DELETE /posts/:id` is ungated: a user who
+declines a community's new rules must still be able to correct what they
+already wrote. They cannot post or comment anew until they accept.
+
+**Deliberately absent:**
+
+- **No edit window.** Many platforms allow edits for only a few minutes.
+  Nothing in the product requires one, and `edited_at` already shows that an
+  edit happened. If one is wanted, it should be a configured value read with
+  `readPositiveInteger`, like `COMMUNITY_PINNED_POSTS_MAX`.
+- **No edit history.** Only the latest version is stored; `edited_at` says that
+  an edit happened, not what changed. Revisions would need a new table and a
+  product decision about who may read them. Out of scope.
+- **No notification.** The author is the actor; nobody else is told.
+
+**Rate limiting: a known gap, not closed here.** Edits fall under the global
+write buckets only (`api:write:ip`, 60 per IP, and `api:write:account`, 120 per
+account, per minute). The `api:content:create:*` buckets in
+`AuthRateLimitService` key on `POST /posts` and `POST /posts/:postId/comments`
+by method and path, so they do not cover `PATCH`. An author can therefore
+rewrite content up to 60 times a minute per IP. Reusing the create buckets was
+rejected, because their cooldown would block a quick correction right after
+posting. No dedicated edit bucket is added in this change. If abuse appears, an
+`api:content:edit:*` bucket keyed on `PATCH /posts/:id` and
+`PATCH /comments/:id` is the follow-up, as a documented per-route override.
 
 ### Pinning posts
 
@@ -3416,10 +3537,12 @@ is an `ENUM` whose new value would need its own migration. A
 ### Post content state
 
 Migration `017_add_post_and_comment_content_state` adds edit, lock and
-moderative-removal state to `posts`. **No endpoint reads, writes or honours
-these columns yet.** Post responses, listings and `DELETE /posts/:id` (still a
-hard delete) behave exactly as described above. The endpoints that use the
-columns are separate work.
+moderative-removal state to `posts`. `PATCH /posts/:id` writes `edited_at` and
+honours `locked_at` and `removed_at` (see
+[Editing posts and comments](#editing-posts-and-comments)), and listings omit
+removed posts. Nothing writes `locked_at` or `removed_at` yet, and
+`DELETE /posts/:id` is still a hard delete. The lock and removal endpoints are
+separate work.
 
 | Column | Meaning when set |
 | --- | --- |
@@ -3570,6 +3693,10 @@ without permission returns `403`, and an unknown comment returns `404`.
 Deleting a comment also deletes all descendant replies because the comments
 table uses `ON DELETE CASCADE` for `parent_id`.
 
+`PATCH /comments/:id` lets the author, and only the author, edit the content
+in place, keeping the reply chain; moderators may delete a comment but never
+edit it. See [Editing posts and comments](#editing-posts-and-comments).
+
 ### Comment content state
 
 Migration `017` adds the same six columns and the same rules to `comments` as
@@ -3579,9 +3706,12 @@ are nullable timestamps with optional actors, coherent through
 `chk_comments_lock` and `chk_comments_removal`, and the actors are
 `ON DELETE SET NULL`, so readers must tolerate a `NULL` actor. There is no
 `edited_by`, because only the author edits. `idx_comments_removed_at` indexes
-the removal filter. Only the paginated comment routes read `removed_at` (see
-[Paginated comments](#paginated-comments)); nothing writes these columns yet,
-and the thread, comment creation and `DELETE /comments/:id` do not honour them.
+the removal filter. The paginated comment routes read `removed_at` (see
+[Paginated comments](#paginated-comments)), and `PATCH /comments/:id` writes
+`edited_at` and refuses removed or locked comments (see
+[Editing posts and comments](#editing-posts-and-comments)). Nothing writes
+`locked_at` or `removed_at` yet, and the thread, comment creation and
+`DELETE /comments/:id` do not honour them.
 
 A comment's `locked_at` is meant to lock that comment's subtree, not the whole
 post. The schema supports either reading; the lock endpoint will define it.

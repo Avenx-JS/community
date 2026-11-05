@@ -28,6 +28,15 @@ export class CommentResponse implements CommentDto {
   created_at!: string;
 
   @ApiProperty({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description:
+      'When the author last changed the content; null if never edited.',
+  })
+  edited_at!: string | null;
+
+  @ApiProperty({
     type: 'integer',
     description: 'Sum of all vote values on the comment; 0 without votes.',
   })

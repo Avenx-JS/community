@@ -6,6 +6,7 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  Patch,
   Post,
   Put,
   Query,
@@ -35,6 +36,7 @@ import { PostListResponse, PostResponse } from './posts.responses';
 import { CreateCommentDto } from '../comments/dto/create-comment.dto';
 import { CommentsService } from '../comments/comments.service';
 import { CreatePostDto } from './dto/create-post.dto';
+import { UpdatePostDto } from './dto/update-post.dto';
 import { ListPostsDto } from './dto/list-posts.dto';
 import { PostsService } from './posts.service';
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
@@ -92,6 +94,34 @@ export class PostsController {
   @ApiErrorResponses({ 400: 'Invalid post ID.', 404: 'Post not found.' })
   findOne(@Param('id', new SafeRouteParamPipe('id')) id: string) {
     return this.postsService.findOne(id);
+  }
+
+  @Patch(':id')
+  @UseGuards(AuthGuard)
+  @ApiOperation({
+    summary: 'Edit your post',
+    description:
+      'Author only: unlike DELETE /posts/{id}, moderators and the community ' +
+      'creator may not edit. title and content are editable, each optional ' +
+      'but at least one required; type is immutable, and content is ' +
+      "validated against the post's stored type. Submitting the stored " +
+      'values changes nothing and leaves edited_at unchanged. A locked post ' +
+      'may still be edited. Not gated on rule acceptance.',
+  })
+  @ApiAuthenticated({ forbidden: 'Only the author may edit this content.' })
+  @ApiRouteParam('id', 'id', 'Post ID.')
+  @ApiOkResponse({ type: PostResponse })
+  @ApiErrorResponses({
+    400: 'Invalid post ID or post data, or a non-editable property.',
+    404: 'Post not found, or its community is deleted or suspended.',
+    409: 'The post was removed by a moderator.',
+  })
+  update(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Body() body: UpdatePostDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.postsService.update(id, body, request.user.id);
   }
 
   @Delete(':id')
