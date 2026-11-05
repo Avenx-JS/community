@@ -6,6 +6,7 @@ import { MetadataScanner } from '@nestjs/core';
 import type { AuthenticatedRequest } from '../auth/auth.guard';
 import { AuthService } from '../auth/auth.service';
 import { AccountDeletionService } from './account-deletion.service';
+import { UserActivityService } from './user-activity.service';
 import { UsersController } from './users.controller';
 import { UsersService } from './users.service';
 
@@ -47,6 +48,24 @@ describe('UsersController', () => {
       return Promise.resolve();
     },
   } satisfies Pick<AccountDeletionService, 'deleteOwnAccount'>;
+  const emptyPage = { items: [], page: 1, limit: 20, total: 0 };
+  const userActivity = {
+    listPosts: (username: string, query: object) => {
+      calls.push(['listPosts', username, query]);
+      return Promise.resolve(emptyPage);
+    },
+    listComments: (username: string, query: object) => {
+      calls.push(['listComments', username, query]);
+      return Promise.resolve(emptyPage);
+    },
+    listCommunities: (username: string, query: object) => {
+      calls.push(['listCommunities', username, query]);
+      return Promise.resolve(emptyPage);
+    },
+  } satisfies Pick<
+    UserActivityService,
+    'listPosts' | 'listComments' | 'listCommunities'
+  >;
   const request = { user: { id: 'user-id' } } as AuthenticatedRequest;
 
   beforeEach(async () => {
@@ -56,6 +75,7 @@ describe('UsersController', () => {
       providers: [
         { provide: UsersService, useValue: usersService },
         { provide: AccountDeletionService, useValue: accountDeletion },
+        { provide: UserActivityService, useValue: userActivity },
         // AuthGuard's dependency; the guard itself does not run here.
         { provide: AuthService, useValue: {} },
       ],
@@ -119,5 +139,32 @@ describe('UsersController', () => {
     expect(position(':username', RequestMethod.GET)).toBeGreaterThan(
       position('me', RequestMethod.GET),
     );
+    // The activity listings come after both, as the issue specifies.
+    for (const path of [
+      ':username/posts',
+      ':username/comments',
+      ':username/communities',
+    ]) {
+      expect([path, position(path, RequestMethod.GET)]).toEqual([
+        path,
+        expect.any(Number),
+      ]);
+      expect(position(path, RequestMethod.GET)).toBeGreaterThan(
+        position(':username', RequestMethod.GET),
+      );
+    }
+  });
+
+  it('delegates the activity listings by username and query only', async () => {
+    const query = { page: 2, limit: 5 };
+    await controller.listUserPosts('sample', { ...query, sort: 'oldest' });
+    await controller.listUserComments('sample', query);
+    await controller.listUserCommunities('sample', query);
+
+    expect(calls).toEqual([
+      ['listPosts', 'sample', { ...query, sort: 'oldest' }],
+      ['listComments', 'sample', query],
+      ['listCommunities', 'sample', query],
+    ]);
   });
 });

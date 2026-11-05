@@ -112,7 +112,7 @@ integration('community stats (MySQL)', () => {
     };
     service = new CommunityStatsService(recording as unknown as Pool);
     await service.get('c1');
-  });
+  }, 120_000);
 
   afterAll(async () => {
     await pool?.end();

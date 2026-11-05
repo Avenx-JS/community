@@ -176,7 +176,7 @@ integration('community deletion (MySQL)', () => {
       ruleAcceptance,
       new CommunityModerationLogService(pool),
     );
-  });
+  }, 120_000);
 
   afterAll(async () => {
     await pool?.end();

@@ -2,6 +2,7 @@ import { forwardRef, Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { DatabaseModule } from '../database/database.module';
 import { AccountDeletionService } from './account-deletion.service';
+import { UserActivityService } from './user-activity.service';
 import { UsersController } from './users.controller';
 import { UsersService } from './users.service';
 
@@ -9,7 +10,7 @@ import { UsersService } from './users.service';
   // AuthModule needs UsersService for AdminGuard, and UsersController needs
   // AuthGuard (and AccountDeletionService AuthService) for /users/me.
   imports: [DatabaseModule, forwardRef(() => AuthModule)],
-  providers: [UsersService, AccountDeletionService],
+  providers: [UsersService, AccountDeletionService, UserActivityService],
   controllers: [UsersController],
   exports: [UsersService],
 })

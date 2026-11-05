@@ -16,6 +16,14 @@ import {
   CREATED_COMMUNITY_SQL,
   LOCK_ACCOUNT_SQL,
 } from '../src/users/account-deletion.service';
+import {
+  USER_COMMENTS_COUNT_SQL,
+  USER_COMMUNITIES_COUNT_SQL,
+  USER_COMMUNITIES_SQL,
+  USER_POSTS_COUNT_SQL,
+  userCommentsSql,
+  userPostsSql,
+} from '../src/users/user-activity.service';
 
 type UserFixture = Record<string, string | Date | null>;
 type Row = Record<string, unknown>;
@@ -277,7 +285,135 @@ describe('User profile endpoints (e2e)', () => {
         });
         return Promise.resolve([{ affectedRows: target ? 1 : 0 }, []]);
       }
+      // The public activity listings, evaluated over the tables above with
+      // the rules their SQL states (user-activity.mysql.spec.ts checks the
+      // SQL itself on a real server).
+      const activity = activityAnswer(sql, values);
+      if (activity) {
+        return Promise.resolve(activity);
+      }
       throw new Error(`Unexpected SQL query: ${sql}`);
+    };
+
+    const listed = (communityId: unknown) => {
+      const community = tables.communities.find(
+        (entry) => entry.id === communityId,
+      );
+      return !!community && !community.deleted_at && !community.suspended_at;
+    };
+    const post = (id: unknown) => tables.posts.find((entry) => entry.id === id);
+    const visiblePosts = (authorId: unknown) =>
+      tables.posts.filter(
+        (entry) =>
+          entry.author_id === authorId &&
+          !entry.removed_at &&
+          listed(entry.community_id),
+      );
+    // Comments on an existing, unremoved post: the posts join.
+    const ownComments = (authorId: unknown) =>
+      tables.comments.filter((entry) => {
+        const parent = post(entry.post_id);
+        return (
+          entry.author_id === authorId &&
+          !entry.removed_at &&
+          !!parent &&
+          !parent.removed_at
+        );
+      });
+    const visibleComments = (authorId: unknown) =>
+      ownComments(authorId).filter((entry) =>
+        listed(post(entry.post_id)!.community_id),
+      );
+    const byCreated = (sql: string) => (left: Row, right: Row) => {
+      const direction = sql.includes('created_at ASC') ? 1 : -1;
+      const time =
+        (left.created_at as Date).getTime() -
+        (right.created_at as Date).getTime();
+      return (
+        direction * time ||
+        direction * String(left.id).localeCompare(String(right.id))
+      );
+    };
+    const pageOf = (entries: Row[], values: unknown[]) => {
+      const [limit, offset] = values.slice(-2) as [number, number];
+      return entries.slice(offset, offset + limit);
+    };
+    const activityAnswer = (
+      sql: string,
+      values: unknown[],
+    ): [unknown, unknown[]] | null => {
+      const [userId] = values;
+      if (sql === userPostsSql('new') || sql === userPostsSql('oldest')) {
+        return [
+          pageOf([...visiblePosts(userId)].sort(byCreated(sql)), values),
+          [],
+        ];
+      }
+      if (sql === USER_POSTS_COUNT_SQL) {
+        return [[{ total: visiblePosts(userId).length }], []];
+      }
+      if (sql === userCommentsSql('new') || sql === userCommentsSql('oldest')) {
+        const rows = [...visibleComments(userId)]
+          .sort(byCreated(sql))
+          .map((entry) => {
+            const parent = post(entry.post_id)!;
+            return {
+              id: entry.id,
+              post_id: entry.post_id,
+              content: entry.content,
+              created_at: entry.created_at,
+              edited_at: entry.edited_at ?? null,
+              post_title: parent.title,
+              community_name: tables.communities.find(
+                (community) => community.id === parent.community_id,
+              )!.name,
+            };
+          });
+        return [pageOf(rows, values), []];
+      }
+      if (sql === USER_COMMENTS_COUNT_SQL) {
+        return [[{ total: visibleComments(userId).length }], []];
+      }
+      if (sql === USER_COMMUNITIES_SQL || sql === USER_COMMUNITIES_COUNT_SQL) {
+        const moderates = (communityId: unknown) =>
+          tables.community_moderators.some(
+            (entry) =>
+              entry.community_id === communityId && entry.user_id === userId,
+          );
+        const ids = new Set<unknown>([
+          ...owned('communities', 'creator_id', userId as string).map(
+            (entry) => entry.id,
+          ),
+          ...owned('community_moderators', 'user_id', userId as string).map(
+            (entry) => entry.community_id,
+          ),
+          ...tables.posts
+            .filter((entry) => entry.author_id === userId && !entry.removed_at)
+            .map((entry) => entry.community_id),
+          ...ownComments(userId).map(
+            (entry) => post(entry.post_id)!.community_id,
+          ),
+        ]);
+        const rows = tables.communities
+          .filter((entry) => ids.has(entry.id) && listed(entry.id))
+          .sort((left, right) =>
+            String(left.name).localeCompare(String(right.name)),
+          )
+          .map((entry) => ({
+            name: entry.name,
+            description: entry.description ?? null,
+            role:
+              entry.creator_id === userId
+                ? 'creator'
+                : moderates(entry.id)
+                  ? 'moderator'
+                  : 'contributor',
+          }));
+        return sql === USER_COMMUNITIES_SQL
+          ? [pageOf(rows, values), []]
+          : [[{ total: rows.length }], []];
+      }
+      return null;
     };
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -772,6 +908,349 @@ describe('User profile endpoints (e2e)', () => {
       expect(response.headers['retry-after']).toBe('3600');
       expect(connections.opened).toBe(0);
       expect(row('user-a')).toMatchObject({ deleted_at: null });
+    });
+  });
+
+  describe('public activity listings', () => {
+    const routes = ['posts', 'comments', 'communities'] as const;
+    const deletedAt = new Date('2026-11-01T00:00:00.000Z');
+    const removed = { removed_at: deletedAt };
+
+    // sample_user (user-a) is the author under test. One community per rule:
+    //   bravo (community-b)  moderated by user-a, holds post-a and comment-a
+    //   live                 visible content, plus removed content
+    //   alpha                created by user-a, no content
+    //   deleted, suspended   user-a's content in hidden communities
+    //   subscribed           only subscribed to
+    //   zulu                 only a removed post and a comment on a removed post
+    beforeEach(() => {
+      tables.communities = [
+        {
+          id: 'community-b',
+          creator_id: 'user-b',
+          name: 'bravo',
+          description: 'B',
+        },
+        { id: 'c-live', creator_id: 'user-b', name: 'live', description: null },
+        {
+          id: 'c-created',
+          creator_id: 'user-a',
+          name: 'alpha',
+          description: 'A',
+        },
+        {
+          id: 'c-deleted',
+          creator_id: 'user-b',
+          name: 'deleted',
+          deleted_at: deletedAt,
+        },
+        {
+          id: 'c-suspended',
+          creator_id: 'user-b',
+          name: 'suspended',
+          suspended_at: deletedAt,
+        },
+        { id: 'c-subscribed', creator_id: 'user-b', name: 'subscribed' },
+        { id: 'c-removed', creator_id: 'user-b', name: 'zulu' },
+      ];
+      tables.community_subscriptions.push(
+        { user_id: 'user-a', community_id: 'c-subscribed' },
+        { user_id: 'user-a', community_id: 'c-live' },
+      );
+      const postOf = (
+        id: string,
+        authorId: string,
+        communityId: string,
+        minute: number,
+        extra: Row = {},
+      ) => ({
+        id,
+        title: `Title ${id}`,
+        content: 'Body',
+        type: 'text',
+        author_id: authorId,
+        community_id: communityId,
+        created_at: at(minute),
+        ...extra,
+      });
+      tables.posts.push(
+        postOf('p-live-1', 'user-a', 'c-live', 5),
+        postOf('p-live-2', 'user-a', 'c-live', 5),
+        postOf('p-removed', 'user-a', 'c-live', 9, removed),
+        postOf('p-deleted', 'user-a', 'c-deleted', 9),
+        postOf('p-suspended', 'user-a', 'c-suspended', 9),
+        postOf('p-zulu', 'user-a', 'c-removed', 9, removed),
+        postOf('p-other', 'user-b', 'c-live', 4),
+        postOf('p-other-removed', 'user-b', 'c-removed', 4, removed),
+        postOf('p-other-deleted', 'user-b', 'c-deleted', 4),
+      );
+      const commentOf = (
+        id: string,
+        postId: string,
+        minute: number,
+        extra: Row = {},
+      ) => ({
+        id,
+        post_id: postId,
+        author_id: 'user-a',
+        parent_id: null,
+        content: `Comment ${id}`,
+        created_at: at(minute),
+        ...extra,
+      });
+      tables.comments.push(
+        commentOf('m-live', 'p-other', 6, { edited_at: at(7) }),
+        commentOf('m-removed', 'p-other', 9, removed),
+        commentOf('m-on-removed-post', 'p-other-removed', 9),
+        commentOf('m-deleted', 'p-other-deleted', 9),
+      );
+    });
+
+    const items = async (path: string) => {
+      const response = await get(path).expect(200);
+      return response.body as {
+        items: Record<string, unknown>[];
+        page: number;
+        limit: number;
+        total: number;
+      };
+    };
+
+    it('lists only visible posts as the shared post type, newest first', async () => {
+      const body = await items('/users/sample_user/posts');
+
+      expect(body.items.map((item) => item.id)).toEqual([
+        'p-live-2',
+        'p-live-1',
+        'post-a',
+      ]);
+      expect(body).toMatchObject({ page: 1, limit: 20, total: 3 });
+      expect(Object.keys(body.items[0]).sort()).toEqual(
+        [
+          'author_id',
+          'community_id',
+          'content',
+          'created_at',
+          'id',
+          'pinned_at',
+          'pinned_by',
+          'title',
+          'type',
+        ].sort(),
+      );
+    });
+
+    it('lists only visible comments as flat items with their link context', async () => {
+      const body = await items('/users/sample_user/comments');
+
+      expect(body).toEqual({
+        items: [
+          {
+            id: 'm-live',
+            post_id: 'p-other',
+            content: 'Comment m-live',
+            created_at: at(6).toISOString(),
+            edited_at: at(7).toISOString(),
+            post_title: 'Title p-other',
+            community_name: 'live',
+          },
+          {
+            id: 'comment-a',
+            post_id: 'post-a',
+            content: 'First',
+            created_at: at(2).toISOString(),
+            edited_at: null,
+            post_title: 'By A',
+            community_name: 'bravo',
+          },
+        ],
+        page: 1,
+        limit: 20,
+        total: 2,
+      });
+      expect(body.items[0]).not.toHaveProperty('replies');
+      expect(body.items[0]).not.toHaveProperty('parent_id');
+    });
+
+    it('lists the communities the activity reveals, by name, with the role', async () => {
+      await expect(items('/users/sample_user/communities')).resolves.toEqual({
+        items: [
+          { name: 'alpha', description: 'A', role: 'creator' },
+          { name: 'bravo', description: 'B', role: 'moderator' },
+          { name: 'live', description: null, role: 'contributor' },
+        ],
+        page: 1,
+        limit: 20,
+        total: 3,
+      });
+    });
+
+    // For each route: a removed item, an item in a soft-deleted community,
+    // an item in a suspended community; the deleted author is below.
+    it.each([
+      ['posts', 'id', ['p-removed', 'p-zulu', 'p-deleted', 'p-suspended']],
+      ['comments', 'id', ['m-removed', 'm-on-removed-post', 'm-deleted']],
+      ['communities', 'name', ['zulu', 'deleted', 'suspended', 'subscribed']],
+    ] as const)('omits every excluded %s', async (route, key, excluded) => {
+      const body = await items(`/users/sample_user/${route}?limit=100`);
+      const listedKeys = body.items.map((item) => item[key]);
+      for (const value of excluded) {
+        expect(listedKeys).not.toContain(value);
+      }
+    });
+
+    it('does not list a community the user is only subscribed to', async () => {
+      // other_user has posts and comments nowhere, created community-b, and
+      // the fixture subscribes them to it; suspended_user only subscribes.
+      tables.community_subscriptions.push({
+        user_id: 'user-suspended',
+        community_id: 'c-live',
+      });
+      await expect(items('/users/suspended_user/communities')).resolves.toEqual(
+        { items: [], page: 1, limit: 20, total: 0 },
+      );
+    });
+
+    it.each(routes)(
+      'answers an account without activity on %s with an empty page',
+      async (route) => {
+        await expect(items(`/users/banned_user/${route}`)).resolves.toEqual({
+          items: [],
+          page: 1,
+          limit: 20,
+          total: 0,
+        });
+      },
+    );
+
+    it('pages each post exactly once and reverses with sort=oldest', async () => {
+      const paged: unknown[] = [];
+      for (const page of [1, 2, 3, 4]) {
+        const body = await items(
+          `/users/sample_user/posts?page=${page}&limit=1`,
+        );
+        expect(body).toMatchObject({ page, limit: 1, total: 3 });
+        paged.push(...body.items.map((item) => item.id));
+      }
+      expect(paged).toEqual(['p-live-2', 'p-live-1', 'post-a']);
+
+      const oldest = await items('/users/sample_user/posts?sort=oldest');
+      expect(oldest.items.map((item) => item.id)).toEqual([
+        'post-a',
+        'p-live-1',
+        'p-live-2',
+      ]);
+      const comments = await items('/users/sample_user/comments?sort=oldest');
+      expect(comments.items.map((item) => item.id)).toEqual([
+        'comment-a',
+        'm-live',
+      ]);
+    });
+
+    it('pages the communities by name', async () => {
+      const body = await items('/users/sample_user/communities?page=2&limit=2');
+      expect(body).toMatchObject({ page: 2, limit: 2, total: 3 });
+      expect(body.items.map((item) => item.name)).toEqual(['live']);
+    });
+
+    it.each(routes)(
+      'answers %s with 200 without a token, 404 for an unknown user, 400 for a bad username',
+      async (route) => {
+        await get(`/users/sample_user/${route}`).expect(200);
+        const missing = await get(`/users/unknown/${route}`).expect(404);
+        expect(missing.body).toMatchObject({ message: 'User not found' });
+
+        queryCalls = [];
+        await get(`/users/sample_user%27%20OR%201%3D1/${route}`).expect(400);
+        await get(`/users/${'a'.repeat(51)}/${route}`).expect(400);
+        expect(queryCalls).toHaveLength(0);
+      },
+    );
+
+    it.each([
+      ...routes.flatMap((route) => [
+        `/users/sample_user/${route}?page=0`,
+        `/users/sample_user/${route}?page=10001`,
+        `/users/sample_user/${route}?limit=0`,
+        `/users/sample_user/${route}?limit=101`,
+        `/users/sample_user/${route}?unexpected=1`,
+        `/users/sample_user/${route}?user_id=user-b`,
+      ]),
+      '/users/sample_user/posts?sort=top',
+      '/users/sample_user/comments?sort=created_at%20DESC',
+      // The communities order is fixed by name.
+      '/users/sample_user/communities?sort=new',
+    ])('rejects %s with 400 before querying', async (path) => {
+      await get(path).expect(400);
+      expect(queryCalls).toHaveLength(0);
+    });
+
+    it.each(routes)(
+      'answers %s with 404 for a deleted account, under its placeholder or old name',
+      async (route) => {
+        Object.assign(row('user-a'), {
+          username: 'deleted_user_a1b2c3',
+          deleted_at: deletedAt,
+        });
+
+        await get(`/users/deleted_user_a1b2c3/${route}`).expect(404);
+        await get(`/users/sample_user/${route}`).expect(404);
+      },
+    );
+
+    it('returns no account data, platform role or subscription timestamp', async () => {
+      for (const route of routes) {
+        const response = await get(`/users/sample_user/${route}`).expect(200);
+        const serialised = JSON.stringify(response.body);
+        expect(serialised).not.toMatch(SECRET);
+        for (const field of [
+          '"email"',
+          '@example.com',
+          '"user_id"',
+          '"last_seen_at"',
+          '"password_hash"',
+          '"subscribed_at"',
+          '"created_by"',
+        ]) {
+          expect([route, serialised.includes(field)]).toEqual([route, false]);
+        }
+        // The only role is the community role on /communities; no platform
+        // role ('user', 'moderator', 'admin') is ever exposed as such.
+        const roles = (response.body as { items: Row[] }).items
+          .filter((item) => 'role' in item)
+          .map((item) => item.role);
+        expect(route === 'communities' || roles.length === 0).toBe(true);
+        for (const role of roles) {
+          expect(['creator', 'moderator', 'contributor']).toContain(role);
+        }
+      }
+      // other_user's platform role is moderator, and they created every
+      // community in the fixture but alpha: each visible one lists them as
+      // creator, never with their platform role.
+      const theirs = await items('/users/other_user/communities');
+      expect(theirs.items.map(({ name, role }) => [name, role])).toEqual([
+        ['bravo', 'creator'],
+        ['live', 'creator'],
+        ['subscribed', 'creator'],
+        ['zulu', 'creator'],
+      ]);
+    });
+
+    it('keeps the listings behind the global read rate limit', async () => {
+      for (const route of routes) {
+        await get(`/users/sample_user/${route}`);
+      }
+      expect(rateLimitCalls).toEqual(
+        routes.map((route) => ({
+          method: 'GET',
+          path: `/users/sample_user/${route}`,
+        })),
+      );
+
+      rateLimited.add('GET /users/sample_user/posts');
+      queryCalls = [];
+      await get('/users/sample_user/posts').expect(429);
+      expect(queryCalls).toHaveLength(0);
     });
   });
 

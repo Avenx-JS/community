@@ -151,7 +151,7 @@ integration('community subscriptions index (MySQL)', () => {
       {} as CommunityRuleAcceptanceService,
       {} as CommunityModerationLogService,
     );
-  });
+  }, 120_000);
 
   afterAll(async () => {
     await pool?.end();

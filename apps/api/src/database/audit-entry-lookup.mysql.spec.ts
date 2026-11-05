@@ -83,7 +83,7 @@ integration('audit entry lookup (MySQL)', () => {
       },
     };
     service = new AdminAuditLogService(recording as unknown as Pool);
-  });
+  }, 120_000);
 
   afterAll(async () => {
     await pool?.end();

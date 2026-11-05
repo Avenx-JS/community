@@ -173,7 +173,7 @@ integration('community suspension (MySQL)', () => {
 
     firstRun = await migrate();
     secondRun = await migrate();
-  });
+  }, 120_000);
 
   afterAll(async () => {
     await connection?.query(

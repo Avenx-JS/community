@@ -7,6 +7,7 @@ import {
   HttpStatus,
   Param,
   Patch,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -24,10 +25,21 @@ import {
   ApiRouteParam,
 } from '../common/openapi';
 import { AccountDeletionService } from './account-deletion.service';
+import {
+  ListUserActivityDto,
+  ListUserCommunitiesDto,
+} from './dto/list-user-activity.dto';
+import { UserActivityService } from './user-activity.service';
 import { DeleteOwnAccountDto } from './dto/delete-own-account.dto';
 import { UpdateOwnProfileDto } from './dto/update-own-profile.dto';
 import { UsersService } from './users.service';
-import { OwnProfileResponse, UserProfileResponse } from './users.responses';
+import {
+  OwnProfileResponse,
+  UserCommentListResponse,
+  UserCommunityListResponse,
+  UserPostListResponse,
+  UserProfileResponse,
+} from './users.responses';
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
 
 @ApiTags('users')
@@ -36,6 +48,7 @@ export class UsersController {
   constructor(
     private readonly usersService: UsersService,
     private readonly accountDeletion: AccountDeletionService,
+    private readonly userActivity: UserActivityService,
   ) {}
 
   // The 'me' routes must stay above ':username', or Express would hand
@@ -123,5 +136,70 @@ export class UsersController {
     @Param('username', new SafeRouteParamPipe('username')) username: string,
   ) {
     return this.usersService.getUserProfile(username);
+  }
+
+  @Get(':username/posts')
+  @ApiOperation({
+    summary: "List a user's posts",
+    description:
+      'Newest first by default (sort=oldest reverses it), then by ID. Omits ' +
+      'posts removed by moderators and posts in deleted or suspended ' +
+      'communities.',
+  })
+  @ApiRouteParam('username', 'username', 'Exact username.')
+  @ApiOkResponse({ type: UserPostListResponse })
+  @ApiErrorResponses({
+    400: 'Invalid username or query parameters.',
+    404: 'User not found.',
+  })
+  listUserPosts(
+    @Param('username', new SafeRouteParamPipe('username')) username: string,
+    @Query() query: ListUserActivityDto,
+  ) {
+    return this.userActivity.listPosts(username, query);
+  }
+
+  @Get(':username/comments')
+  @ApiOperation({
+    summary: "List a user's comments",
+    description:
+      'Flat comments with their post title and community name, newest first ' +
+      'by default (sort=oldest reverses it), then by ID. Omits removed ' +
+      'comments, comments on removed posts, and comments in deleted or ' +
+      'suspended communities.',
+  })
+  @ApiRouteParam('username', 'username', 'Exact username.')
+  @ApiOkResponse({ type: UserCommentListResponse })
+  @ApiErrorResponses({
+    400: 'Invalid username or query parameters.',
+    404: 'User not found.',
+  })
+  listUserComments(
+    @Param('username', new SafeRouteParamPipe('username')) username: string,
+    @Query() query: ListUserActivityDto,
+  ) {
+    return this.userActivity.listComments(username, query);
+  }
+
+  @Get(':username/communities')
+  @ApiOperation({
+    summary: 'List the communities a user visibly takes part in',
+    description:
+      'Communities the user created, moderates, or wrote a visible post or ' +
+      'comment in, by name. A subscription alone is never listed, and no ' +
+      'subscription date is returned. Omits deleted and suspended ' +
+      'communities.',
+  })
+  @ApiRouteParam('username', 'username', 'Exact username.')
+  @ApiOkResponse({ type: UserCommunityListResponse })
+  @ApiErrorResponses({
+    400: 'Invalid username or query parameters.',
+    404: 'User not found.',
+  })
+  listUserCommunities(
+    @Param('username', new SafeRouteParamPipe('username')) username: string,
+    @Query() query: ListUserCommunitiesDto,
+  ) {
+    return this.userActivity.listCommunities(username, query);
   }
 }

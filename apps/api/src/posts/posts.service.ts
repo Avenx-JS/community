@@ -26,7 +26,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { CreatePostDto } from './dto/create-post.dto';
 import { ListPostsDto } from './dto/list-posts.dto';
 
-interface PostRow extends RowDataPacket {
+export interface PostRow extends RowDataPacket {
   id: string;
   title: string;
   content: string | null;
@@ -39,7 +39,7 @@ interface PostRow extends RowDataPacket {
 }
 
 // Every column of a post DTO, in DTO order.
-const POST_COLUMNS =
+export const POST_COLUMNS =
   'id, title, content, type, author_id, community_id, created_at, pinned_at, pinned_by';
 
 interface PinnablePostRow extends RowDataPacket {
@@ -429,16 +429,22 @@ export class PostsService {
   }
 
   private toDto(post: PostRow): PostDto {
-    return {
-      id: post.id,
-      title: post.title,
-      content: post.content,
-      type: post.type,
-      author_id: post.author_id,
-      community_id: post.community_id,
-      created_at: new Date(post.created_at).toISOString(),
-      pinned_at: post.pinned_at ? new Date(post.pinned_at).toISOString() : null,
-      pinned_by: post.pinned_by ?? null,
-    };
+    return toPostDto(post);
   }
+}
+
+// The one post DTO: PostsService and the author feed (GET
+// /users/:username/posts) both render rows selected with POST_COLUMNS.
+export function toPostDto(post: PostRow): PostDto {
+  return {
+    id: post.id,
+    title: post.title,
+    content: post.content,
+    type: post.type,
+    author_id: post.author_id,
+    community_id: post.community_id,
+    created_at: new Date(post.created_at).toISOString(),
+    pinned_at: post.pinned_at ? new Date(post.pinned_at).toISOString() : null,
+    pinned_by: post.pinned_by ?? null,
+  };
 }

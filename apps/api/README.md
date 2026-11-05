@@ -1289,6 +1289,127 @@ not exist, the endpoint returns HTTP `404`:
 }
 ```
 
+### Activity listings: posts, comments and communities
+
+Three public routes show what an account has written and where it takes
+part, so a reader, or a moderator weighing a report, can see who they are
+dealing with without querying the database. None needs a bearer token; all
+three remain subject to the global read rate limits. They are the cheapest
+kind of indexed listing but also the natural tool for scraping one person's
+history, so they are candidates for a documented per-route override if abuse
+appears, never for an exemption.
+
+Each route resolves the username first (`SafeRouteParamPipe`, then
+`username = ? AND deleted_at IS NULL`): an unknown username is `404 User not
+found` before any other rule applies, and a malformed one is `400`. A
+**deleted account is `404`** under its placeholder username as well as its
+old one, rather than serving a feed of retained content attributed to a
+placeholder. Each returns `{ "items", "page", "limit", "total" }`; `page` is
+`1` to `10000` (default `1`) and `limit` `1` to `100` (default `20`), and an
+out-of-range value or unknown query property is `400`. An account without
+qualifying activity gets `200` with `items: []` and `total: 0`.
+
+**What is excluded.** A listing shows only what a reader of the community
+could see:
+
+| Route | Excluded |
+| --- | --- |
+| `/posts` | posts with `removed_at` set; posts in a deleted (`deleted_at`) or suspended (`suspended_at`) community |
+| `/comments` | comments with `removed_at` set; comments on a post with `removed_at` set; comments in a deleted or suspended community |
+| `/communities` | deleted and suspended communities; a community the user is only subscribed to; a community where the user's only content is excluded above |
+
+The suspended-community rule is stricter than the rest of the API today:
+suspension (`communities.suspended_at`, migration 025) is not yet enforced on
+`GET /posts` and the other reads. These listings apply both predicates
+(`listedCommunitySql`), and each other read must add the second one when
+suspension is enforced.
+
+#### `GET /users/:username/posts`
+
+Optional `sort`: `new` (default, `created_at DESC, id DESC`) or `oldest`
+(`created_at ASC, id ASC`). Items are the same post type as `GET /posts` and
+`GET /posts/:id` (`PostResponse`), so a client has one post type. Served by
+`idx_posts_author_created (author_id, created_at, id)` in either direction
+without a filesort.
+
+#### `GET /users/:username/comments`
+
+Same `sort` as the post feed. Items are flat:
+
+```json
+{
+  "id": "comment-id",
+  "post_id": "post-id",
+  "content": "Comment body",
+  "created_at": "2026-10-22T08:00:00.000Z",
+  "edited_at": null,
+  "post_title": "The post it is on",
+  "community_name": "general"
+}
+```
+
+**Not the thread node.** `GET /posts/:postId/comments` returns a recursive
+`CommentResponse` with a `replies` array. An author listing has no tree, and
+nodes with empty `replies` would invite clients to treat every comment as a
+root, so this route has its own flat item type (`UserCommentResponse`).
+
+**Why this listing joins.** `post_title` and `community_name` come from a
+join to `posts` and `communities`. The [notification inbox](#notifications)
+deliberately forbids joins, because a notification's subject may be gone and
+its context must be stored. A comment's post always exists:
+`comments.post_id` is a real foreign key with `ON DELETE CASCADE`, as is
+`posts.community_id`, so the join can never drop or orphan a row. The
+difference from the inbox rule is deliberate. The query reads
+`idx_comments_author_created (author_id, created_at, id)` first and joins
+each post and community by primary key (`STRAIGHT_JOIN` keeps that order), so
+it needs no filesort.
+
+#### `GET /users/:username/communities`
+
+Items are `{ "name", "description", "role" }`, ordered by `name` ascending.
+There is no `sort`: a recency order would reveal when the person was last
+active there.
+
+**Visibility decision.** A membership list is personal information. `#15`
+minimised PII in responses, and `GET /communities/:name/members` stays behind
+a moderator check because a roster is a targeting primitive; every community
+one named person belongs to is the same information from the other
+direction. This route therefore lists **only the communities the user's own
+public activity already reveals**:
+
+| `role` | Rule |
+| --- | --- |
+| `creator` | the user created the community |
+| `moderator` | the user is a listed moderator (`GET /communities/:name/moderators` is public) |
+| `contributor` | the user has a visible post, or a visible comment on a visible post, there |
+
+The strongest role wins. **Membership alone is never published**: everything
+in the list is already discoverable by reading the community, so the route
+reveals nothing new, whereas a subscription list would reveal reading habits,
+which nothing else in the API exposes. No subscription timestamp, nor any
+field derived from `community_subscriptions`, is returned; the query does not
+read that table at all. `role` is the community role, never the platform
+role.
+
+*Rejected alternative:* publishing raw `community_subscriptions`. It is
+simpler and closer to the route's name, but needs a per-user visibility
+setting (its own column and endpoint, a separate issue) and must not ship
+without one.
+
+The query unions the four sources, each starting from an index led by the
+user (`idx_communities_creator_id`, `idx_community_moderators_user_id`,
+`idx_posts_author_created`, `idx_comments_author_created`), so its cost grows
+with the person's activity, not with the number of communities.
+
+**Not yet covered.** Once user blocking exists, a blocked viewer reading a
+blocker's activity must follow whatever the blocking enforcement decides;
+these routes do not anticipate it.
+
+`user-activity.mysql.spec.ts` runs the exclusion matrix, each visibility
+branch, paging and both sort directions on a real server, and asserts that
+both feeds use their composite index without a filesort and that no branch
+of the community listing scans a base table.
+
 ### Own account: `GET /users/me` and `PATCH /users/me`
 
 Both require a bearer token and act only on the account the token belongs to;
