@@ -24,6 +24,7 @@ import {
 } from './fakes/community-rules-store';
 import { CommunityRuleAcceptanceService } from '../src/communities/community-rule-acceptance.service';
 import { answerVoteScores, type FakeVote } from './fakes/vote-scores';
+import { REMOVED_CONTENT_REVIEWER_SQL } from '../src/common/removed-content';
 
 interface TestNotification {
   id: string;
@@ -47,6 +48,8 @@ interface TestPost {
   pinned_at: Date | null;
   pinned_by: string | null;
   removed_at?: Date | null;
+  removed_by?: string | null;
+  removal_reason?: string | null;
   locked_at?: Date | null;
   locked_by?: string | null;
   edited_at?: Date | null;
@@ -76,6 +79,10 @@ describe('Post endpoints (e2e)', () => {
   let pinClock: number;
   // The database clock of UTC_TIMESTAMP() in an edit.
   const editClock = '2026-11-05T12:00:00.000Z';
+  // The database clock of UTC_TIMESTAMP() in a removal.
+  const removeClock = '2026-11-07T10:00:00.000Z';
+  // users.role = 'admin'.
+  const platformAdmins = new Set(['platform-admin']);
   // The database clock of UTC_TIMESTAMP() in a lock.
   const lockClock = '2026-11-06T09:00:00.000Z';
   const communities = [
@@ -335,6 +342,18 @@ describe('Post endpoints (e2e)', () => {
             [],
           ];
         }
+        if (sql.startsWith('SELECT community_id, removed_at FROM posts')) {
+          const [id] = values as [string];
+          return [
+            posts
+              .filter((post) => post.id === id && visible(post, sql))
+              .map((post) => ({
+                community_id: post.community_id,
+                removed_at: post.removed_at ?? null,
+              })),
+            [],
+          ];
+        }
         if (sql.startsWith('SELECT id FROM posts')) {
           const [id] = values as [string];
           return [
@@ -357,6 +376,7 @@ describe('Post endpoints (e2e)', () => {
                     author_id: post.author_id,
                     community_id: post.community_id,
                     title: post.title,
+                    removed_at: post.removed_at ?? null,
                     can_moderate:
                       communityCreators.get(post.community_id) === creatorId ||
                       moderatorAssignments.has(
@@ -399,6 +419,41 @@ describe('Post endpoints (e2e)', () => {
         }
         // POST and DELETE /posts/:id/lock: the guarded update. It replaces
         // the row object, so a rollback's snapshot restores it.
+        // POST /posts/:id/remove and /restore.
+        if (sql.startsWith('UPDATE posts SET removed_at')) {
+          const removing = sql.includes('UTC_TIMESTAMP()');
+          const id = values[values.length - 1] as string;
+          posts = posts.map((post) =>
+            post.id === id
+              ? {
+                  ...post,
+                  removed_at: removing ? new Date(removeClock) : null,
+                  removed_by: removing ? (values[0] as string) : null,
+                  removal_reason: removing
+                    ? (values[1] as string | null)
+                    : null,
+                }
+              : post,
+          );
+          return [{ affectedRows: 1 }, []];
+        }
+        if (sql === REMOVED_CONTENT_REVIEWER_SQL) {
+          const [communityId, creatorId, moderatorId, adminId] =
+            values as string[];
+          return [
+            [
+              {
+                can_review:
+                  communityCreators.get(communityId) === creatorId ||
+                  moderatorAssignments.has(`${communityId}:${moderatorId}`) ||
+                  platformAdmins.has(adminId)
+                    ? 1
+                    : 0,
+              },
+            ],
+            [],
+          ];
+        }
         if (sql.startsWith('UPDATE posts SET locked_at')) {
           const locking = sql.includes('UTC_TIMESTAMP()');
           const id = values[values.length - 1] as string;
@@ -542,6 +597,7 @@ describe('Post endpoints (e2e)', () => {
     const userIds: Record<string, string> = {
       'valid-token': 'user-1',
       'moderator-token': 'user-mod',
+      'admin-token': 'platform-admin',
       'creator-token': 'creator-1',
       'other-moderator-token': 'user-other-mod',
       'fixture-author-token': recipientFixture.author,
@@ -575,7 +631,12 @@ describe('Post endpoints (e2e)', () => {
     await app.init();
 
     function filteredPosts(sql: string, values: unknown[]): TestPost[] {
-      const live = posts.filter((post) => visible(post, sql));
+      // A statement carrying the removal filter does not list removed posts.
+      const live = posts.filter(
+        (post) =>
+          visible(post, sql) &&
+          !(sql.includes('posts.removed_at IS NULL') && post.removed_at),
+      );
       if (!sql.includes('WHERE community_id = ?')) {
         return live;
       }
@@ -806,18 +867,23 @@ describe('Post endpoints (e2e)', () => {
       .expect(400);
   });
 
-  it('allows authors and community-scoped moderators to delete posts', async () => {
+  it('allows only authors to delete posts', async () => {
     await request(app.getHttpServer())
       .delete('/posts/post-2')
       .set('Authorization', 'Bearer valid-token')
       .expect(403);
     expect(posts.some((post) => post.id === 'post-2')).toBe(true);
 
-    await request(app.getHttpServer())
+    // Breaking change: a moderator may no longer hard-delete another
+    // author's post; the 403 names the reversible removal route.
+    const refused = await request(app.getHttpServer())
       .delete('/posts/post-2')
       .set('Authorization', 'Bearer moderator-token')
-      .expect(204);
-    expect(posts.some((post) => post.id === 'post-2')).toBe(false);
+      .expect(403);
+    expect((refused.body as { message: string }).message).toBe(
+      'Only the author may delete this post; moderators remove posts with POST /posts/:id/remove',
+    );
+    expect(posts.some((post) => post.id === 'post-2')).toBe(true);
 
     await request(app.getHttpServer())
       .delete('/posts/post-3')
@@ -915,13 +981,17 @@ describe('Post endpoints (e2e)', () => {
   });
 
   describe('content_removed notifications', () => {
-    it('notifies the author when a moderator removes their post, naming no moderator', async () => {
+    it('notifies the author when a moderator removes their post, naming no moderator and no reason', async () => {
       await request(app.getHttpServer())
-        .delete('/posts/post-1')
+        .post('/posts/post-1/remove')
         .set('Authorization', 'Bearer moderator-token')
-        .expect(204);
+        .send({ reason: 'Off-topic for this community' })
+        .expect(200);
 
-      expect(posts.some((post) => post.id === 'post-1')).toBe(false);
+      // Kept, not deleted.
+      expect(posts.find((post) => post.id === 'post-1')).toMatchObject({
+        removed_by: 'user-mod',
+      });
       expect(notifications).toEqual([
         {
           id: expect.any(String) as unknown as string,
@@ -935,6 +1005,7 @@ describe('Post endpoints (e2e)', () => {
         },
       ]);
       expect(JSON.stringify(notifications)).not.toContain('user-mod');
+      expect(JSON.stringify(notifications)).not.toContain('Off-topic');
       expect(openConnections).toBe(0);
     });
 
@@ -947,15 +1018,18 @@ describe('Post endpoints (e2e)', () => {
       expect(notifications).toEqual([]);
     });
 
-    it('keeps the post when the notification cannot be written', async () => {
+    it('rolls the removal back when the notification cannot be written', async () => {
       failNotificationWrite = true;
 
       await request(app.getHttpServer())
-        .delete('/posts/post-1')
+        .post('/posts/post-1/remove')
         .set('Authorization', 'Bearer moderator-token')
         .expect(500);
 
-      expect(posts.some((post) => post.id === 'post-1')).toBe(true);
+      expect(
+        posts.find((post) => post.id === 'post-1')?.removed_at ?? null,
+      ).toBeNull();
+      expect(moderationLog).toEqual([]);
       expect(notifications).toEqual([]);
       expect(openConnections).toBe(0);
     });
@@ -1019,7 +1093,7 @@ describe('Post endpoints (e2e)', () => {
         .expect(404);
     });
 
-    it('lets authors and moderators delete, and anyone read, without accepting', async () => {
+    it('lets authors delete, moderators remove, and anyone read, without accepting', async () => {
       rules.publish('community-1');
       const check = jest.spyOn(
         app.get(CommunityRuleAcceptanceService),
@@ -1031,7 +1105,8 @@ describe('Post endpoints (e2e)', () => {
         .expect(200);
       await as('valid-token').get('/posts/post-1').expect(200);
       await as('valid-token').delete('/posts/post-1').expect(204);
-      await as('moderator-token').delete('/posts/post-2').expect(204);
+      await as('moderator-token').post('/posts/post-2/remove').expect(200);
+      await as('moderator-token').post('/posts/post-2/restore').expect(200);
 
       expect(check).not.toHaveBeenCalled();
     });
@@ -1578,14 +1653,14 @@ describe('Post endpoints (e2e)', () => {
       expect(stored('post-1')?.title).toBe('First');
     });
 
-    it('lets the same moderator delete the post they may not edit', async () => {
+    it('lets the same moderator remove the post they may not edit', async () => {
       await patch('/posts/post-1', { title: 'x' }, 'moderator-token').expect(
         403,
       );
       await request(app.getHttpServer())
-        .delete('/posts/post-1')
+        .post('/posts/post-1/remove')
         .set('Authorization', 'Bearer moderator-token')
-        .expect(204);
+        .expect(200);
     });
 
     it('answers 401 without a token, 404 for an unknown post and 400 for a malformed id', async () => {
@@ -1835,6 +1910,229 @@ describe('Post endpoints (e2e)', () => {
         .delete('/posts/post-1')
         .set('Authorization', 'Bearer valid-token')
         .expect(204);
+    });
+  });
+
+  describe('moderative removal', () => {
+    const as = (token?: string) => {
+      const server = () => request(app.getHttpServer());
+      const auth = (call: request.Test) =>
+        token ? call.set('Authorization', `Bearer ${token}`) : call;
+      return {
+        remove: (id: string, body: object = {}) =>
+          auth(server().post(`/posts/${id}/remove`)).send(body),
+        restore: (id: string) => auth(server().post(`/posts/${id}/restore`)),
+        get: (path: string) => auth(server().get(path)),
+      };
+    };
+    const stored = (id: string) => posts.find((post) => post.id === id);
+    const removalWrites = () =>
+      queryCalls.filter(({ sql }) =>
+        sql.startsWith('UPDATE posts SET removed_at'),
+      );
+    const listedIds = async (path: string) =>
+      (
+        (await as().get(path).expect(200)).body as {
+          items: { id: string }[];
+        }
+      ).items.map((post) => post.id);
+
+    afterEach(() => {
+      expect(openConnections).toBe(0);
+    });
+
+    it.each([
+      ['creator-token', 'creator-1'],
+      ['moderator-token', 'user-mod'],
+    ])(
+      'lets %s remove with 200, from the database clock and the token, keeping the row',
+      async (token, actor) => {
+        const response = await as(token)
+          .remove('post-1', { reason: '  Spam  ' })
+          .expect(200);
+        expect(response.body).toMatchObject({
+          id: 'post-1',
+          title: 'First',
+          removed: true,
+          removed_at: removeClock,
+          removed_by: actor,
+          removal_reason: 'Spam',
+        });
+        expect(stored('post-1')).toBeDefined();
+        expect(
+          queryCalls.some(({ sql }) => sql.startsWith('DELETE FROM posts')),
+        ).toBe(false);
+        expect(moderationLog).toEqual([
+          {
+            community_id: 'community-1',
+            actor_id: actor,
+            action: 'post_removed',
+            target_type: 'post',
+            target_id: 'post-1',
+          },
+        ]);
+        expect(notifications).toHaveLength(1);
+        expect(notifications[0]).toMatchObject({
+          type: 'content_removed',
+          actor_id: null,
+        });
+      },
+    );
+
+    it.each([
+      ['valid-token', 'the author, who does not moderate'],
+      ['fixture-author-token', 'an unrelated user'],
+      ['other-moderator-token', 'a moderator of another community'],
+    ])('answers %s (%s) with 403 on remove and restore', async (token) => {
+      await as(token).remove('post-1').expect(403);
+      stored('post-1')!.removed_at = new Date('2026-11-01T00:00:00.000Z');
+      await as(token).restore('post-1').expect(403);
+      expect(removalWrites()).toHaveLength(0);
+      expect(moderationLog).toEqual([]);
+    });
+
+    it('points the author at DELETE', async () => {
+      const response = await as('valid-token').remove('post-1').expect(403);
+      expect((response.body as { message: string }).message).toBe(
+        'Moderators remove posts; authors delete their own with DELETE /posts/:id',
+      );
+    });
+
+    it('answers 401, 404, 400 and 409 on remove and restore', async () => {
+      await as().remove('post-1').expect(401);
+      await as().restore('post-1').expect(401);
+      await as('moderator-token').remove('missing').expect(404);
+      await as('moderator-token').restore('missing').expect(404);
+      await as('moderator-token').remove('post-1%27%20OR%201%3D1').expect(400);
+      await as('moderator-token').restore('post-1%27%20OR%201%3D1').expect(400);
+      // Restoring a post that is not removed.
+      await as('moderator-token').restore('post-1').expect(409);
+      await as('moderator-token').remove('post-1').expect(200);
+      // Removing it twice.
+      await as('moderator-token').remove('post-1').expect(409);
+      expect(moderationLog).toHaveLength(1);
+    });
+
+    it.each([
+      [{ reason: 'x'.repeat(2001) }, 'an over-long reason'],
+      [{ reason: 'bad\u0007reason' }, 'a control character'],
+      [{ reason: '' }, 'an empty reason'],
+      [{ removed_by: 'someone' }, 'an unknown property'],
+    ] as [object, string][])(
+      'refuses %o (%s) with 400 and writes nothing',
+      async (body) => {
+        await as('moderator-token').remove('post-1', body).expect(400);
+        expect(removalWrites()).toHaveLength(0);
+      },
+    );
+
+    it('hides a removed post from every public read, and restores it', async () => {
+      await as('moderator-token').remove('post-1').expect(200);
+
+      await as().get('/posts/post-1').expect(404);
+      expect(await listedIds('/posts')).not.toContain('post-1');
+      expect(await listedIds('/posts?community_id=community-1')).not.toContain(
+        'post-1',
+      );
+      await as().get('/posts/post-1/comments').expect(404);
+
+      const restored = await as('moderator-token')
+        .restore('post-1')
+        .expect(200);
+      expect(restored.body).not.toHaveProperty('removed');
+      expect(stored('post-1')).toMatchObject({
+        removed_at: null,
+        removed_by: null,
+        removal_reason: null,
+      });
+      await as().get('/posts/post-1').expect(200);
+      expect(await listedIds('/posts')).toContain('post-1');
+      expect(moderationLog.map((entry) => entry.action)).toEqual([
+        'post_removed',
+        'post_restored',
+      ]);
+      // No restore notification.
+      expect(notifications).toHaveLength(1);
+    });
+
+    describe('GET /posts/:id on a removed post', () => {
+      beforeEach(() => {
+        Object.assign(stored('post-1')!, {
+          removed_at: new Date('2026-11-01T00:00:00.000Z'),
+          removed_by: null,
+          removal_reason: 'Spam',
+        });
+      });
+
+      it.each([
+        [undefined, 'an anonymous caller'],
+        ['valid-token', 'the author'],
+        ['fixture-author-token', 'an unrelated member'],
+        ['other-moderator-token', 'a moderator of another community'],
+        ['not-a-token', 'a caller with an invalid token'],
+      ] as [string | undefined, string][])(
+        'answers %s (%s) with 404',
+        async (token) => {
+          const response = await as(token).get('/posts/post-1').expect(404);
+          expect(JSON.stringify(response.body)).not.toMatch(/Spam|First body/);
+        },
+      );
+
+      it.each([
+        ['moderator-token', 'a community moderator'],
+        ['creator-token', 'the community creator'],
+        ['admin-token', 'a platform admin'],
+      ])(
+        'shows %s (%s) the full post and its removal state, removed_by null for a deleted moderator',
+        async (token) => {
+          const response = await as(token).get('/posts/post-1').expect(200);
+          expect(response.body).toMatchObject({
+            id: 'post-1',
+            title: 'First',
+            content: 'First body',
+            removed: true,
+            removed_at: '2026-11-01T00:00:00.000Z',
+            removed_by: null,
+            removal_reason: 'Spam',
+          });
+        },
+      );
+
+      it('returns the same post to a reviewer as before removal, plus only the removal fields', async () => {
+        const reviewer = (
+          await as('moderator-token').get('/posts/post-1').expect(200)
+        ).body as Record<string, unknown>;
+        stored('post-1')!.removed_at = null;
+        const ordinary = (await as().get('/posts/post-1').expect(200))
+          .body as Record<string, unknown>;
+        const { removed, removed_at, removed_by, removal_reason, ...rest } =
+          reviewer;
+        expect([removed, removed_at, removed_by, removal_reason]).toEqual([
+          true,
+          '2026-11-01T00:00:00.000Z',
+          null,
+          'Spam',
+        ]);
+        expect(rest).toEqual(ordinary);
+      });
+    });
+
+    it('lets the author still delete their own visible post: the DELETE author path is unchanged', async () => {
+      await request(app.getHttpServer())
+        .delete('/posts/post-1')
+        .set('Authorization', 'Bearer valid-token')
+        .expect(204, '');
+      expect(stored('post-1')).toBeUndefined();
+      expect(notifications).toEqual([]);
+    });
+
+    it('refuses editing a removed post with 409', async () => {
+      await as('moderator-token').remove('post-1').expect(200);
+      await request(app.getHttpServer())
+        .patch('/posts/post-1')
+        .set('Authorization', 'Bearer valid-token')
+        .send({ title: 'Rewrite' })
+        .expect(409);
     });
   });
 });

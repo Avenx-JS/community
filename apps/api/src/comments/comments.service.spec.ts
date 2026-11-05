@@ -6,12 +6,14 @@ import {
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { REMOVED_CONTENT_REVIEWER_SQL } from '../common/removed-content';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import {
   CommentsService,
   MAX_LOCK_ANCESTOR_DEPTH,
   PARENT_WITH_ANCESTRY_SQL,
+  THREAD_POST_SQL,
 } from './comments.service';
 
 // Every community's rules count as accepted unless a test says otherwise.
@@ -710,32 +712,26 @@ describe('CommentsService.remove', () => {
     expect(notifications.record).not.toHaveBeenCalled();
   });
 
-  it('lets a moderator or creator delete and notifies the author', async () => {
+  // The breaking change, pinned: a moderator or the creator may no longer
+  // hard-delete someone else's comment; they are pointed at
+  // POST /comments/:id/remove, and nothing is deleted or notified.
+  it('refuses a moderator or creator with 403 naming the remove route', async () => {
     comment = { ...comment, can_moderate: 1 };
 
-    await expect(
-      service.remove('comment-1', 'moderator'),
-    ).resolves.toBeUndefined();
+    await expect(service.remove('comment-1', 'moderator')).rejects.toThrow(
+      new ForbiddenException(
+        'Only the author may delete this comment; moderators remove comments with POST /comments/:id/remove',
+      ),
+    );
 
-    expect(notifications.record).toHaveBeenCalledTimes(1);
-    expect(notifications.record).toHaveBeenCalledWith(connection, {
-      recipientId: 'author',
-      type: 'content_removed',
-      actorId: null,
-      subjectType: 'comment',
-      subjectId: 'comment-1',
-      communityId: 'community-1',
-      metadata: { excerpt: 'Mine ripened early.' },
-    });
-    expect(connection.commit).toHaveBeenCalledTimes(1);
-    expect(connection.release).toHaveBeenCalledTimes(1);
+    expect(deletes()).toEqual([]);
+    expect(notifications.record).not.toHaveBeenCalled();
+    expectRolledBackAndReleased();
   });
 
   it('returns 403 to anyone else and 404 for a missing comment, deleting nothing', async () => {
     await expect(service.remove('comment-1', 'stranger')).rejects.toThrow(
-      new ForbiddenException(
-        'You can only delete your own comments or moderate this community',
-      ),
+      new ForbiddenException('You can only delete your own comments'),
     );
     expectRolledBackAndReleased();
 
@@ -749,17 +745,6 @@ describe('CommentsService.remove', () => {
 
     expect(deletes()).toEqual([]);
     expect(notifications.record).not.toHaveBeenCalled();
-  });
-
-  it('rolls the deletion back when the notification write fails', async () => {
-    comment = { ...comment, can_moderate: 1 };
-    notifications.record.mockRejectedValueOnce(new Error('insert failed'));
-
-    await expect(service.remove('comment-1', 'moderator')).rejects.toThrow(
-      'insert failed',
-    );
-
-    expectRolledBackAndReleased();
   });
 });
 
@@ -817,7 +802,7 @@ describe('CommentsService paginated listings', () => {
       expect(queries[0].sql).toContain('communities.deleted_at IS NULL');
       // The parent lookup ignores removal, so the replies of a removed
       // comment stay readable.
-      expect(queries[0].sql).not.toContain('removed_at');
+      expect(queries[0].sql).not.toContain('comments.removed_at');
     });
 
     it('selects only visible direct children, oldest first by default', async () => {
@@ -1419,5 +1404,251 @@ describe('CommentsService.create on locked threads', () => {
     await expect(
       service.create('post-1', { content: 'Hi' }, 'commenter'),
     ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+});
+
+describe('CommentsService removed content', () => {
+  let service: CommentsService;
+  let queries: Array<{ sql: string; values: unknown[] }>;
+  let postRemoved: boolean;
+  let removedIds: Set<string>;
+  const clock = new Date('2026-11-07T10:00:00.000Z');
+  // root → reply (removed in the tests) → nested; and a sibling root.
+  const rows = () =>
+    [
+      ['root', null, 'author-a'],
+      ['reply', 'root', 'author-b'],
+      ['nested', 'reply', 'author-a'],
+      ['other-root', null, 'author-c'],
+    ].map(([id, parent_id, author_id], index) => ({
+      id,
+      post_id: 'post-1',
+      author_id,
+      parent_id,
+      content: `Content of ${id}`,
+      created_at: new Date(Date.UTC(2026, 9, 22, 8, index)),
+      edited_at: null,
+      locked_at: null,
+      locked_by: null,
+      removed_at: removedIds.has(id as string) ? clock : null,
+      removed_by: removedIds.has(id as string) ? null : null,
+      removal_reason: removedIds.has(id as string) ? 'Rude' : null,
+    }));
+  const canReview = (viewer: unknown) =>
+    ['moderator', 'creator-1', 'platform-admin'].includes(viewer as string);
+
+  beforeEach(async () => {
+    queries = [];
+    postRemoved = false;
+    removedIds = new Set();
+    const execute = (sql: string, values: unknown[]) => {
+      queries.push({ sql, values });
+      if (sql === THREAD_POST_SQL) {
+        return Promise.resolve([
+          values[0] === 'post-1'
+            ? [
+                {
+                  community_id: 'community-1',
+                  removed_at: postRemoved ? clock : null,
+                },
+              ]
+            : [],
+          [],
+        ]);
+      }
+      if (sql.startsWith('SELECT id, post_id, author_id, parent_id')) {
+        return Promise.resolve([rows(), []]);
+      }
+      if (sql.startsWith('SELECT target_id, SUM(value) AS score')) {
+        return Promise.resolve([[], []]);
+      }
+      if (sql === REMOVED_CONTENT_REVIEWER_SQL) {
+        return Promise.resolve([
+          [{ can_review: canReview(values[1]) ? 1 : 0 }],
+          [],
+        ]);
+      }
+      return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
+    };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        CommentsService,
+        { provide: MYSQL_POOL, useValue: { execute } },
+        { provide: NotificationsService, useValue: {} },
+        acceptingRuleAcceptance,
+      ],
+    }).compile();
+    service = module.get(CommentsService);
+  });
+
+  const reviewerChecks = () =>
+    queries.filter(({ sql }) => sql === REMOVED_CONTENT_REVIEWER_SQL);
+
+  it('asks nobody about reviewers when nothing in the thread is removed', async () => {
+    const thread = await service.findThread('post-1', 'stranger');
+    expect(thread.comments).toHaveLength(2);
+    expect(reviewerChecks()).toHaveLength(0);
+    expect(JSON.stringify(thread)).not.toMatch(/removed|removal_reason/);
+  });
+
+  it.each([undefined, 'author-b', 'stranger'])(
+    'shows %s a removed comment as a tombstone, keeping its replies',
+    async (viewer) => {
+      removedIds.add('reply');
+      const thread = await service.findThread('post-1', viewer);
+      const tombstone = thread.comments[0].replies[0];
+      expect(tombstone).toEqual({
+        id: 'reply',
+        post_id: 'post-1',
+        parent_id: 'root',
+        created_at: '2026-10-22T08:01:00.000Z',
+        removed: true,
+        replies: [
+          expect.objectContaining({
+            id: 'nested',
+            content: 'Content of nested',
+          }),
+        ],
+      });
+      expect(tombstone).not.toHaveProperty('content');
+      expect(tombstone).not.toHaveProperty('author_id');
+      expect(JSON.stringify(thread)).not.toContain('Rude');
+      expect(reviewerChecks()).toHaveLength(viewer ? 1 : 0);
+    },
+  );
+
+  it.each(['moderator', 'creator-1', 'platform-admin'])(
+    'shows %s the removed comment in full with its removal state',
+    async (viewer) => {
+      removedIds.add('reply');
+      const thread = await service.findThread('post-1', viewer);
+      expect(thread.comments[0].replies[0]).toMatchObject({
+        id: 'reply',
+        author_id: 'author-b',
+        content: 'Content of reply',
+        removed: true,
+        removed_at: clock.toISOString(),
+        removed_by: null,
+        removal_reason: 'Rude',
+        replies: [expect.objectContaining({ id: 'nested' })],
+      });
+      // Unremoved nodes carry no removal fields, even for reviewers.
+      expect(thread.comments[0]).not.toHaveProperty('removed');
+      expect(reviewerChecks()).toHaveLength(1);
+    },
+  );
+
+  it('answers 404 for a removed post, except to its reviewers', async () => {
+    postRemoved = true;
+    for (const viewer of [undefined, 'author-a', 'stranger']) {
+      await expect(service.findThread('post-1', viewer)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    }
+    await expect(
+      service.findThread('post-1', 'moderator'),
+    ).resolves.toMatchObject({ post_id: 'post-1' });
+    // Only the post lookup ran for the refused viewers: no thread was read.
+    expect(
+      queries.filter(({ sql }) => sql.startsWith('SELECT id, post_id')),
+    ).toHaveLength(1);
+  });
+});
+
+describe('CommentsService.create on removed content', () => {
+  let service: CommentsService;
+  let postRemoved: boolean;
+  let parentRemoved: number;
+  let assertAccepted: jest.Mock;
+  let inserts: number;
+
+  beforeEach(async () => {
+    postRemoved = false;
+    parentRemoved = 0;
+    inserts = 0;
+    assertAccepted = jest.fn().mockResolvedValue(undefined);
+    const execute = (sql: string) => {
+      if (sql.startsWith('SELECT id, author_id, community_id, title')) {
+        return Promise.resolve([
+          [
+            {
+              id: 'post-1',
+              author_id: 'post-author',
+              community_id: 'community-1',
+              title: 'Title',
+              locked_at: new Date('2026-11-01T00:00:00.000Z'),
+              removed_at: postRemoved ? new Date() : null,
+            },
+          ],
+          [],
+        ]);
+      }
+      if (sql.startsWith('WITH RECURSIVE ancestors')) {
+        return Promise.resolve([
+          [
+            {
+              id: 'parent-1',
+              author_id: 'parent-author',
+              parent_removed: parentRemoved,
+              thread_locked: 1,
+              depth_exceeded: 0,
+            },
+          ],
+          [],
+        ]);
+      }
+      inserts += 1;
+      return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
+    };
+    const connection = {
+      beginTransaction: jest.fn().mockResolvedValue(undefined),
+      commit: jest.fn().mockResolvedValue(undefined),
+      rollback: jest.fn().mockResolvedValue(undefined),
+      release: jest.fn(),
+      execute,
+    };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        CommentsService,
+        {
+          provide: MYSQL_POOL,
+          useValue: { getConnection: () => Promise.resolve(connection) },
+        },
+        { provide: NotificationsService, useValue: {} },
+        {
+          provide: CommunityRuleAcceptanceService,
+          useValue: { assertAcceptedOrThrow: assertAccepted },
+        },
+      ],
+    }).compile();
+    service = module.get(CommentsService);
+  });
+
+  // Both fixtures are also locked: the removal 409 comes first.
+  it('refuses a comment on a removed post with 409', async () => {
+    postRemoved = true;
+    await expect(
+      service.create('post-1', { content: 'Hi' }, 'member'),
+    ).rejects.toMatchObject({
+      status: 409,
+      message:
+        'This post was removed by a moderator; it accepts no new comments',
+    });
+    expect(inserts).toBe(0);
+  });
+
+  it('refuses a reply to a removed comment with 409', async () => {
+    parentRemoved = 1;
+    await expect(
+      service.create(
+        'post-1',
+        { content: 'Hi', parent_id: 'parent-1' },
+        'member',
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: 'The comment being replied to was removed by a moderator',
+    });
+    expect(assertAccepted).toHaveBeenCalledTimes(1);
   });
 });

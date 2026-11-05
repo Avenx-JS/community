@@ -183,12 +183,16 @@ export class CommentsController {
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({
-    summary: 'Delete a comment',
+    summary: 'Delete your comment',
     description:
-      "Allowed for the author and for the post's community creator and " +
-      'moderators.',
+      'Author only: a hard delete, with its replies. Breaking change: ' +
+      'community moderators and the creator now receive 403 here; they ' +
+      'remove comments reversibly with POST /comments/{id}/remove.',
   })
-  @ApiAuthenticated({ forbidden: 'The caller may not delete this comment.' })
+  @ApiAuthenticated({
+    forbidden:
+      'The caller is not the author. Moderators use POST /comments/{id}/remove.',
+  })
   @ApiRouteParam('id', 'id', 'Comment ID.')
   @ApiNoContentResponse({ description: 'The comment is deleted.' })
   @ApiErrorResponses({

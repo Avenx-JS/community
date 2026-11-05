@@ -31,7 +31,7 @@ export const POST_STATS_SQL = `SELECT COUNT(*) AS total,
          MAX(created_at) AS last_post_at,
          COALESCE(SUM(created_at >= ${WINDOW_START}), 0) AS recent
        FROM posts
-       WHERE community_id = ?`;
+       WHERE community_id = ? AND removed_at IS NULL`;
 // comments has no community column, so the count joins through posts: the
 // community's posts from idx_posts_community_created, then each post's
 // comments from idx_comments_post_created (post_id, created_at, id). The cost
@@ -41,7 +41,9 @@ export const COMMENT_STATS_SQL = `SELECT COUNT(*) AS total,
          COALESCE(SUM(c.created_at >= ${WINDOW_START}), 0) AS recent
        FROM posts p
        JOIN comments c ON c.post_id = p.id
-       WHERE p.community_id = ?`;
+       WHERE p.community_id = ?
+         AND p.removed_at IS NULL
+         AND c.removed_at IS NULL`;
 
 interface CountRow extends RowDataPacket {
   total: number | string;

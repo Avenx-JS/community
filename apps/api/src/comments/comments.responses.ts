@@ -1,12 +1,29 @@
-import { ApiProperty } from '@nestjs/swagger';
+import {
+  ApiProperty,
+  ApiPropertyOptional,
+  getSchemaPath,
+} from '@nestjs/swagger';
 import { COMMENT_LIST_SORTS } from './dto/list-comment-replies.dto';
 import type { CommentListSort } from './dto/list-comment-replies.dto';
 import type {
   CommentDto,
   CommentReplyDto,
   CommentReplyListDto,
+  CommentTombstoneDto,
   CommentThreadDto,
 } from './comments.service';
+
+// A thread node: a full comment or a tombstone. The models are registered
+// with @ApiExtraModels on GET /posts/:postId/comments.
+const COMMENT_NODES_SCHEMA = {
+  type: 'array' as const,
+  items: {
+    oneOf: [
+      { $ref: getSchemaPath('CommentResponse') },
+      { $ref: getSchemaPath('CommentTombstoneResponse') },
+    ],
+  },
+};
 
 export class CommentResponse implements CommentDto {
   @ApiProperty()
@@ -61,8 +78,65 @@ export class CommentResponse implements CommentDto {
   })
   score!: number;
 
-  @ApiProperty({ type: () => [CommentResponse] })
-  replies!: CommentResponse[];
+  @ApiProperty({
+    ...COMMENT_NODES_SCHEMA,
+    description:
+      'Direct replies, each a CommentResponse or, if removed by a ' +
+      'moderator, a CommentTombstoneResponse (for everyone but reviewers).',
+  })
+  replies!: (CommentResponse | CommentTombstoneResponse)[];
+
+  @ApiPropertyOptional({
+    enum: [true],
+    description:
+      'Present only on a removed comment, and only for its reviewers ' +
+      '(community creator, community moderators, platform admins).',
+  })
+  removed?: true;
+
+  @ApiPropertyOptional({
+    format: 'date-time',
+    description: 'Reviewers only: when the comment was removed.',
+  })
+  removed_at?: string;
+
+  @ApiPropertyOptional({
+    type: String,
+    nullable: true,
+    description:
+      "Reviewers only: who removed it; null once that moderator's account " +
+      'is deleted.',
+  })
+  removed_by?: string | null;
+
+  @ApiPropertyOptional({
+    type: String,
+    nullable: true,
+    description: 'Reviewers only: the optional removal reason.',
+  })
+  removal_reason?: string | null;
+}
+
+// A removed comment in the thread, for everyone but its reviewers: its place
+// and its replies survive, its content and author do not.
+export class CommentTombstoneResponse implements CommentTombstoneDto {
+  @ApiProperty()
+  id!: string;
+
+  @ApiProperty()
+  post_id!: string;
+
+  @ApiProperty({ type: String, nullable: true })
+  parent_id!: string | null;
+
+  @ApiProperty({ format: 'date-time' })
+  created_at!: string;
+
+  @ApiProperty({ enum: [true] })
+  removed!: true;
+
+  @ApiProperty({ ...COMMENT_NODES_SCHEMA, description: 'Direct replies.' })
+  replies!: (CommentResponse | CommentTombstoneResponse)[];
 }
 
 export class CommentThreadResponse implements CommentThreadDto {
@@ -70,10 +144,12 @@ export class CommentThreadResponse implements CommentThreadDto {
   post_id!: string;
 
   @ApiProperty({
-    type: [CommentResponse],
-    description: 'Top-level comments, oldest first, with nested replies.',
+    ...COMMENT_NODES_SCHEMA,
+    description:
+      'Top-level comments, oldest first, with nested replies; removed ' +
+      'comments appear as tombstones to everyone but reviewers.',
   })
-  comments!: CommentResponse[];
+  comments!: (CommentResponse | CommentTombstoneResponse)[];
 }
 
 // A flat comment of a paginated listing, distinct from the recursive
@@ -157,4 +233,20 @@ export class CommentReplyListResponse implements CommentReplyListDto {
 
   @ApiProperty({ enum: COMMENT_LIST_SORTS })
   sort!: CommentListSort;
+}
+
+// The response of POST /comments/:id/remove: the flat comment with its
+// removal state, which only reviewers ever see.
+export class RemovedCommentResponse extends CommentReplyResponse {
+  @ApiProperty({ enum: [true] })
+  removed!: true;
+
+  @ApiProperty({ format: 'date-time' })
+  removed_at!: string;
+
+  @ApiProperty({ type: String, nullable: true })
+  removed_by!: string | null;
+
+  @ApiProperty({ type: String, nullable: true })
+  removal_reason!: string | null;
 }

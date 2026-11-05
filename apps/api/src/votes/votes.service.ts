@@ -1,4 +1,10 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { isSqlTrue } from '../common/community-moderation';
 import { randomUUID } from 'node:crypto';
 import type {
   Pool,
@@ -42,6 +48,10 @@ export interface VoteScoreDto {
 }
 
 type VoteTarget = CreateVoteDto['target_type'];
+interface VoteTargetState {
+  communityId: string;
+  removed: boolean;
+}
 type Executor = Pick<Pool | PoolConnection, 'execute'>;
 
 // Served by unique_user_target (user_id, target_type, target_id).
@@ -65,7 +75,7 @@ export class VotesService {
     try {
       await connection.beginTransaction();
       transactionStarted = true;
-      const communityId = await this.lockTarget(
+      const target = await this.lockTarget(
         connection,
         input.target_type,
         input.target_id,
@@ -74,9 +84,18 @@ export class VotesService {
       // after the 404 for an unknown target, on the transaction's connection.
       await this.ruleAcceptance.assertAcceptedOrThrow(
         userId,
-        communityId,
+        target.communityId,
         connection,
       );
+      // Removed content takes no new votes. Withdrawing a vote (DELETE)
+      // and reading one's own vote stay possible.
+      if (target.removed) {
+        throw new ConflictException(
+          input.target_type === 'post'
+            ? 'This post was removed by a moderator and cannot be voted on'
+            : 'This comment was removed by a moderator and cannot be voted on',
+        );
+      }
 
       await connection.execute<ResultSetHeader>(
         'INSERT INTO votes (id, user_id, target_type, target_id, value) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
@@ -194,7 +213,7 @@ export class VotesService {
     connection: PoolConnection,
     targetType: VoteTarget,
     targetId: string,
-  ): Promise<string> {
+  ): Promise<VoteTargetState> {
     return this.findTarget(connection, targetType, targetId, true);
   }
 
@@ -205,13 +224,18 @@ export class VotesService {
     targetType: VoteTarget,
     targetId: string,
     lock: boolean,
-  ): Promise<string> {
+  ): Promise<VoteTargetState> {
     const [targets] = await executor.execute<
-      (RowDataPacket & { id: string; community_id: string })[]
+      (RowDataPacket & {
+        id: string;
+        community_id: string;
+        removed?: number | string | boolean | null;
+      })[]
     >(
       targetType === 'post'
-        ? `SELECT id, community_id FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')}${lock ? ' FOR UPDATE' : ''}`
-        : `SELECT comments.id, posts.community_id
+        ? `SELECT id, community_id, removed_at IS NOT NULL AS removed FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')}${lock ? ' FOR UPDATE' : ''}`
+        : `SELECT comments.id, posts.community_id,
+             (comments.removed_at IS NOT NULL OR posts.removed_at IS NOT NULL) AS removed
            FROM comments
            INNER JOIN posts ON posts.id = comments.post_id
            WHERE comments.id = ? AND ${activeCommunitySql('posts.community_id')}${
@@ -226,6 +250,9 @@ export class VotesService {
         targetType === 'post' ? 'Post not found' : 'Comment not found',
       );
     }
-    return target.community_id;
+    return {
+      communityId: target.community_id,
+      removed: isSqlTrue(target.removed ?? 0),
+    };
   }
 }

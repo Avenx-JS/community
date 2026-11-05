@@ -32,6 +32,11 @@ import type {
   ListCommentRepliesDto,
 } from './dto/list-comment-replies.dto';
 import { loadVoteScores } from '../votes/vote-scores';
+import {
+  canReviewRemovedContent,
+  toRemovalState,
+  type RemovalStateRow,
+} from '../common/removed-content';
 
 interface CommentRow extends RowDataPacket {
   id: string;
@@ -80,6 +85,10 @@ interface CommentReplyRow extends RowDataPacket {
 
 export const MAX_COMMENTS_PER_THREAD = 500;
 
+// The tree route's post lookup: the community for the reviewer check, and
+// the removal state that hides the whole thread from everyone else.
+export const THREAD_POST_SQL = `SELECT community_id, removed_at FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} LIMIT 1`;
+
 // The furthest a reply's ancestor walk goes. A chain this deep cannot be
 // shown by the tree route anyway (MAX_COMMENTS_PER_THREAD), and the bound
 // stays below MySQL's default cte_max_recursion_depth (1000), so the walk
@@ -98,12 +107,12 @@ export const MAX_LOCK_ANCESTOR_DEPTH = 500;
 // have to rewrite a whole subtree, and the flag could drift.
 // Values: parent id, post id, the bound, the bound. An unknown parent (or
 // one on another post) yields one row of NULLs, read as not found.
-export const PARENT_WITH_ANCESTRY_SQL = `WITH RECURSIVE ancestors (id, author_id, parent_id, locked_at, depth) AS (
-  SELECT id, author_id, parent_id, locked_at, 1
+export const PARENT_WITH_ANCESTRY_SQL = `WITH RECURSIVE ancestors (id, author_id, parent_id, locked_at, removed_at, depth) AS (
+  SELECT id, author_id, parent_id, locked_at, removed_at, 1
   FROM comments
   WHERE id = ? AND post_id = ?
   UNION ALL
-  SELECT comments.id, comments.author_id, comments.parent_id, comments.locked_at, ancestors.depth + 1
+  SELECT comments.id, comments.author_id, comments.parent_id, comments.locked_at, comments.removed_at, ancestors.depth + 1
   FROM ancestors
   INNER JOIN comments ON comments.id = ancestors.parent_id
   WHERE ancestors.depth < ?
@@ -111,6 +120,7 @@ export const PARENT_WITH_ANCESTRY_SQL = `WITH RECURSIVE ancestors (id, author_id
 SELECT
   MAX(CASE WHEN depth = 1 THEN id END) AS id,
   MAX(CASE WHEN depth = 1 THEN author_id END) AS author_id,
+  MAX(CASE WHEN depth = 1 THEN removed_at IS NOT NULL END) AS parent_removed,
   MAX(locked_at IS NOT NULL) AS thread_locked,
   MAX(depth = ? AND parent_id IS NOT NULL) AS depth_exceeded
 FROM ancestors`;
@@ -118,6 +128,7 @@ FROM ancestors`;
 interface ParentWithAncestryRow extends RowDataPacket {
   id: string | null;
   author_id: string;
+  parent_removed: number | string | boolean | null;
   thread_locked: number | string | boolean | null;
   depth_exceeded: number | string | boolean | null;
 }
@@ -156,12 +167,31 @@ export interface CommentDto {
   locked_by: string | null;
   // Sum of all vote values; 0 without votes.
   score: number;
-  replies: CommentDto[];
+  replies: CommentNodeDto[];
+  // Present only on a removed comment, and only for a reviewer.
+  removed?: true;
+  removed_at?: string;
+  removed_by?: string | null;
+  removal_reason?: string | null;
 }
+
+// A removed comment as everyone but its reviewers sees it in the thread:
+// the structure survives (its replies stay in place), the content and the
+// author do not.
+export interface CommentTombstoneDto {
+  id: string;
+  post_id: string;
+  parent_id: string | null;
+  created_at: string;
+  removed: true;
+  replies: CommentNodeDto[];
+}
+
+export type CommentNodeDto = CommentDto | CommentTombstoneDto;
 
 export interface CommentThreadDto {
   post_id: string;
-  comments: CommentDto[];
+  comments: CommentNodeDto[];
 }
 
 // One comment of a paginated listing (GET /comments/:id/replies,
@@ -199,15 +229,48 @@ export class CommentsService {
     private readonly ruleAcceptance: CommunityRuleAcceptanceService,
   ) {}
 
-  async findThread(postId: string): Promise<CommentThreadDto> {
-    await this.ensurePostExists(postId);
-    const [rows] = await this.pool.execute<CommentRow[]>(
-      'SELECT id, post_id, author_id, parent_id, content, created_at, edited_at, locked_at, locked_by FROM comments WHERE post_id = ? ORDER BY created_at ASC, id ASC LIMIT ?',
+  // The thread varies by viewer only where content was removed. A removed
+  // post's thread is 404 for everyone but its reviewers
+  // (canReviewRemovedContent). A removed comment stays in the tree, so its
+  // replies keep their place: reviewers see it in full with its removal
+  // state, everyone else a tombstone without content or author. The
+  // reviewer check runs once, and only if something in the thread is
+  // removed.
+  async findThread(
+    postId: string,
+    viewerId?: string,
+  ): Promise<CommentThreadDto> {
+    const [posts] = await this.pool.execute<
+      (RowDataPacket & {
+        community_id: string;
+        removed_at: Date | string | null;
+      })[]
+    >(THREAD_POST_SQL, [postId]);
+    const post = posts[0];
+    if (!post) {
+      throw new NotFoundException('Post not found');
+    }
+    let reviewer: boolean | undefined;
+    const isReviewer = async () =>
+      (reviewer ??= await canReviewRemovedContent(
+        this.pool,
+        post.community_id,
+        viewerId,
+      ));
+    if (post.removed_at && !(await isReviewer())) {
+      throw new NotFoundException('Post not found');
+    }
+
+    const [rows] = await this.pool.execute<(CommentRow & RemovalStateRow)[]>(
+      'SELECT id, post_id, author_id, parent_id, content, created_at, edited_at, locked_at, locked_by, removed_at, removed_by, removal_reason FROM comments WHERE post_id = ? ORDER BY created_at ASC, id ASC LIMIT ?',
       [postId, MAX_COMMENTS_PER_THREAD + 1],
     );
     if (rows.length > MAX_COMMENTS_PER_THREAD) {
       throw new PayloadTooLargeException(THREAD_TOO_LARGE_MESSAGE);
     }
+    const showRemoved = rows.some((row) => row.removed_at)
+      ? await isReviewer()
+      : false;
 
     // One grouped aggregate for the whole (bounded) thread.
     const scores = await loadVoteScores(
@@ -215,24 +278,37 @@ export class CommentsService {
       'comment',
       rows.map((row) => row.id),
     );
-    const nodes = new Map<string, CommentDto>();
+    const nodes = new Map<string, CommentNodeDto>();
     for (const row of rows) {
+      const createdAt = new Date(row.created_at).toISOString();
+      if (row.removed_at && !showRemoved) {
+        nodes.set(row.id, {
+          id: row.id,
+          post_id: row.post_id,
+          parent_id: row.parent_id,
+          created_at: createdAt,
+          removed: true,
+          replies: [],
+        });
+        continue;
+      }
       nodes.set(row.id, {
         id: row.id,
         post_id: row.post_id,
         author_id: row.author_id,
         parent_id: row.parent_id,
         content: row.content,
-        created_at: new Date(row.created_at).toISOString(),
+        created_at: createdAt,
         edited_at: toIsoOrNull(row.edited_at),
         locked_at: toIsoOrNull(row.locked_at),
         locked_by: row.locked_by ?? null,
         score: scores.get(row.id) ?? 0,
         replies: [],
+        ...(row.removed_at ? toRemovalState(row) : {}),
       });
     }
 
-    const comments: CommentDto[] = [];
+    const comments: CommentNodeDto[] = [];
     for (const row of rows) {
       const comment = nodes.get(row.id);
       if (!comment) {
@@ -270,6 +346,7 @@ export class CommentsService {
       `SELECT comments.id FROM comments
        INNER JOIN posts ON posts.id = comments.post_id
        WHERE comments.id = ? AND ${activeCommunitySql('posts.community_id')}
+         AND posts.removed_at IS NULL
        LIMIT 1`,
       [commentId],
     );
@@ -476,9 +553,10 @@ export class CommentsService {
           community_id: string;
           title: string;
           locked_at: Date | string | null;
+          removed_at?: Date | string | null;
         })[]
       >(
-        `SELECT id, author_id, community_id, title, locked_at FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} LIMIT 1 FOR SHARE`,
+        `SELECT id, author_id, community_id, title, locked_at, removed_at FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} LIMIT 1 FOR SHARE`,
         [postId],
       );
       const post = posts[0];
@@ -488,6 +566,7 @@ export class CommentsService {
 
       const parentId = input.parent_id ?? null;
       let parentAuthorId: string | null = null;
+      let parentRemoved = false;
       let threadLocked = false;
       let threadTooDeep = false;
       if (parentId !== null) {
@@ -500,6 +579,7 @@ export class CommentsService {
           throw new NotFoundException('Parent comment not found for this post');
         }
         parentAuthorId = parent.author_id;
+        parentRemoved = isSqlTrue(parent.parent_removed ?? 0);
         threadLocked = isSqlTrue(parent.thread_locked ?? 0);
         threadTooDeep = isSqlTrue(parent.depth_exceeded ?? 0);
       }
@@ -511,6 +591,18 @@ export class CommentsService {
       // After the 404s and the rule gate, so a caller sees the most specific
       // error. A lock binds everyone, moderators and the creator included:
       // they must unlock first, which leaves a log entry.
+      // Removed content takes no new comments: 409, after the 404s and the
+      // rule gate, before the locks.
+      if (post.removed_at) {
+        throw new ConflictException(
+          'This post was removed by a moderator; it accepts no new comments',
+        );
+      }
+      if (parentRemoved) {
+        throw new ConflictException(
+          'The comment being replied to was removed by a moderator',
+        );
+      }
       if (post.locked_at) {
         throw new ConflictException(
           'This post is locked; it accepts no new comments',
@@ -624,10 +716,13 @@ export class CommentsService {
       if (!comment) {
         throw new NotFoundException('Comment not found');
       }
-      const isAuthor = comment.author_id === actorId;
-      if (!isAuthor && !isSqlTrue(comment.can_moderate)) {
+      // Author only. A moderator's removal is POST /comments/:id/remove,
+      // which keeps the content for review and restoration.
+      if (comment.author_id !== actorId) {
         throw new ForbiddenException(
-          'You can only delete your own comments or moderate this community',
+          isSqlTrue(comment.can_moderate)
+            ? 'Only the author may delete this comment; moderators remove comments with POST /comments/:id/remove'
+            : 'You can only delete your own comments',
         );
       }
 
@@ -635,17 +730,6 @@ export class CommentsService {
         'DELETE FROM comments WHERE id = ?',
         [id],
       );
-      if (!isAuthor) {
-        await this.notifications.record(connection, {
-          recipientId: comment.author_id,
-          type: 'content_removed',
-          actorId: null,
-          subjectType: 'comment',
-          subjectId: comment.id,
-          communityId: comment.community_id,
-          metadata: { excerpt: comment.content },
-        });
-      }
 
       await connection.commit();
     } catch (error) {
@@ -660,7 +744,9 @@ export class CommentsService {
 
   private async ensurePostExists(postId: string): Promise<void> {
     const [posts] = await this.pool.execute<(RowDataPacket & { id: string })[]>(
-      `SELECT id FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} LIMIT 1`,
+      // Visible posts only: a removed post's flat routes are 404 for
+      // everyone; reviewers read it through the tree route.
+      `SELECT id FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} AND posts.removed_at IS NULL LIMIT 1`,
       [postId],
     );
     if (!posts[0]) {

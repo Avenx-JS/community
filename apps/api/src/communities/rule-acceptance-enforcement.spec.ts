@@ -154,16 +154,28 @@ describe('Rule acceptance enforcement', () => {
         const post = postById(values[0]);
         return rows(post ? [post] : []);
       }
+      if (sql.startsWith('SELECT community_id, removed_at FROM posts')) {
+        const post = postById(values[0]);
+        return rows(
+          post ? [{ community_id: post.community_id, removed_at: null }] : [],
+        );
+      }
       if (sql.startsWith('SELECT id FROM posts WHERE id = ?')) {
         return rows(postById(values[0]) ? [{ id: values[0] }] : []);
       }
       if (
-        sql.startsWith('SELECT id, author_id, community_id, title, locked_at FROM posts')
+        sql.startsWith(
+          'SELECT id, author_id, community_id, title, locked_at, removed_at FROM posts',
+        )
       ) {
         const post = postById(values[0]);
         return rows(post ? [post] : []);
       }
-      if (sql.startsWith('SELECT id, community_id FROM posts WHERE id = ?')) {
+      if (
+        sql.startsWith(
+          'SELECT id, community_id, removed_at IS NOT NULL AS removed FROM posts',
+        )
+      ) {
         const post = postById(values[0]);
         return rows(
           post ? [{ id: post.id, community_id: post.community_id }] : [],
@@ -176,11 +188,7 @@ describe('Rule acceptance enforcement', () => {
           post ? [{ id: comment.id, community_id: post.community_id }] : [],
         );
       }
-      if (
-        sql.startsWith(
-          'WITH RECURSIVE ancestors',
-        )
-      ) {
+      if (sql.startsWith('WITH RECURSIVE ancestors')) {
         return rows(
           db.comments.filter(
             (comment) =>
@@ -488,14 +496,21 @@ describe('Rule acceptance enforcement', () => {
     }
   });
 
-  it('refuses a moderator who has not accepted, who can still remove content', async () => {
+  // DELETE is the author's own hard delete since moderative removal became
+  // POST …/remove: a moderator's DELETE is refused for authorship, not by
+  // the rule gate (removal is ungated; see the removal unit tests).
+  it('refuses a moderator who has not accepted, whose DELETE is refused for authorship only', async () => {
     rules.publish('community-1');
 
     for (const [, action] of paths) {
       await expectRefused(() => action('mod'), 1);
     }
-    await expect(comments.remove('comment-1', 'mod')).resolves.toBeUndefined();
-    await expect(posts.remove('post-1', 'mod')).resolves.toBeUndefined();
+    await expect(comments.remove('comment-1', 'mod')).rejects.toThrow(
+      'moderators remove comments with POST /comments/:id/remove',
+    );
+    await expect(posts.remove('post-1', 'mod')).rejects.toThrow(
+      'moderators remove posts with POST /posts/:id/remove',
+    );
   });
 
   it('gates a comment vote on the community of the comment’s post', async () => {

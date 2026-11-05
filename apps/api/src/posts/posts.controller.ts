@@ -15,6 +15,7 @@ import {
 } from '@nestjs/common';
 import {
   ApiCreatedResponse,
+  ApiExtraModels,
   ApiNoContentResponse,
   ApiOkResponse,
   ApiOperation,
@@ -25,7 +26,13 @@ import {
   CommentReplyListResponse,
   CommentResponse,
   CommentThreadResponse,
+  CommentTombstoneResponse,
 } from '../comments/comments.responses';
+import {
+  OptionalAuthGuard,
+  type OptionallyAuthenticatedRequest,
+} from '../auth/optional-auth.guard';
+import { RemoveContentDto } from '../common/remove-content.dto';
 import { ListCommentRepliesDto } from '../comments/dto/list-comment-replies.dto';
 import {
   ApiAuthenticated,
@@ -88,12 +95,26 @@ export class PostsController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get a post' })
+  @UseGuards(OptionalAuthGuard)
+  @ApiOperation({
+    summary: 'Get a post',
+    description:
+      'Public. A post removed by a moderator is 404, except for its ' +
+      "community's creator and moderators and for platform admins: with a " +
+      'bearer token they receive the full post plus removed, removed_at, ' +
+      'removed_by and removal_reason. An invalid token reads as anonymous.',
+  })
   @ApiRouteParam('id', 'id', 'Post ID.')
   @ApiOkResponse({ type: PostResponse })
-  @ApiErrorResponses({ 400: 'Invalid post ID.', 404: 'Post not found.' })
-  findOne(@Param('id', new SafeRouteParamPipe('id')) id: string) {
-    return this.postsService.findOne(id);
+  @ApiErrorResponses({
+    400: 'Invalid post ID.',
+    404: 'Post not found, or removed and the caller may not review it.',
+  })
+  findOne(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Req() request: OptionallyAuthenticatedRequest,
+  ) {
+    return this.postsService.findOne(id, request.user?.id);
   }
 
   @Patch(':id')
@@ -128,12 +149,16 @@ export class PostsController {
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({
-    summary: 'Delete a post',
+    summary: 'Delete your post',
     description:
-      "Allowed for the author and for the post's community creator and " +
-      'moderators.',
+      'Author only: a hard delete, with the comments and votes beneath it. ' +
+      'Breaking change: community moderators and the creator now receive ' +
+      '403 here; they remove posts reversibly with POST /posts/{id}/remove.',
   })
-  @ApiAuthenticated({ forbidden: 'The caller may not delete this post.' })
+  @ApiAuthenticated({
+    forbidden:
+      'The caller is not the author. Moderators use POST /posts/{id}/remove.',
+  })
   @ApiRouteParam('id', 'id', 'Post ID.')
   @ApiNoContentResponse({ description: 'The post is deleted.' })
   @ApiErrorResponses({ 400: 'Invalid post ID.', 404: 'Post not found.' })
@@ -142,6 +167,62 @@ export class PostsController {
     @Req() request: AuthenticatedRequest,
   ): Promise<void> {
     return this.postsService.remove(id, request.user.id);
+  }
+
+  @Post(':id/remove')
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Remove a post (moderators)',
+    description:
+      'Reversible moderative removal: the post, its comments and votes are ' +
+      'kept for review and restoration, and hidden from everyone but the ' +
+      "community's creator and moderators and platform admins. Community " +
+      'creator and moderators only; the author deletes with DELETE. The ' +
+      'author is notified without the reason or the moderator.',
+  })
+  @ApiAuthenticated({
+    forbidden:
+      'The caller does not moderate this community (authors use DELETE).',
+  })
+  @ApiRouteParam('id', 'id', 'Post ID.')
+  @ApiOkResponse({ type: PostResponse })
+  @ApiErrorResponses({
+    400: 'Invalid post ID or reason, or an unknown property.',
+    404: 'Post not found.',
+    409: 'The post is already removed.',
+  })
+  removeContent(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Body() body: RemoveContentDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.postsService.removeContent(id, body, request.user.id);
+  }
+
+  @Post(':id/restore')
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Restore a removed post (moderators)',
+    description:
+      'Clears the removal. Same authorisation as removing. No notification.',
+  })
+  @ApiAuthenticated({
+    forbidden: 'The caller does not moderate this community.',
+  })
+  @ApiRouteParam('id', 'id', 'Post ID.')
+  @ApiOkResponse({ type: PostResponse })
+  @ApiErrorResponses({
+    400: 'Invalid post ID.',
+    404: 'Post not found.',
+    409: 'The post is not removed.',
+  })
+  restore(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.postsService.restore(id, request.user.id);
   }
 
   @Post(':id/pin')
@@ -322,22 +403,33 @@ export class PostsController {
   }
 
   @Get(':postId/comments')
+  @UseGuards(OptionalAuthGuard)
   @ApiTags('comments')
+  @ApiExtraModels(CommentResponse, CommentTombstoneResponse)
   @ApiOperation({
     summary: 'Get the comment thread of a post',
-    description: 'Comments oldest first, with replies nested under parents.',
+    description:
+      'Public. Comments oldest first, with replies nested under parents. A ' +
+      'comment removed by a moderator stays in place as a tombstone ' +
+      '({ id, post_id, parent_id, created_at, removed: true, replies }) so ' +
+      "its replies keep their place; the community's creator and " +
+      'moderators and platform admins see it in full with its removal ' +
+      'state. The thread of a removed post is 404 except for those reviewers.',
   })
   @ApiRouteParam('postId', 'id', 'Post ID.')
   @ApiOkResponse({ type: CommentThreadResponse })
   @ApiErrorResponses({
     400: 'Invalid post ID.',
-    404: 'Post not found.',
+    404: 'Post not found, or removed and the caller may not review it.',
     413:
       'The thread exceeds the maximum number of comments; page it through ' +
       'GET /posts/{postId}/comments/top-level and GET /comments/{id}/replies.',
   })
-  getComments(@Param('postId', new SafeRouteParamPipe('id')) postId: string) {
-    return this.commentsService.findThread(postId);
+  getComments(
+    @Param('postId', new SafeRouteParamPipe('id')) postId: string,
+    @Req() request: OptionallyAuthenticatedRequest,
+  ) {
+    return this.commentsService.findThread(postId, request.user?.id);
   }
 
   @Get(':postId/comments/top-level')

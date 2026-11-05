@@ -2258,10 +2258,13 @@ computed in SQL from `UTC_TIMESTAMP()`, converted to the session time zone
 @@session.time_zone)`), never from the application clock. A configurable
 window, if wanted, should be a small enum such as `7` or `30`, not a range.
 
-**Forward requirement.** `post_count`, `comment_count` and the windows count
-every stored row. Once posts and comments can be hidden by moderation
-(`removed_at`, migration `017`, not yet read by any route), these counts must
-exclude removed content in the same change, or they will silently include it.
+**Removed content is not counted.** `post_count`, `comment_count` and both
+windows exclude posts removed by moderation (`removed_at` set), comments
+removed by moderation, and the comments of a removed post, because none of
+those are visible to the public the statistics describe (see
+[Removing and restoring content](#removing-and-restoring-content)). The
+platform has no content-analytics endpoint yet; when one is added, it must apply
+the same exclusion.
 
 **Query plan.** The community is resolved once by name; every aggregate is
 bound to its id, and the name never reaches an aggregate query. Four
@@ -2373,9 +2376,9 @@ of these behaves as if the community did not exist:
 | `GET .../stats`                                                                        | `404`                                      |
 | `POST /posts` into it                                                                  | `404` (`Community not found`)              |
 | `GET /posts` (with or without `community_id`)                                          | its posts omitted from `items` and `total` |
-| `GET /posts/:id`, `PATCH /posts/:id`, `DELETE /posts/:id`                              | `404` for its posts                        |
+| `GET`, `PATCH`, `DELETE /posts/:id`; `POST /posts/:id/remove`, `/restore`        | `404` for its posts                        |
 | `GET` and `POST /posts/:postId/comments`                                               | `404` for its posts                        |
-| `PATCH /comments/:id`, `DELETE /comments/:id`                                          | `404` for comments on its posts            |
+| `PATCH`, `DELETE /comments/:id`; `POST /comments/:id/remove`, `/restore` | `404` for comments on its posts            |
 | `POST /votes`; `PUT`, `DELETE` and `GET /posts/:id/vote` and `/comments/:id/vote`     | `404` for its posts and their comments     |
 
 Content queries apply the shared `activeCommunitySql` predicate
@@ -2419,25 +2422,32 @@ data cannot set a role or actor ID. The creator cannot delegate moderator
 management, and moderators cannot appoint other moderators. Publishing
 community rules is likewise creator-only (see [Rules API](#rules-api)).
 
-Post and comment authors retain their existing ability to delete their own
-content. A moderator or creator can additionally delete content only within
-their own community. Other users receive `403`; missing content returns `404`.
-A deletion by a moderator or creator notifies the author without naming who
-removed it (see [Moderation notifications](#moderation-notifications)).
+**Authors delete; moderators remove.** `DELETE /posts/:id` and
+`DELETE /comments/:id` are the author's own hard delete. A moderator or the
+creator removes content with `POST /posts/:id/remove` and
+`POST /comments/:id/remove`, which is reversible and keeps the content for review
+(see [Removing and restoring content](#removing-and-restoring-content)).
+**Breaking change:** moderators and the creator could previously hard-delete
+through `DELETE`; they now receive `403` there, with a message naming the
+removal route. A removal notifies the author without naming who removed it or
+why (see [Moderation notifications](#moderation-notifications)).
 
 What each role may do with content:
 
 | Action | Author | Moderator or creator |
 | --- | --- | --- |
-| Delete (`DELETE /posts/:id`, `DELETE /comments/:id`) | Yes | Yes, in their community |
+| Delete, irreversibly (`DELETE /posts/:id`, `DELETE /comments/:id`) | Yes | **No** (breaking change; `403`) |
+| Remove and restore (`POST /posts/:id/remove`, `/restore`, and the comment pair) | No | Yes, in their community |
+| Read removed content | No | Yes, in their community (platform admins too) |
 | Edit (`PATCH /posts/:id`, `PATCH /comments/:id`) | Yes | **No**: content-removal powers, not authorship |
 | Pin (`POST`/`DELETE /posts/:id/pin`) | No | Yes |
 | Lock (`POST`/`DELETE /posts/:id/lock`, `/comments/:id/lock`) | No | Yes |
 
 Locking closes a post, or a comment's whole subtree, to new comments, for
 moderators too until they unlock (see
-[Locking posts and comments](#locking-posts-and-comments)). Pins and locks are
-recorded in the [community moderation log](#community-moderation-log). No ban
+[Locking posts and comments](#locking-posts-and-comments)). Pins, locks,
+removals and restorations are recorded in the
+[community moderation log](#community-moderation-log). No ban
 or other moderator-only operation is exposed by this API yet; future such routes
 must enforce the same server-side, community-scoped checks and record what they
 do in the moderation log.
@@ -3114,7 +3124,8 @@ check. A guard would repeat those lookups outside that transaction.
   accept, and gating reads would hide public content.
 - **`DELETE /posts/:id` and `DELETE /comments/:id`.** Removing content is not
   participation. An author who declines new rules can still withdraw what they
-  wrote under the old ones, and a moderator can still remove content.
+  wrote under the old ones. Moderative removal (`POST …/remove`) is not
+  gated either: a moderator can always remove content.
 - **`PATCH /posts/:id` and `PATCH /comments/:id`.** Editing existing content is
   not new participation: an author who declines new rules can still correct
   what they wrote (see [Editing posts and comments](#editing-posts-and-comments)).
@@ -3284,14 +3295,19 @@ is always taken from the authenticated user; body-supplied `author_id` is
 rejected. Successful creation returns HTTP `201` and the post DTO.
 
 `GET /posts/:id` is public and returns the post DTO, or `404` for an unknown ID.
-`DELETE /posts/:id` requires a bearer token and allows the authenticated author
-to delete their post, or a moderator/creator of that post's community to
-moderate it. It returns HTTP `204` with no body; a user without permission
-returns `403`, and an unknown post returns `404`. The database cascades deletion
-to the post's comments. To correct a post without losing them, the author
-uses `PATCH /posts/:id` (see
-[Editing posts and comments](#editing-posts-and-comments)); moderators may
-delete a post but never edit it.
+A post removed by moderation is also `404`, except to its reviewers (see
+[Removing and restoring content](#removing-and-restoring-content)).
+
+`DELETE /posts/:id` requires a bearer token and is **the author's own hard
+delete**: it returns HTTP `204` with no body, and the database cascades the
+deletion to the post's comments and votes. Only the author may use it.
+**Breaking change:** a community moderator or creator now receives `403`
+("Only the author may delete this post; moderators remove posts with
+POST /posts/:id/remove"); anyone else `403` ("You can only delete your own
+posts"); an unknown post `404`. Moderators remove posts reversibly with
+`POST /posts/:id/remove`. To correct a post without losing its comments, the
+author uses `PATCH /posts/:id` (see
+[Editing posts and comments](#editing-posts-and-comments)).
 
 Post responses use this DTO:
 
@@ -3320,6 +3336,137 @@ effective edit (see [Editing posts and comments](#editing-posts-and-comments)).
 [Locking posts and comments](#locking-posts-and-comments)).
 `score` is the sum of the post's votes, `0` without votes (see
 [Scores on content](#scores-on-content)).
+
+### Removing and restoring content
+
+**An author's deletion and a moderator's removal are two different acts with
+two different outcomes.** `DELETE` is the author removing their own words: a
+hard delete, gone. `POST …/remove` is a moderator's decision: reversible, and
+the content is kept so the decision can be reviewed and undone.
+
+| Route | Who | Success | Effect |
+| --- | --- | --- | --- |
+| `POST /posts/:id/remove` | Community creator or moderator | `200`, the post with its removal state | Hides the post and its whole thread |
+| `POST /posts/:id/restore` | Community creator or moderator | `200`, the post | Makes it visible again |
+| `POST /comments/:id/remove` | Community creator or moderator | `200`, the flat comment with its removal state | Turns the comment into a tombstone for everyone else |
+| `POST /comments/:id/restore` | Community creator or moderator | `200`, the flat comment | Makes it visible again |
+
+**Why `DELETE` was narrowed to authors (breaking change).** Moderators could
+hard-delete through `DELETE /posts/:id` and `DELETE /comments/:id`. A removal
+done that way could not be undone (a misclick destroyed a post with its whole
+thread and votes), could not be reviewed (the community creator and platform
+admins had nothing to read, and the moderation log pointed at a row that no
+longer existed), and left reports about the content with nothing to resolve.
+The reversible path only guarantees anything if it is the only one moderators
+have; a careless moderator reaches first for the destructive one. So both
+`DELETE` routes are author-only, and a moderator gets `403` naming
+`POST …/remove`. The author's path is unchanged.
+
+An author may still hard-delete their own content after a moderator has removed
+it. That discards the record of the removal; it is the author's right over their
+own words, which this change keeps. If removed content must be preserved for
+report review, refusing that `DELETE` with `409` is the follow-up.
+
+**The body.** `RemoveContentDto` takes an optional `reason`: trimmed, 1-2,000
+characters of plain text, the rules of `LiftRestrictionDto`. It is optional by
+decision rather than by default: a moderator clearing obvious spam should not
+have to type, and `removal_reason` is nullable. An empty, over-long or
+control-character reason, or any other property, returns `400` and writes
+nothing. `restore` takes no body.
+
+**Flow.** Each route runs in a transaction: a `FOR UPDATE` read evaluating
+`canModerateCommunitySql` (a comment's community through its post), then
+`404` for unknown content or a deleted community, `403` unless the caller
+created or moderates the community (the author is pointed at `DELETE`), and
+`409` for removing removed content or restoring content that is not removed.
+Removal sets `removed_at` from the database clock (`UTC_TIMESTAMP()`),
+`removed_by` from the token and `removal_reason`; restoration clears all three.
+Each route writes exactly one moderation-log entry (`post_removed`,
+`post_restored`, `comment_removed`, `comment_restored`; a removal's entry
+carries the reason) in the same transaction. A failed log or notification write
+rolls the change back, and the connection is released on every path.
+
+**The author is notified, without the reason or the moderator.** A removal
+writes one `content_removed` notification on the same connection, exactly as
+the old hard-delete path did: `actor_id` is `NULL` and the metadata is the
+content snapshot only (`post_title`, or `excerpt` for a comment). It never
+carries `removal_reason` or the moderator's identity. The reason is
+moderator-facing (row and moderation log only), and leaking it through the inbox
+would undo the rule of
+[Moderation notifications](#moderation-notifications). Restoration notifies
+nobody: a new `notifications.type` value needs a migration, so a
+`content_restored` notification is a follow-up.
+
+**Restoring a comment whose post is removed** is `409` naming the post
+("restore the post first"), rather than succeeding into a thread only reviewers
+can see.
+
+#### Visibility of removed content
+
+| Read | Ordinary caller (anonymous, member, the author) | Community creator or moderator, platform admin |
+| --- | --- | --- |
+| `GET /posts/:id` | `404` | The post plus `removed`, `removed_at`, `removed_by`, `removal_reason` |
+| `GET /posts`, `GET /communities/:name/posts`, `GET /users/:username/posts` | Omitted | Omitted |
+| `GET /posts/:postId/comments` of a removed post | `404` | The thread, in full |
+| A removed comment in the thread | A tombstone | The comment plus its removal state |
+| `GET /posts/:postId/comments/top-level`, `GET /comments/:id/replies` | Removed comments omitted; `404` for a removed post | Same: reviewers read through the tree route |
+| `GET /users/:username/comments` | Removed comments, and comments of removed posts, omitted | Same |
+| `GET /communities/:name/stats` | Removed content not counted | Same |
+
+The visibility rule lives in one helper, `canReviewRemovedContent`
+(`src/common/removed-content.ts`), used by `GET /posts/:id` and the thread. It
+is true for the content's community creator, a moderator of that community, and
+a **platform admin** (`users.role = 'admin'`). Admins are included on purpose:
+they review the report queue, and a report about removed content must stay
+auditable, which is why reports keep their target when it disappears. The helper
+only runs when the content is actually removed, so ordinary reads issue no extra
+query. These two routes are public and accept an optional bearer token to
+identify a reviewer; an absent, invalid or expired token reads as anonymous, so
+they are exactly as public as before. The removal fields appear only on removed
+content and only for reviewers; nobody else ever sees them.
+
+**The tombstone.** A removed comment's replies stay visible, so the tree keeps
+the removed comment in place instead of leaving a gap or re-parenting its
+children. Everyone but reviewers sees it as:
+
+```json
+{
+  "id": "comment-id",
+  "post_id": "post-id",
+  "parent_id": "parent-id",
+  "created_at": "2026-10-22T08:00:00.000Z",
+  "removed": true,
+  "replies": []
+}
+```
+
+`content`, `author_id` and every other field are omitted. This is a
+response-shape change to `GET /posts/:postId/comments`: clients must handle a
+node with `removed: true` (OpenAPI: `CommentTombstoneResponse`). The flat
+routes keep omitting removed comments, as they already did.
+
+**A removed post hides its thread.** Its comments are unreachable to the public:
+the tree route and both flat routes answer `404`, and author feeds omit them.
+Reviewers read the full thread through the tree route.
+
+**Writes on removed content answer `409`:** voting on a removed post or comment,
+or on a comment whose post is removed (`PUT …/vote`, `POST /votes`);
+commenting on a removed post or replying to a removed comment; editing it (see
+[Editing posts and comments](#editing-posts-and-comments)); locking it. In
+comment creation these checks run after the `404`s and the rule gate and before
+the lock checks. Withdrawing your own vote (`DELETE …/vote`) and reading it stay
+possible.
+
+`removed_by` is `ON DELETE SET NULL`: content removed by a moderator whose
+account was since deleted renders `removed_by: null`.
+
+**Plans.** The exclusion predicates in listings are filters on each listing's
+own `(filter, created_at, id)` index, never a scan. `idx_posts_removed_at` and
+`idx_comments_removed_at` serve the opposite question, finding the few removed
+rows (`content-removal.mysql.spec.ts` asserts both).
+
+**Rate limiting.** The global write buckets apply; moderator actions are rare,
+so there is no dedicated bucket.
 
 ### Editing posts and comments
 
@@ -3364,8 +3511,8 @@ URL-checked; a text post accepts any plain text.
 
 **Author only.** Only the author may edit: a community moderator, the community
 creator and anyone else get `403` ("Only the author may edit this post" or
-"comment"). This deliberately differs from `DELETE /posts/:id` and
-`DELETE /comments/:id`, which moderators and the creator may use. Moderators
+"comment"). This deliberately differs from `POST /posts/:id/remove` and
+`POST /comments/:id/remove`, which only moderators and the creator may use. Moderators
 hold content-removal powers, not content-authorship powers: rewriting someone's
 words under their name is impersonation, and moderators already have removal
 (and locking) for content they object to. Platform administrators get no
@@ -3688,9 +3835,10 @@ refuses removed posts (see
 [Editing posts and comments](#editing-posts-and-comments)); `POST` and
 `DELETE /posts/:id/lock` write `locked_at` and `locked_by`, and comment creation
 honours them (see [Locking posts and comments](#locking-posts-and-comments));
-listings omit removed posts. Nothing writes `removed_at` yet, and
-`DELETE /posts/:id` is still a hard delete. The removal endpoint is separate
-work.
+`POST /posts/:id/remove` and `/restore` write `removed_at`, `removed_by` and
+`removal_reason`, and every read honours them (see
+[Removing and restoring content](#removing-and-restoring-content)).
+`DELETE /posts/:id` remains the author's hard delete.
 
 | Column | Meaning when set |
 | --- | --- |
@@ -3837,15 +3985,20 @@ parent must belong to that same post; an unknown or cross-post parent returns
 `404`. A successful creation returns HTTP `201` and the created comment DTO
 with an empty `replies` array.
 
-`DELETE /comments/:id` requires authentication and allows the authenticated
-author to delete their comment, or a moderator/creator of the comment's
-community to moderate it. Success returns HTTP `204` with no body; a user
-without permission returns `403`, and an unknown comment returns `404`.
-Deleting a comment also deletes all descendant replies because the comments
-table uses `ON DELETE CASCADE` for `parent_id`.
+`DELETE /comments/:id` requires authentication and is **the author's own hard
+delete**: success returns HTTP `204` with no body, and all descendant replies
+go with it (`ON DELETE CASCADE` on `parent_id`). **Breaking change:** a
+community moderator or creator now receives `403` naming
+`POST /comments/:id/remove`, the reversible removal that keeps the comment and
+its replies; anyone else `403`; an unknown comment `404`.
+
+A comment removed by a moderator stays in `GET /posts/:postId/comments` as a
+tombstone (`{ id, post_id, parent_id, created_at, removed: true, replies }`)
+for everyone but its reviewers, so its replies stay in place (see
+[Removing and restoring content](#removing-and-restoring-content)).
 
 `PATCH /comments/:id` lets the author, and only the author, edit the content
-in place, keeping the reply chain; moderators may delete a comment but never
+in place, keeping the reply chain; moderators may remove a comment but never
 edit it. See [Editing posts and comments](#editing-posts-and-comments).
 
 `POST` and `DELETE /comments/:id/lock` let a moderator or the creator close a
@@ -3868,8 +4021,10 @@ the removal filter. The paginated comment routes read `removed_at` (see
 [Editing posts and comments](#editing-posts-and-comments)). `POST` and
 `DELETE /comments/:id/lock` write `locked_at` and `locked_by`. A comment's lock
 closes its whole subtree, not the post, and comment creation enforces it (see
-[Locking posts and comments](#locking-posts-and-comments)). Nothing writes
-`removed_at` yet, and the thread and `DELETE /comments/:id` do not honour it.
+[Locking posts and comments](#locking-posts-and-comments)). `POST`
+`/comments/:id/remove` and `/restore` write the removal columns, and the thread
+shows a removed comment as a tombstone (see
+[Removing and restoring content](#removing-and-restoring-content)).
 
 ## Votes
 
@@ -4028,7 +4183,7 @@ the triggering `subject_type`/`subject_id`, an optional `community_id`, a
 | `report_resolved`     | a report the recipient filed reaches `resolved` or `rejected` (`AdminReportsService.updateStatus`)    | the report                  |
 | `restriction_applied` | the recipient is suspended or banned (`AdminRestrictionsService`)                                     | the restriction             |
 | `restriction_lifted`  | the recipient's restriction is lifted (`AdminRestrictionsService`)                                    | the restriction             |
-| `content_removed`     | a moderator removes the recipient's post or comment (`PostsService.remove`, `CommentsService.remove`) | the removed post or comment |
+| `content_removed`     | a moderator removes the recipient's post or comment (`PostsService.removeContent`, `CommentRemovalService.remove`) | the removed post or comment |
 
 Adding a type requires a migration, as for the other enums.
 
@@ -4259,7 +4414,7 @@ it.
 | A report reaches `resolved` or `rejected`                  | `AdminReportsService.updateStatus`              | the reporter         | `report_resolved`     | the report                  | `status` only                                          |
 | A suspension or ban is applied                             | `AdminRestrictionsService.apply`                | the restricted user  | `restriction_applied` | the restriction             | `restriction_type`, plus `expires_at` for a suspension |
 | A restriction is lifted                                    | `AdminRestrictionsService.lift`                 | the user             | `restriction_lifted`  | the restriction             | `restriction_type` only                                |
-| A community moderator or creator deletes someone's content | `PostsService.remove`, `CommentsService.remove` | the content's author | `content_removed`     | the deleted post or comment | `post_title` for a post, `excerpt` for a comment       |
+| A community moderator or creator removes someone's content | `PostsService.removeContent`, `CommentRemovalService.remove` | the content's author | `content_removed`     | the removed post or comment | `post_title` for a post, `excerpt` for a comment; never `removal_reason` |
 
 - **Reports.** `{ status }` answers "was my report acted on?" and nothing more.
   The notification never carries `resolution` (it describes what happened to

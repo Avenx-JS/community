@@ -248,6 +248,17 @@ describe('User profile endpoints (e2e)', () => {
       if (sql.startsWith('SELECT COUNT(*) AS total FROM posts WHERE EXISTS')) {
         return Promise.resolve([[{ total: tables.posts.length }], []]);
       }
+      if (sql.startsWith('SELECT community_id, removed_at FROM posts')) {
+        return Promise.resolve([
+          tables.posts
+            .filter(({ id }) => id === values[0])
+            .map((post) => ({
+              community_id: post.community_id,
+              removed_at: null,
+            })),
+          [],
+        ]);
+      }
       if (sql.startsWith('SELECT id FROM posts WHERE id = ? AND EXISTS')) {
         return Promise.resolve([
           tables.posts.filter(({ id }) => id === values[0]),
@@ -256,7 +267,7 @@ describe('User profile endpoints (e2e)', () => {
       }
       if (
         sql.startsWith(
-          'SELECT id, post_id, author_id, parent_id, content, created_at, edited_at, locked_at, locked_by FROM comments WHERE post_id = ?',
+          'SELECT id, post_id, author_id, parent_id, content, created_at, edited_at, locked_at, locked_by, removed_at, removed_by, removal_reason FROM comments WHERE post_id = ?',
         )
       ) {
         return Promise.resolve([

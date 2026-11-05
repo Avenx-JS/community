@@ -486,38 +486,29 @@ describe('PostsService.remove', () => {
     expect(notifications.record).not.toHaveBeenCalled();
   });
 
+  // The breaking change, pinned: a moderator or the creator may no longer
+  // hard-delete someone else's post. They are pointed at the reversible
+  // POST /posts/:id/remove, and nothing is deleted or notified.
   it.each([1, '1', true])(
-    'lets a moderator or creator delete and notifies the author (can_moderate %p)',
+    'refuses a moderator or creator with 403 naming the remove route (can_moderate %p)',
     async (canModerate) => {
       post = { ...post, can_moderate: canModerate };
 
-      await expect(
-        service.remove('post-1', 'moderator'),
-      ).resolves.toBeUndefined();
-
-      expect(deletes()).toHaveLength(1);
-      expect(notifications.record).toHaveBeenCalledTimes(1);
-      expect(notifications.record).toHaveBeenCalledWith(connection, {
-        recipientId: 'author',
-        type: 'content_removed',
-        actorId: null,
-        subjectType: 'post',
-        subjectId: 'post-1',
-        communityId: 'community-1',
-        metadata: { post_title: 'Hello' },
-      });
-      expect(notifications.record.mock.invocationCallOrder[0]).toBeLessThan(
-        connection.commit.mock.invocationCallOrder[0],
+      await expect(service.remove('post-1', 'moderator')).rejects.toThrow(
+        new ForbiddenException(
+          'Only the author may delete this post; moderators remove posts with POST /posts/:id/remove',
+        ),
       );
-      expectCommittedAndReleased();
+
+      expect(deletes()).toEqual([]);
+      expect(notifications.record).not.toHaveBeenCalled();
+      expectRolledBackAndReleased();
     },
   );
 
   it('returns 403 to anyone else, including a moderator of another community', async () => {
     await expect(service.remove('post-1', 'stranger')).rejects.toThrow(
-      new ForbiddenException(
-        'You can only delete your own posts or moderate this community',
-      ),
+      new ForbiddenException('You can only delete your own posts'),
     );
 
     expect(deletes()).toEqual([]);
@@ -533,18 +524,6 @@ describe('PostsService.remove', () => {
     );
 
     expect(deletes()).toEqual([]);
-    expectRolledBackAndReleased();
-  });
-
-  it('rolls the deletion back when the notification write fails', async () => {
-    post = { ...post, can_moderate: 1 };
-    notifications.record.mockRejectedValueOnce(new Error('insert failed'));
-
-    await expect(service.remove('post-1', 'moderator')).rejects.toThrow(
-      'insert failed',
-    );
-
-    expect(deletes()).toHaveLength(1);
     expectRolledBackAndReleased();
   });
 
@@ -1876,5 +1855,367 @@ describe('PostsService.lock and unlock', () => {
       'log failed',
     );
     expectRolledBackAndReleased();
+  });
+});
+
+describe('PostsService moderative removal', () => {
+  type StoredPost = {
+    id: string;
+    author_id: string;
+    community_id: string;
+    title: string;
+    removed_at: Date | null;
+    removed_by: string | null;
+    removal_reason: string | null;
+  };
+  let service: PostsService;
+  let post: StoredPost | undefined;
+  let queries: Array<{ sql: string; values: unknown[] }>;
+  let notifications: { record: jest.Mock };
+  let log: { record: jest.Mock };
+  let assertAccepted: jest.Mock;
+  let connection: {
+    beginTransaction: jest.Mock;
+    commit: jest.Mock;
+    rollback: jest.Mock;
+    release: jest.Mock;
+    execute: (sql: string, values: unknown[]) => Promise<[unknown, unknown]>;
+  };
+  const clock = new Date('2026-11-07T10:00:00.000Z');
+  const canModerate = (actor: unknown) =>
+    actor === 'creator-1' || actor === 'moderator';
+  const isAdmin = (actor: unknown) => actor === 'platform-admin';
+
+  const answer = (sql: string, values: unknown[]): [unknown, unknown] => {
+    queries.push({ sql, values });
+    if (sql.startsWith('SELECT posts.id, posts.author_id')) {
+      return [
+        post ? [{ ...post, can_moderate: canModerate(values[0]) ? 1 : 0 }] : [],
+        [],
+      ];
+    }
+    if (sql.startsWith('UPDATE posts SET removed_at')) {
+      const removing = sql.includes('UTC_TIMESTAMP()');
+      post = {
+        ...post!,
+        removed_at: removing ? clock : null,
+        removed_by: removing ? (values[0] as string) : null,
+        removal_reason: removing ? (values[1] as string | null) : null,
+      };
+      return [{ affectedRows: 1 }, []];
+    }
+    if (sql.startsWith('SELECT id, title, content, type')) {
+      return [
+        post
+          ? [
+              {
+                ...post,
+                content: 'Body',
+                type: 'text',
+                created_at: new Date('2026-10-22T08:00:00.000Z'),
+                pinned_at: null,
+                pinned_by: null,
+                edited_at: null,
+                locked_at: null,
+                locked_by: null,
+              },
+            ]
+          : [],
+        [],
+      ];
+    }
+    if (sql.startsWith('SELECT target_id, SUM(value) AS score')) {
+      return [[], []];
+    }
+    if (sql.startsWith('SELECT (')) {
+      const [, creatorOrMod, , admin] = values;
+      return [
+        [{ can_review: canModerate(creatorOrMod) || isAdmin(admin) ? 1 : 0 }],
+        [],
+      ];
+    }
+    throw new Error(`Unexpected SQL: ${sql}`);
+  };
+
+  beforeEach(async () => {
+    queries = [];
+    post = {
+      id: 'post-1',
+      author_id: 'author',
+      community_id: 'community-1',
+      title: 'Hello',
+      removed_at: null,
+      removed_by: null,
+      removal_reason: null,
+    };
+    notifications = { record: jest.fn().mockResolvedValue(undefined) };
+    log = { record: jest.fn().mockResolvedValue(undefined) };
+    assertAccepted = jest.fn().mockResolvedValue(undefined);
+    connection = {
+      beginTransaction: jest.fn().mockResolvedValue(undefined),
+      commit: jest.fn().mockResolvedValue(undefined),
+      rollback: jest.fn().mockResolvedValue(undefined),
+      release: jest.fn(),
+      execute: (sql, values) => Promise.resolve(answer(sql, values)),
+    };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        PostsService,
+        {
+          provide: MYSQL_POOL,
+          useValue: {
+            getConnection: () => Promise.resolve(connection),
+            execute: (sql: string, values: unknown[]) =>
+              Promise.resolve(answer(sql, values)),
+          },
+        },
+        { provide: NotificationsService, useValue: notifications },
+        {
+          provide: CommunityRuleAcceptanceService,
+          useValue: { assertAcceptedOrThrow: assertAccepted },
+        },
+        { provide: CommunityModerationLogService, useValue: log },
+      ],
+    }).compile();
+    service = module.get(PostsService);
+  });
+
+  const writes = () =>
+    queries.filter(({ sql }) => sql.startsWith('UPDATE posts'));
+  const expectCommittedAndReleased = () => {
+    expect(connection.commit).toHaveBeenCalledTimes(1);
+    expect(connection.rollback).not.toHaveBeenCalled();
+    expect(connection.release).toHaveBeenCalledTimes(1);
+  };
+  const expectRolledBackAndReleased = () => {
+    expect(connection.commit).not.toHaveBeenCalled();
+    expect(connection.rollback).toHaveBeenCalledTimes(1);
+    expect(connection.release).toHaveBeenCalledTimes(1);
+  };
+
+  describe('removeContent', () => {
+    it.each(['moderator', 'creator-1'])(
+      'lets %s remove: keeps the row, sets all three columns, notifies and logs once',
+      async (actor) => {
+        const result = await service.removeContent(
+          'post-1',
+          { reason: 'Spam' },
+          actor,
+        );
+
+        expect(queries[0].sql).toContain('FOR UPDATE');
+        expect(writes()).toEqual([
+          {
+            sql: 'UPDATE posts SET removed_at = UTC_TIMESTAMP(), removed_by = ?, removal_reason = ? WHERE id = ? AND removed_at IS NULL',
+            values: [actor, 'Spam', 'post-1'],
+          },
+        ]);
+        expect(
+          queries.some(({ sql }) => sql.startsWith('DELETE FROM posts')),
+        ).toBe(false);
+        expect(result).toMatchObject({
+          id: 'post-1',
+          removed: true,
+          removed_at: clock.toISOString(),
+          removed_by: actor,
+          removal_reason: 'Spam',
+        });
+        // #44: a null actor and the title snapshot only, never the reason
+        // or the moderator.
+        expect(notifications.record).toHaveBeenCalledTimes(1);
+        expect(notifications.record).toHaveBeenCalledWith(connection, {
+          recipientId: 'author',
+          type: 'content_removed',
+          actorId: null,
+          subjectType: 'post',
+          subjectId: 'post-1',
+          communityId: 'community-1',
+          metadata: { post_title: 'Hello' },
+        });
+        expect(JSON.stringify(notifications.record.mock.calls)).not.toMatch(
+          /Spam|moderator|creator-1/,
+        );
+        expect(log.record).toHaveBeenCalledTimes(1);
+        expect(log.record).toHaveBeenCalledWith(connection, {
+          actorId: actor,
+          communityId: 'community-1',
+          action: 'post_removed',
+          targetType: 'post',
+          targetId: 'post-1',
+          metadata: { reason: 'Spam' },
+        });
+        expect(assertAccepted).not.toHaveBeenCalled();
+        expectCommittedAndReleased();
+      },
+    );
+
+    it('stores a missing reason as NULL and logs no reason', async () => {
+      await service.removeContent('post-1', {}, 'moderator');
+      expect(writes()[0].values).toEqual(['moderator', null, 'post-1']);
+      expect((log.record.mock.calls[0] as unknown[])[1]).not.toHaveProperty(
+        'metadata',
+      );
+    });
+
+    it.each([
+      [
+        'author',
+        'Moderators remove posts; authors delete their own with DELETE /posts/:id',
+      ],
+      [
+        'stranger',
+        'Only the community creator and moderators can remove or restore posts',
+      ],
+    ])('refuses %s with 403', async (actor, message) => {
+      await expect(service.removeContent('post-1', {}, actor)).rejects.toThrow(
+        new ForbiddenException(message),
+      );
+      expect(writes()).toHaveLength(0);
+      expect(notifications.record).not.toHaveBeenCalled();
+      expectRolledBackAndReleased();
+    });
+
+    it('answers 404 for an unknown post and 409 for a removed one', async () => {
+      post = undefined;
+      await expect(
+        service.removeContent('missing', {}, 'moderator'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expectRolledBackAndReleased();
+
+      post = {
+        id: 'post-1',
+        author_id: 'author',
+        community_id: 'community-1',
+        title: 'Hello',
+        removed_at: clock,
+        removed_by: 'creator-1',
+        removal_reason: null,
+      };
+      connection.rollback.mockClear();
+      connection.release.mockClear();
+      await expect(
+        service.removeContent('post-1', {}, 'moderator'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(writes()).toHaveLength(0);
+      expectRolledBackAndReleased();
+    });
+
+    it.each([
+      ['the notification', () => notifications.record],
+      ['the log entry', () => log.record],
+    ])('rolls back when %s cannot be written', async (_label, writer) => {
+      writer().mockRejectedValueOnce(new Error('write failed'));
+      await expect(
+        service.removeContent('post-1', {}, 'moderator'),
+      ).rejects.toThrow('write failed');
+      expectRolledBackAndReleased();
+    });
+  });
+
+  describe('restore', () => {
+    beforeEach(() => {
+      post = {
+        ...post!,
+        removed_at: clock,
+        removed_by: 'moderator',
+        removal_reason: 'x',
+      };
+    });
+
+    it('clears all three columns, logs post_restored and notifies nobody', async () => {
+      const result = await service.restore('post-1', 'creator-1');
+      expect(writes()).toEqual([
+        {
+          sql: 'UPDATE posts SET removed_at = NULL, removed_by = NULL, removal_reason = NULL WHERE id = ? AND removed_at IS NOT NULL',
+          values: ['post-1'],
+        },
+      ]);
+      expect(result).not.toHaveProperty('removed');
+      expect(log.record).toHaveBeenCalledWith(connection, {
+        actorId: 'creator-1',
+        communityId: 'community-1',
+        action: 'post_restored',
+        targetType: 'post',
+        targetId: 'post-1',
+      });
+      expect(notifications.record).not.toHaveBeenCalled();
+      expectCommittedAndReleased();
+    });
+
+    it('answers 409 for a post that is not removed', async () => {
+      post = {
+        ...post!,
+        removed_at: null,
+        removed_by: null,
+        removal_reason: null,
+      };
+      await expect(
+        service.restore('post-1', 'moderator'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expectRolledBackAndReleased();
+    });
+
+    it('refuses the author with 403', async () => {
+      await expect(service.restore('post-1', 'author')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expectRolledBackAndReleased();
+    });
+
+    it('rolls back when the log entry cannot be written', async () => {
+      log.record.mockRejectedValueOnce(new Error('log failed'));
+      await expect(service.restore('post-1', 'moderator')).rejects.toThrow(
+        'log failed',
+      );
+      expectRolledBackAndReleased();
+    });
+  });
+
+  describe('findOne visibility', () => {
+    beforeEach(() => {
+      post = {
+        ...post!,
+        removed_at: clock,
+        removed_by: null,
+        removal_reason: 'Spam',
+      };
+    });
+
+    it.each([undefined, 'author', 'stranger'])(
+      'answers 404 to %s',
+      async (viewer) => {
+        await expect(service.findOne('post-1', viewer)).rejects.toBeInstanceOf(
+          NotFoundException,
+        );
+      },
+    );
+
+    it.each(['moderator', 'creator-1', 'platform-admin'])(
+      'shows %s the full post with its removal state, rendering a deleted moderator as null',
+      async (viewer) => {
+        await expect(service.findOne('post-1', viewer)).resolves.toMatchObject({
+          id: 'post-1',
+          title: 'Hello',
+          content: 'Body',
+          removed: true,
+          removed_at: clock.toISOString(),
+          removed_by: null,
+          removal_reason: 'Spam',
+        });
+      },
+    );
+
+    it('asks the reviewer helper only for a removed post, without the removal fields otherwise', async () => {
+      post = {
+        ...post!,
+        removed_at: null,
+        removed_by: null,
+        removal_reason: null,
+      };
+      const result = await service.findOne('post-1', 'moderator');
+      expect(result).not.toHaveProperty('removed');
+      expect(result).not.toHaveProperty('removal_reason');
+      expect(queries.some(({ sql }) => sql.startsWith('SELECT ('))).toBe(false);
+    });
   });
 });

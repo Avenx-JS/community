@@ -72,7 +72,9 @@ describe('Vote routes on posts and comments (e2e)', () => {
         return ruleAnswer;
       }
       if (
-        sql.startsWith('SELECT id, community_id FROM posts') ||
+        sql.startsWith(
+          'SELECT id, community_id, removed_at IS NOT NULL AS removed FROM posts',
+        ) ||
         sql.startsWith('SELECT comments.id, posts.community_id')
       ) {
         const [targetId] = values as [string];
@@ -348,7 +350,7 @@ describe('Vote routes on posts and comments (e2e)', () => {
         await user1.delete(path).expect(200);
         await user1.get(path).expect(200);
         const lookups = queryCalls.filter(({ sql }) =>
-          /^SELECT (id, community_id FROM posts|comments\.id, posts\.community_id)/.test(
+          /^SELECT (id, community_id, removed_at IS NOT NULL AS removed FROM posts|comments\.id, posts\.community_id)/.test(
             sql,
           ),
         );

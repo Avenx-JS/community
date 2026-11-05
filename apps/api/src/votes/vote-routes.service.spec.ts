@@ -1,4 +1,8 @@
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
@@ -14,6 +18,7 @@ describe('VotesService vote routes', () => {
   let queries: Array<{ sql: string; values: unknown[]; on: 'pool' | 'tx' }>;
   let votes: Map<string, { value: -1 | 1 }>;
   let targetExists: boolean;
+  let targetRemoved: number;
   let assertAccepted: jest.Mock;
   let connection: {
     beginTransaction: jest.Mock;
@@ -33,11 +38,21 @@ describe('VotesService vote routes', () => {
 
   const answer = (sql: string, values: unknown[]): [unknown, unknown] => {
     if (
-      sql.startsWith('SELECT id, community_id FROM posts') ||
+      sql.startsWith(
+        'SELECT id, community_id, removed_at IS NOT NULL AS removed FROM posts',
+      ) ||
       sql.startsWith('SELECT comments.id, posts.community_id')
     ) {
       return [
-        targetExists ? [{ id: values[0], community_id: 'community-1' }] : [],
+        targetExists
+          ? [
+              {
+                id: values[0],
+                community_id: 'community-1',
+                removed: targetRemoved,
+              },
+            ]
+          : [],
         [],
       ];
     }
@@ -93,6 +108,7 @@ describe('VotesService vote routes', () => {
     queries = [];
     votes = new Map();
     targetExists = true;
+    targetRemoved = 0;
     assertAccepted = jest.fn().mockResolvedValue(undefined);
     connection = {
       beginTransaction: jest.fn().mockResolvedValue(undefined),
@@ -281,6 +297,49 @@ describe('VotesService vote routes', () => {
       'user-1',
       'community-1',
       connection,
+    );
+  });
+
+  describe.each(['post', 'comment'] as const)(
+    'on removed content (%s)',
+    (type: TargetType) => {
+      const id = `${type}-1`;
+      beforeEach(() => {
+        // For a comment, the flag covers the comment or its post removed.
+        targetRemoved = 1;
+      });
+
+      it('refuses a vote with 409, writing nothing and releasing', async () => {
+        await expect(
+          service.vote(
+            { target_type: type, target_id: id, value: 1 },
+            'user-1',
+          ),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(votes.size).toBe(0);
+        expectRolledBackAndReleased();
+      });
+
+      it('still lets the caller withdraw and read their vote', async () => {
+        votes.set(key('user-1', type, id), { value: 1 });
+        await expect(service.withdraw(type, id, 'user-1')).resolves.toEqual({
+          score: 0,
+        });
+        await expect(service.state(type, id, 'user-1')).resolves.toEqual({
+          value: null,
+          score: 0,
+        });
+      });
+    },
+  );
+
+  it('selects the removal of a comment and of its post', async () => {
+    await service.vote(
+      { target_type: 'comment', target_id: 'comment-1', value: 1 },
+      'user-1',
+    );
+    expect(queries[0].sql).toContain(
+      '(comments.removed_at IS NOT NULL OR posts.removed_at IS NOT NULL) AS removed',
     );
   });
 });

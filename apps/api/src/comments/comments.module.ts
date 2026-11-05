@@ -8,6 +8,8 @@ import { CommentsService } from './comments.service';
 import { CommentsController } from './comments.controller';
 import { CommentLocksController } from './comment-locks.controller';
 import { CommentLocksService } from './comment-locks.service';
+import { CommentRemovalsController } from './comment-removals.controller';
+import { CommentRemovalService } from './comment-removals.service';
 
 @Module({
   imports: [
@@ -17,8 +19,12 @@ import { CommentLocksService } from './comment-locks.service';
     NotificationsModule,
     VotesModule,
   ],
-  providers: [CommentsService, CommentLocksService],
-  controllers: [CommentsController, CommentLocksController],
+  providers: [CommentsService, CommentLocksService, CommentRemovalService],
+  controllers: [
+    CommentsController,
+    CommentLocksController,
+    CommentRemovalsController,
+  ],
   exports: [CommentsService],
 })
 export class CommentsModule {}

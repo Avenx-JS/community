@@ -1,4 +1,4 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import type { PostDto, PostListDto } from './posts.service';
 
 export class PostResponse implements PostDto {
@@ -79,6 +79,37 @@ export class PostResponse implements PostDto {
     description: 'Sum of all vote values on the post; 0 without votes.',
   })
   score!: number;
+
+  @ApiPropertyOptional({
+    enum: [true],
+    description:
+      'Present only on a removed post, and only for its reviewers (community ' +
+      'creator, community moderators, platform admins); everyone else gets ' +
+      '404 for a removed post.',
+  })
+  removed?: true;
+
+  @ApiPropertyOptional({
+    format: 'date-time',
+    description: 'Reviewers only: when the post was removed.',
+  })
+  removed_at?: string;
+
+  @ApiPropertyOptional({
+    type: String,
+    nullable: true,
+    description:
+      "Reviewers only: who removed it; null once that moderator's account " +
+      'is deleted.',
+  })
+  removed_by?: string | null;
+
+  @ApiPropertyOptional({
+    type: String,
+    nullable: true,
+    description: 'Reviewers only: the optional removal reason.',
+  })
+  removal_reason?: string | null;
 }
 
 export class PostListResponse implements PostListDto {

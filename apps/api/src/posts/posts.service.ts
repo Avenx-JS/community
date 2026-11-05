@@ -35,6 +35,13 @@ import {
 import { UpdatePostDto } from './dto/update-post.dto';
 import { ListPostsDto } from './dto/list-posts.dto';
 import { loadVoteScores } from '../votes/vote-scores';
+import {
+  canReviewRemovedContent,
+  toRemovalState,
+  type RemovalStateDto,
+  type RemovalStateRow,
+} from '../common/removed-content';
+import { RemoveContentDto } from '../common/remove-content.dto';
 
 export interface PostRow extends RowDataPacket {
   id: string;
@@ -115,6 +122,13 @@ export interface PostDto {
   // Sum of all vote values; 0 without votes.
   score: number;
 }
+
+// A post as a reviewer sees it: removal state only on removed posts.
+export type ReviewablePostDto = PostDto & Partial<RemovalStateDto>;
+
+// The moderator-facing removal columns (migration 017), selected only by
+// reads that may show them to a reviewer.
+export const REMOVAL_COLUMNS = 'removed_at, removed_by, removal_reason';
 
 export interface PostListDto {
   items: PostDto[];
@@ -264,9 +278,13 @@ export class PostsService {
     }
   }
 
-  async findOne(id: string): Promise<PostDto> {
-    const [posts] = await this.pool.execute<PostRow[]>(
-      `SELECT ${POST_COLUMNS} FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} LIMIT 1`,
+  // GET /posts/:id. A post removed by moderation is 404 for everyone except
+  // those who may review it (canReviewRemovedContent: its community's
+  // creator and moderators, and platform admins), who get the full post plus
+  // its removal state. The reviewer check only runs for a removed post.
+  async findOne(id: string, viewerId?: string): Promise<ReviewablePostDto> {
+    const [posts] = await this.pool.execute<(PostRow & RemovalStateRow)[]>(
+      `SELECT ${POST_COLUMNS}, ${REMOVAL_COLUMNS} FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} LIMIT 1`,
       [id],
     );
     const post = posts[0];
@@ -274,8 +292,158 @@ export class PostsService {
     if (!post) {
       throw new NotFoundException('Post not found');
     }
+    const [dto] = await toPostDtos(this.pool, [post]);
+    if (!post.removed_at) {
+      return dto;
+    }
+    if (
+      !(await canReviewRemovedContent(this.pool, post.community_id, viewerId))
+    ) {
+      throw new NotFoundException('Post not found');
+    }
+    return { ...dto, ...toRemovalState(post) };
+  }
 
-    return (await toPostDtos(this.pool, [post]))[0];
+  // POST /posts/:id/remove: a moderator's reversible removal. The row and
+  // everything beneath it (comments, votes) stay; reads hide it (see
+  // findOne). Community creator or moderator only: the author is refused,
+  // having DELETE for their own content. 409 if already removed. The author
+  // is notified (content_removed) with a null actor and the title snapshot
+  // only: never the reason or the moderator (#44). One post_removed log
+  // entry, with the reason, in the same transaction.
+  async removeContent(
+    id: string,
+    input: RemoveContentDto,
+    actorId: string,
+  ): Promise<ReviewablePostDto> {
+    return this.inTransaction(async (connection) => {
+      const post = await this.lockPostForRemoval(connection, id, actorId);
+      if (post.removed_at !== null) {
+        throw new ConflictException('This post is already removed');
+      }
+      const reason = input.reason ?? null;
+      await connection.execute<ResultSetHeader>(
+        'UPDATE posts SET removed_at = UTC_TIMESTAMP(), removed_by = ?, removal_reason = ? WHERE id = ? AND removed_at IS NULL',
+        [actorId, reason, id],
+      );
+      // Always true under this route's authorisation; kept so the rule
+      // "an author's own act notifies nobody" is expressed in one place.
+      if (post.author_id !== actorId) {
+        await this.notifications.record(connection, {
+          recipientId: post.author_id,
+          type: 'content_removed',
+          actorId: null,
+          subjectType: 'post',
+          subjectId: post.id,
+          communityId: post.community_id,
+          metadata: { post_title: post.title },
+        });
+      }
+      await this.moderationLog.record(connection, {
+        actorId,
+        communityId: post.community_id,
+        action: 'post_removed',
+        targetType: 'post',
+        targetId: id,
+        ...(reason === null ? {} : { metadata: { reason } }),
+      });
+      return this.readReviewable(connection, id);
+    });
+  }
+
+  // POST /posts/:id/restore. Same authorisation; 409 unless removed.
+  // Clears all three columns. No notification: a new notifications.type
+  // value would need a migration (a follow-up).
+  async restore(id: string, actorId: string): Promise<PostDto> {
+    return this.inTransaction(async (connection) => {
+      const post = await this.lockPostForRemoval(connection, id, actorId);
+      if (post.removed_at === null) {
+        throw new ConflictException('This post is not removed');
+      }
+      await connection.execute<ResultSetHeader>(
+        'UPDATE posts SET removed_at = NULL, removed_by = NULL, removal_reason = NULL WHERE id = ? AND removed_at IS NOT NULL',
+        [id],
+      );
+      await this.moderationLog.record(connection, {
+        actorId,
+        communityId: post.community_id,
+        action: 'post_restored',
+        targetType: 'post',
+        targetId: id,
+      });
+      const [rows] = await connection.execute<PostRow[]>(
+        `SELECT ${POST_COLUMNS} FROM posts WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      const [dto] = await toPostDtos(connection, [rows[0]]);
+      return dto;
+    });
+  }
+
+  private async readReviewable(
+    connection: PoolConnection,
+    id: string,
+  ): Promise<ReviewablePostDto> {
+    const [rows] = await connection.execute<(PostRow & RemovalStateRow)[]>(
+      `SELECT ${POST_COLUMNS}, ${REMOVAL_COLUMNS} FROM posts WHERE id = ? LIMIT 1`,
+      [id],
+    );
+    const [dto] = await toPostDtos(connection, [rows[0]]);
+    return rows[0].removed_at ? { ...dto, ...toRemovalState(rows[0]) } : dto;
+  }
+
+  // Locks the post and decides the moderator rights for remove and restore:
+  // 404 for an unknown post or one in a deleted community, 403 unless the
+  // actor created or moderates the community. The author is pointed at
+  // DELETE.
+  private async lockPostForRemoval(
+    connection: PoolConnection,
+    id: string,
+    actorId: string,
+  ): Promise<RemovablePostRow & { removed_at: Date | string | null }> {
+    const [posts] = await connection.execute<
+      (RemovablePostRow & { removed_at: Date | string | null })[]
+    >(
+      `SELECT posts.id, posts.author_id, posts.community_id, posts.title, posts.removed_at,
+         ${canModerateCommunitySql('posts.community_id')} AS can_moderate
+       FROM posts
+       WHERE posts.id = ? AND ${activeCommunitySql('posts.community_id')}
+       LIMIT 1 FOR UPDATE`,
+      [actorId, actorId, id],
+    );
+    const post = posts[0];
+    if (!post) {
+      throw new NotFoundException('Post not found');
+    }
+    if (!isSqlTrue(post.can_moderate)) {
+      throw new ForbiddenException(
+        post.author_id === actorId
+          ? 'Moderators remove posts; authors delete their own with DELETE /posts/:id'
+          : 'Only the community creator and moderators can remove or restore posts',
+      );
+    }
+    return post;
+  }
+
+  private async inTransaction<T>(
+    work: (connection: PoolConnection) => Promise<T>,
+  ): Promise<T> {
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+      const result = await work(connection);
+      await connection.commit();
+      return result;
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
   }
 
   // The author, the community creator or a community moderator may delete a
@@ -303,10 +471,14 @@ export class PostsService {
       if (!post) {
         throw new NotFoundException('Post not found');
       }
-      const isAuthor = post.author_id === actorId;
-      if (!isAuthor && !isSqlTrue(post.can_moderate)) {
+      // Author only. A moderator's removal is POST /posts/:id/remove, which
+      // keeps the content for review and restoration; moderators must not
+      // also have a destructive path, or the reversible one is optional.
+      if (post.author_id !== actorId) {
         throw new ForbiddenException(
-          'You can only delete your own posts or moderate this community',
+          isSqlTrue(post.can_moderate)
+            ? 'Only the author may delete this post; moderators remove posts with POST /posts/:id/remove'
+            : 'You can only delete your own posts',
         );
       }
 
@@ -314,17 +486,6 @@ export class PostsService {
         'DELETE FROM posts WHERE id = ?',
         [id],
       );
-      if (!isAuthor) {
-        await this.notifications.record(connection, {
-          recipientId: post.author_id,
-          type: 'content_removed',
-          actorId: null,
-          subjectType: 'post',
-          subjectId: post.id,
-          communityId: post.community_id,
-          metadata: { post_title: post.title },
-        });
-      }
 
       await connection.commit();
     } catch (error) {

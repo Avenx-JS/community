@@ -20,6 +20,7 @@ import {
   type RulesStore,
 } from './fakes/community-rules-store';
 import { answerVoteScores, type FakeVote } from './fakes/vote-scores';
+import { REMOVED_CONTENT_REVIEWER_SQL } from '../src/common/removed-content';
 
 interface TestNotification {
   id: string;
@@ -45,6 +46,8 @@ interface TestComment {
   locked_at?: Date | null;
   edited_at?: Date | null;
   locked_by?: string | null;
+  removed_by?: string | null;
+  removal_reason?: string | null;
 }
 
 interface ListedComment {
@@ -91,6 +94,11 @@ describe('Comment endpoints (e2e)', () => {
     target_id: string;
   }>;
   let failModerationLog: boolean;
+  // The database clock of UTC_TIMESTAMP() in a removal.
+  const removeClock = '2026-11-07T10:00:00.000Z';
+  // users.role = 'admin'.
+  const platformAdmins = new Set(['platform-admin']);
+  let reviewerChecks: number;
   // The database clock of UTC_TIMESTAMP() in a lock.
   const lockClock = '2026-11-06T09:00:00.000Z';
   // The database clock of UTC_TIMESTAMP() in an edit.
@@ -163,6 +171,7 @@ describe('Comment endpoints (e2e)', () => {
     lockedPosts = new Set();
     removedPosts = new Set();
     ancestryReads = 0;
+    reviewerChecks = 0;
     moderationLog = [];
     failModerationLog = false;
     // A statement that excludes deleted communities does not see a post in
@@ -330,11 +339,86 @@ describe('Comment endpoints (e2e)', () => {
           });
           return [{ affectedRows: 1 }, []];
         }
+        if (sql.startsWith('SELECT comments.id, comments.post_id')) {
+          const [creatorId, moderatorId, id] = values as string[];
+          const comment = comments.find((entry) => entry.id === id);
+          if (!comment || !visiblePost(comment.post_id, sql)) {
+            return [[], []];
+          }
+          const communityId = postCommunities.get(comment.post_id) as string;
+          return [
+            [
+              {
+                ...comment,
+                community_id: communityId,
+                removed_at: comment.removed_at ?? null,
+                post_removed_at: removedPosts.has(comment.post_id)
+                  ? new Date('2026-11-01T00:00:00.000Z')
+                  : null,
+                can_moderate:
+                  communityCreators.get(communityId) === creatorId ||
+                  moderatorAssignments.has(`${communityId}:${moderatorId}`)
+                    ? 1
+                    : 0,
+              },
+            ],
+            [],
+          ];
+        }
+        if (sql.startsWith('UPDATE comments SET removed_at')) {
+          const removing = sql.includes('UTC_TIMESTAMP()');
+          const id = values[values.length - 1] as string;
+          comments = comments.map((comment) =>
+            comment.id === id
+              ? {
+                  ...comment,
+                  removed_at: removing ? new Date(removeClock) : null,
+                  removed_by: removing ? (values[0] as string) : null,
+                  removal_reason: removing
+                    ? (values[1] as string | null)
+                    : null,
+                }
+              : comment,
+          );
+          return [{ affectedRows: 1 }, []];
+        }
+        if (
+          sql.startsWith(
+            'SELECT removed_at, removed_by, removal_reason FROM comments',
+          )
+        ) {
+          return [comments.filter((comment) => comment.id === values[0]), []];
+        }
+        if (sql === REMOVED_CONTENT_REVIEWER_SQL) {
+          const [communityId, creatorId, moderatorId, adminId] =
+            values as string[];
+          reviewerChecks += 1;
+          return [
+            [
+              {
+                can_review:
+                  communityCreators.get(communityId) === creatorId ||
+                  moderatorAssignments.has(`${communityId}:${moderatorId}`) ||
+                  platformAdmins.has(adminId)
+                    ? 1
+                    : 0,
+              },
+            ],
+            [],
+          ];
+        }
         if (sql.startsWith('SELECT comments.id FROM comments')) {
           const [id] = values as [string];
           const comment = comments.find((entry) => entry.id === id);
           return [
-            comment && visiblePost(comment.post_id, sql) ? [{ id }] : [],
+            comment &&
+            visiblePost(comment.post_id, sql) &&
+            !(
+              sql.includes('posts.removed_at IS NULL') &&
+              removedPosts.has(comment.post_id)
+            )
+              ? [{ id }]
+              : [],
             [],
           ];
         }
@@ -393,6 +477,9 @@ describe('Comment endpoints (e2e)', () => {
                     community_id: postCommunities.get(postId),
                     title: `Title of ${postId}`,
                     locked_at: lockedPosts.has(postId)
+                      ? new Date('2026-11-01T00:00:00.000Z')
+                      : null,
+                    removed_at: removedPosts.has(postId)
                       ? new Date('2026-11-01T00:00:00.000Z')
                       : null,
                   },
@@ -463,9 +550,31 @@ describe('Comment endpoints (e2e)', () => {
             [],
           ];
         }
+        if (sql.startsWith('SELECT community_id, removed_at FROM posts')) {
+          const [postId] = values as [string];
+          return [
+            visiblePost(postId, sql)
+              ? [
+                  {
+                    community_id: postCommunities.get(postId),
+                    removed_at: removedPosts.has(postId)
+                      ? new Date('2026-11-01T00:00:00.000Z')
+                      : null,
+                  },
+                ]
+              : [],
+            [],
+          ];
+        }
         if (sql.startsWith('SELECT id FROM posts')) {
           const [postId] = values as [string];
-          return [visiblePost(postId, sql) ? [{ id: postId }] : [], []];
+          const hidden =
+            sql.includes('posts.removed_at IS NULL') &&
+            removedPosts.has(postId);
+          return [
+            visiblePost(postId, sql) && !hidden ? [{ id: postId }] : [],
+            [],
+          ];
         }
         if (
           sql.startsWith('SELECT id, post_id, author_id, parent_id') &&
@@ -525,6 +634,7 @@ describe('Comment endpoints (e2e)', () => {
               {
                 id: parent.id,
                 author_id: parent.author_id,
+                parent_removed: parent.removed_at ? 1 : 0,
                 thread_locked: locked ? 1 : 0,
                 depth_exceeded: exceeded ? 1 : 0,
               },
@@ -648,6 +758,7 @@ describe('Comment endpoints (e2e)', () => {
       'moderator-token': 'user-mod',
       'post-author-token': 'user-2',
       'creator-token': 'creator-1',
+      'admin-token': 'platform-admin',
       'other-moderator-token': 'user-other-mod',
     };
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -850,12 +961,17 @@ describe('Comment endpoints (e2e)', () => {
     expect(comments.some((comment) => comment.id === 'root-2')).toBe(true);
   });
 
-  it('allows a moderator to delete comments only in their community', async () => {
-    await request(app.getHttpServer())
+  // Breaking change: a moderator may no longer hard-delete another author's
+  // comment; the 403 names the reversible removal route.
+  it('refuses a moderator delete with 403, in their community or another', async () => {
+    const refused = await request(app.getHttpServer())
       .delete('/comments/reply-1')
       .set('Authorization', 'Bearer moderator-token')
-      .expect(204);
-    expect(comments.some((comment) => comment.id === 'reply-1')).toBe(false);
+      .expect(403);
+    expect((refused.body as { message: string }).message).toBe(
+      'Only the author may delete this comment; moderators remove comments with POST /comments/:id/remove',
+    );
+    expect(comments.some((comment) => comment.id === 'reply-1')).toBe(true);
 
     await request(app.getHttpServer())
       .delete('/comments/other-post-comment')
@@ -979,13 +1095,20 @@ describe('Comment endpoints (e2e)', () => {
       });
     });
 
-    it('notifies only the author of a comment a moderator removes, and renders it once gone', async () => {
+    it('notifies only the author of a comment a moderator removes, naming no moderator and no reason', async () => {
       await request(app.getHttpServer())
-        .delete('/comments/reply-1')
+        .post('/comments/reply-1/remove')
         .set('Authorization', 'Bearer moderator-token')
-        .expect(204);
+        .send({ reason: 'Personal attack' })
+        .expect(200);
 
-      expect(comments.some((comment) => comment.id === 'reply-1')).toBe(false);
+      // Kept, not deleted.
+      expect(
+        comments.find((comment) => comment.id === 'reply-1'),
+      ).toMatchObject({
+        removed_by: 'user-mod',
+        removal_reason: 'Personal attack',
+      });
       expect(notifications).toHaveLength(1);
       expect(notifications[0]).toMatchObject({
         recipient_id: 'user-2',
@@ -1012,6 +1135,8 @@ describe('Comment endpoints (e2e)', () => {
         metadata: { excerpt: 'Reply' },
       });
       expect(JSON.stringify(inbox.body)).not.toContain('user-mod');
+      expect(JSON.stringify(inbox.body)).not.toContain('Personal attack');
+      expect(JSON.stringify(notifications)).not.toContain('Personal attack');
     });
 
     it('writes nothing when the author deletes their own comment', async () => {
@@ -1023,15 +1148,19 @@ describe('Comment endpoints (e2e)', () => {
       expect(notifications).toEqual([]);
     });
 
-    it('keeps the comment when the removal notification cannot be written', async () => {
+    it('rolls the removal back when the notification cannot be written', async () => {
       failNotificationWrite = true;
 
       await request(app.getHttpServer())
-        .delete('/comments/reply-1')
+        .post('/comments/reply-1/remove')
         .set('Authorization', 'Bearer moderator-token')
         .expect(500);
 
-      expect(comments.some((comment) => comment.id === 'reply-1')).toBe(true);
+      expect(
+        comments.find((comment) => comment.id === 'reply-1')?.removed_at ??
+          null,
+      ).toBeNull();
+      expect(moderationLog).toEqual([]);
       expect(comments.some((comment) => comment.id === 'nested-reply')).toBe(
         true,
       );
@@ -1104,7 +1233,7 @@ describe('Comment endpoints (e2e)', () => {
         .expect(404);
     });
 
-    it('lets authors and moderators delete, and anyone read, without accepting', async () => {
+    it('lets authors delete, moderators remove, and anyone read, without accepting', async () => {
       rules.publish('community-1');
       const check = jest.spyOn(
         app.get(CommunityRuleAcceptanceService),
@@ -1113,7 +1242,8 @@ describe('Comment endpoints (e2e)', () => {
 
       await as('valid-token').get('/posts/post-1/comments').expect(200);
       await as('valid-token').delete('/comments/root-1').expect(204);
-      await as('moderator-token').delete('/comments/root-2').expect(204);
+      await as('moderator-token').post('/comments/root-2/remove').expect(200);
+      await as('moderator-token').post('/comments/root-2/restore').expect(200);
 
       expect(check).not.toHaveBeenCalled();
     });
@@ -1613,16 +1743,16 @@ describe('Comment endpoints (e2e)', () => {
       expect(stored('root-1')?.content).toBe('Root comment');
     });
 
-    it('lets the same moderator delete the comment they may not edit', async () => {
+    it('lets the same moderator remove the comment they may not edit', async () => {
       await patch(
         '/comments/root-1',
         { content: 'x' },
         'moderator-token',
       ).expect(403);
       await request(app.getHttpServer())
-        .delete('/comments/root-1')
+        .post('/comments/root-1/remove')
         .set('Authorization', 'Bearer moderator-token')
-        .expect(204);
+        .expect(200);
     });
 
     it('answers 401 without a token, 404 for an unknown comment and 400 for a malformed id', async () => {
@@ -1997,6 +2127,271 @@ describe('Comment endpoints (e2e)', () => {
         await as('valid-token').remove('nested-reply').expect(204);
         expect(stored('nested-reply')).toBeUndefined();
       });
+    });
+  });
+
+  describe('moderative removal', () => {
+    const as = (token?: string) => {
+      const server = () => request(app.getHttpServer());
+      const auth = (call: request.Test) =>
+        token ? call.set('Authorization', `Bearer ${token}`) : call;
+      return {
+        remove: (id: string, body: object = {}) =>
+          auth(server().post(`/comments/${id}/remove`)).send(body),
+        restore: (id: string) => auth(server().post(`/comments/${id}/restore`)),
+        thread: (postId = 'post-1') =>
+          auth(server().get(`/posts/${postId}/comments`)),
+        reply: (parentId: string) =>
+          auth(server().post('/posts/post-1/comments')).send({
+            content: 'A reply',
+            parent_id: parentId,
+          }),
+      };
+    };
+    const stored = (id: string) =>
+      comments.find((comment) => comment.id === id);
+    const removalWrites = () =>
+      queryCalls.filter(({ sql }) =>
+        sql.startsWith('UPDATE comments SET removed_at'),
+      );
+    const markRemoved = (id: string) => {
+      comments = comments.map((comment) =>
+        comment.id === id
+          ? {
+              ...comment,
+              removed_at: new Date('2026-11-01T00:00:00.000Z'),
+              removed_by: null,
+              removal_reason: 'Rude',
+            }
+          : comment,
+      );
+    };
+    const replyNode = async (token?: string) =>
+      (
+        (await as(token).thread().expect(200)).body as {
+          comments: Record<string, unknown>[];
+        }
+      ).comments[0].replies as Record<string, unknown>[];
+
+    afterEach(() => {
+      expect(openConnections).toBe(0);
+    });
+
+    it.each([
+      ['moderator-token', 'user-mod'],
+      ['creator-token', 'creator-1'],
+    ])(
+      'lets %s remove with 200, keeping the row and its replies, and restore',
+      async (token, actor) => {
+        const removed = await as(token)
+          .remove('reply-1', { reason: 'Rude' })
+          .expect(200);
+        expect(removed.body).toMatchObject({
+          id: 'reply-1',
+          removed: true,
+          removed_at: removeClock,
+          removed_by: actor,
+          removal_reason: 'Rude',
+        });
+        expect(stored('reply-1')).toBeDefined();
+        expect(stored('nested-reply')).toBeDefined();
+
+        const restored = await as(token).restore('reply-1').expect(200);
+        expect(restored.body).not.toHaveProperty('removed');
+        expect(stored('reply-1')).toMatchObject({
+          removed_at: null,
+          removed_by: null,
+          removal_reason: null,
+        });
+        expect(moderationLog.map((entry) => entry.action)).toEqual([
+          'comment_removed',
+          'comment_restored',
+        ]);
+        expect(notifications).toHaveLength(1);
+      },
+    );
+
+    it.each([
+      ['post-author-token', "the comment's author, who does not moderate"],
+      ['valid-token', 'an unrelated user'],
+      ['other-moderator-token', 'a moderator of another community'],
+    ])('answers %s (%s) with 403 on remove and restore', async (token) => {
+      await as(token).remove('reply-1').expect(403);
+      markRemoved('reply-1');
+      await as(token).restore('reply-1').expect(403);
+      expect(removalWrites()).toHaveLength(0);
+    });
+
+    it('answers 401, 404, 400 and 409 on remove and restore', async () => {
+      await as().remove('reply-1').expect(401);
+      await as().restore('reply-1').expect(401);
+      await as('moderator-token').remove('missing').expect(404);
+      await as('moderator-token').restore('missing').expect(404);
+      await as('moderator-token').remove('x%27%20OR%201%3D1').expect(400);
+      await as('moderator-token').restore('x%27%20OR%201%3D1').expect(400);
+      await as('moderator-token').restore('reply-1').expect(409);
+      await as('moderator-token').remove('reply-1').expect(200);
+      await as('moderator-token').remove('reply-1').expect(409);
+      await as('moderator-token')
+        .remove('root-2', { reason: 'x'.repeat(2001) })
+        .expect(400);
+      await as('moderator-token')
+        .remove('root-2', { notify: false })
+        .expect(400);
+      expect(removalWrites()).toHaveLength(1);
+    });
+
+    it('refuses to restore a comment while its post is removed, naming the post', async () => {
+      markRemoved('reply-1');
+      removedPosts.add('post-1');
+      const response = await as('moderator-token')
+        .restore('reply-1')
+        .expect(409);
+      expect((response.body as { message: string }).message).toBe(
+        'The post of this comment (post-1) is removed; restore the post first',
+      );
+      expect(removalWrites()).toHaveLength(0);
+    });
+
+    describe('the thread around a removed comment', () => {
+      beforeEach(() => markRemoved('reply-1'));
+
+      it.each([
+        [undefined, 'an anonymous caller'],
+        ['post-author-token', "the comment's own author"],
+        ['valid-token', 'an unrelated member'],
+        ['other-moderator-token', 'a moderator of another community'],
+      ] as [string | undefined, string][])(
+        'shows %s (%s) a tombstone with its replies in place',
+        async (token) => {
+          const [tombstone] = await replyNode(token);
+          expect(tombstone).toEqual({
+            id: 'reply-1',
+            post_id: 'post-1',
+            parent_id: 'root-1',
+            created_at: '2026-10-22T08:01:00.000Z',
+            removed: true,
+            replies: [
+              expect.objectContaining({
+                id: 'nested-reply',
+                content: 'Nested reply',
+              }),
+            ],
+          });
+        },
+      );
+
+      it.each([
+        ['moderator-token', 'a community moderator'],
+        ['creator-token', 'the community creator'],
+        ['admin-token', 'a platform admin'],
+      ])(
+        'shows %s (%s) the comment in full with its removal state',
+        async (token) => {
+          const [node] = await replyNode(token);
+          expect(node).toMatchObject({
+            id: 'reply-1',
+            author_id: 'user-2',
+            content: 'Reply',
+            removed: true,
+            removed_at: '2026-11-01T00:00:00.000Z',
+            removed_by: null,
+            removal_reason: 'Rude',
+            replies: [expect.objectContaining({ id: 'nested-reply' })],
+          });
+        },
+      );
+
+      it('differs between the two views only on the removed comment', async () => {
+        const reviewer = (await as('moderator-token').thread().expect(200))
+          .body as { comments: Record<string, unknown>[] };
+        const ordinary = (await as().thread().expect(200)).body as {
+          comments: Record<string, unknown>[];
+        };
+        // The other root and the nested reply are identical.
+        expect(reviewer.comments[1]).toEqual(ordinary.comments[1]);
+        const nestedOf = (body: typeof reviewer) =>
+          (
+            (body.comments[0].replies as Record<string, unknown>[])[0]
+              .replies as unknown[]
+          )[0];
+        expect(nestedOf(reviewer)).toEqual(nestedOf(ordinary));
+        expect(JSON.stringify(ordinary)).not.toMatch(/Rude|"Reply"/);
+      });
+
+      it('omits it from the flat routes for everyone, keeping its replies readable', async () => {
+        const replies = await request(app.getHttpServer())
+          .get('/comments/root-1/replies')
+          .set('Authorization', 'Bearer moderator-token')
+          .expect(200);
+        expect((replies.body as CommentPage).items).toEqual([]);
+        const beneath = await request(app.getHttpServer())
+          .get('/comments/reply-1/replies')
+          .expect(200);
+        expect((beneath.body as CommentPage).items).toHaveLength(1);
+      });
+
+      it('refuses a reply to it with 409', async () => {
+        const response = await as('valid-token').reply('reply-1').expect(409);
+        expect((response.body as { message: string }).message).toBe(
+          'The comment being replied to was removed by a moderator',
+        );
+        // Replies beneath it remain possible.
+        await as('valid-token').reply('nested-reply').expect(201);
+      });
+
+      it('refuses its author an edit with 409', async () => {
+        await request(app.getHttpServer())
+          .patch('/comments/reply-1')
+          .set('Authorization', 'Bearer post-author-token')
+          .send({ content: 'Rewrite' })
+          .expect(409);
+      });
+
+      it('makes it visible to all again once restored', async () => {
+        await as('moderator-token').restore('reply-1').expect(200);
+        const [node] = await replyNode();
+        expect(node).toMatchObject({ id: 'reply-1', content: 'Reply' });
+        expect(node).not.toHaveProperty('removed');
+      });
+    });
+
+    describe('a removed post', () => {
+      beforeEach(() => {
+        removedPosts.add('post-1');
+      });
+
+      it('hides the thread and the flat routes from everyone but reviewers', async () => {
+        await as().thread().expect(404);
+        await as('valid-token').thread().expect(404);
+        await as('moderator-token').thread().expect(200);
+        await as('admin-token').thread().expect(200);
+        await request(app.getHttpServer())
+          .get('/posts/post-1/comments/top-level')
+          .set('Authorization', 'Bearer moderator-token')
+          .expect(404);
+        await request(app.getHttpServer())
+          .get('/comments/root-1/replies')
+          .expect(404);
+      });
+
+      it('refuses new comments with 409', async () => {
+        await request(app.getHttpServer())
+          .post('/posts/post-1/comments')
+          .set('Authorization', 'Bearer valid-token')
+          .send({ content: 'Anyone?' })
+          .expect(409);
+      });
+    });
+
+    it('lets the author still delete their own comment: the DELETE author path is unchanged', async () => {
+      await request(app.getHttpServer())
+        .delete('/comments/root-1')
+        .set('Authorization', 'Bearer valid-token')
+        .expect(204, '');
+      expect(stored('root-1')).toBeUndefined();
+      expect(stored('nested-reply')).toBeUndefined();
+      expect(notifications).toEqual([]);
     });
   });
 });

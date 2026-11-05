@@ -95,10 +95,10 @@ describe('CommunityStatsService', () => {
 
   it('reads every post figure from one statement and joins comments through posts', () => {
     expect(POST_STATS_SQL).toMatch(
-      /COUNT\(\*\) AS total,\s+MAX\(created_at\) AS last_post_at,[\s\S]+FROM posts\s+WHERE community_id = \?$/,
+      /COUNT\(\*\) AS total,\s+MAX\(created_at\) AS last_post_at,[\s\S]+FROM posts\s+WHERE community_id = \? AND removed_at IS NULL$/,
     );
     expect(COMMENT_STATS_SQL).toMatch(
-      /FROM posts p\s+JOIN comments c ON c.post_id = p.id\s+WHERE p.community_id = \?$/,
+      /FROM posts p\s+JOIN comments c ON c.post_id = p.id\s+WHERE p.community_id = \?\s+AND p.removed_at IS NULL\s+AND c.removed_at IS NULL$/,
     );
   });
 
