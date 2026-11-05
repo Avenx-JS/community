@@ -25,6 +25,7 @@ import { CommunityRuleAcceptanceService } from '../communities/community-rule-ac
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreatePostDto } from './dto/create-post.dto';
 import { ListPostsDto } from './dto/list-posts.dto';
+import { loadVoteScores } from '../votes/vote-scores';
 
 export interface PostRow extends RowDataPacket {
   id: string;
@@ -72,6 +73,8 @@ export interface PostDto {
   pinned_at: string | null;
   // NULL on a pinned post once the pinning moderator's account is deleted.
   pinned_by: string | null;
+  // Sum of all vote values; 0 without votes.
+  score: number;
 }
 
 export interface PostListDto {
@@ -134,7 +137,7 @@ export class PostsService {
     >(`SELECT COUNT(*) AS total FROM posts${where}`, values);
 
     return {
-      items: posts.map((post) => this.toDto(post)),
+      items: await toPostDtos(this.pool, posts),
       page,
       limit,
       total: countRows[0].total,
@@ -210,7 +213,8 @@ export class PostsService {
       }
 
       await connection.commit();
-      return this.toDto(post);
+      // A new post has no votes yet.
+      return toPostDto(post, 0);
     } catch (error) {
       if (transactionStarted) {
         await connection.rollback();
@@ -232,7 +236,7 @@ export class PostsService {
       throw new NotFoundException('Post not found');
     }
 
-    return this.toDto(post);
+    return (await toPostDtos(this.pool, [post]))[0];
   }
 
   // The author, the community creator or a community moderator may delete a
@@ -357,9 +361,10 @@ export class PostsService {
       if (!pinned) {
         throw new Error('Pinned post could not be retrieved');
       }
+      const [dto] = await toPostDtos(connection, [pinned]);
 
       await connection.commit();
-      return this.toDto(pinned);
+      return dto;
     } catch (error) {
       if (transactionStarted) {
         await connection.rollback();
@@ -433,15 +438,25 @@ export class PostsService {
     }
     return post;
   }
+}
 
-  private toDto(post: PostRow): PostDto {
-    return toPostDto(post);
-  }
+// Rows of one page rendered with their scores: one grouped vote aggregate
+// over the page's ids (loadVoteScores), never a query per row.
+export async function toPostDtos(
+  executor: Pick<Pool | PoolConnection, 'execute'>,
+  posts: PostRow[],
+): Promise<PostDto[]> {
+  const scores = await loadVoteScores(
+    executor,
+    'post',
+    posts.map((post) => post.id),
+  );
+  return posts.map((post) => toPostDto(post, scores.get(post.id) ?? 0));
 }
 
 // The one post DTO: PostsService and the author feed (GET
 // /users/:username/posts) both render rows selected with POST_COLUMNS.
-export function toPostDto(post: PostRow): PostDto {
+export function toPostDto(post: PostRow, score: number): PostDto {
   return {
     id: post.id,
     title: post.title,
@@ -452,5 +467,6 @@ export function toPostDto(post: PostRow): PostDto {
     created_at: new Date(post.created_at).toISOString(),
     pinned_at: post.pinned_at ? new Date(post.pinned_at).toISOString() : null,
     pinned_by: post.pinned_by ?? null,
+    score,
   };
 }

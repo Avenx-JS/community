@@ -9,5 +9,6 @@ import { VotesController } from './votes.controller';
   imports: [AuthModule, CommunitiesModule, DatabaseModule],
   providers: [VotesService],
   controllers: [VotesController],
+  exports: [VotesService],
 })
 export class VotesModule {}

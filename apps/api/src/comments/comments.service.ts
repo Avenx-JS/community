@@ -21,6 +21,7 @@ import type {
   CommentListSort,
   ListCommentRepliesDto,
 } from './dto/list-comment-replies.dto';
+import { loadVoteScores } from '../votes/vote-scores';
 
 interface CommentRow extends RowDataPacket {
   id: string;
@@ -77,6 +78,8 @@ export interface CommentDto {
   parent_id: string | null;
   content: string;
   created_at: string;
+  // Sum of all vote values; 0 without votes.
+  score: number;
   replies: CommentDto[];
 }
 
@@ -99,6 +102,7 @@ export interface CommentReplyDto {
   created_at: string;
   edited_at: string | null;
   reply_count: number;
+  score: number;
 }
 
 export interface CommentReplyListDto {
@@ -127,6 +131,12 @@ export class CommentsService {
       throw new PayloadTooLargeException(THREAD_TOO_LARGE_MESSAGE);
     }
 
+    // One grouped aggregate for the whole (bounded) thread.
+    const scores = await loadVoteScores(
+      this.pool,
+      'comment',
+      rows.map((row) => row.id),
+    );
     const nodes = new Map<string, CommentDto>();
     for (const row of rows) {
       nodes.set(row.id, {
@@ -136,6 +146,7 @@ export class CommentsService {
         parent_id: row.parent_id,
         content: row.content,
         created_at: new Date(row.created_at).toISOString(),
+        score: scores.get(row.id) ?? 0,
         replies: [],
       });
     }
@@ -224,7 +235,9 @@ export class CommentsService {
     const [countRows] = await this.pool.execute<
       (RowDataPacket & { total: number | string })[]
     >(`SELECT COUNT(*) AS total FROM comments WHERE ${where}`, values);
-    const replyCounts = await this.countReplies(rows.map((row) => row.id));
+    const ids = rows.map((row) => row.id);
+    const replyCounts = await this.countReplies(ids);
+    const scores = await loadVoteScores(this.pool, 'comment', ids);
 
     return {
       items: rows.map((row) => ({
@@ -239,6 +252,7 @@ export class CommentsService {
             ? null
             : new Date(row.edited_at).toISOString(),
         reply_count: replyCounts.get(row.id) ?? 0,
+        score: scores.get(row.id) ?? 0,
       })),
       page,
       limit,
@@ -369,6 +383,8 @@ export class CommentsService {
         parent_id: comment.parent_id,
         content: comment.content,
         created_at: new Date(comment.created_at).toISOString(),
+        // A new comment has no votes yet.
+        score: 0,
         replies: [],
       };
     } catch (error) {

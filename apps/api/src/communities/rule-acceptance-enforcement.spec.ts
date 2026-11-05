@@ -280,6 +280,9 @@ describe('Rule acceptance enforcement', () => {
       if (sql.startsWith('SELECT COUNT(*) AS total FROM posts')) {
         return rows([{ total: db.posts.length }]);
       }
+      if (sql.startsWith('SELECT target_id, SUM(value) AS score')) {
+        return rows([]);
+      }
       return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
     };
 

@@ -30,6 +30,27 @@ export interface VoteResponseDto {
   score: number;
 }
 
+// GET …/vote: the caller's own vote (null when they have none) and the score.
+export interface VoteStateDto {
+  value: -1 | 1 | null;
+  score: number;
+}
+
+// DELETE …/vote: the score after the withdrawal.
+export interface VoteScoreDto {
+  score: number;
+}
+
+type VoteTarget = CreateVoteDto['target_type'];
+type Executor = Pick<Pool | PoolConnection, 'execute'>;
+
+// Served by unique_user_target (user_id, target_type, target_id).
+export const OWN_VOTE_SQL =
+  'SELECT value FROM votes WHERE user_id = ? AND target_type = ? AND target_id = ? LIMIT 1';
+// Served by idx_votes_target (target_type, target_id, value), covering.
+export const SCORE_SQL =
+  'SELECT COALESCE(SUM(value), 0) AS score FROM votes WHERE target_type = ? AND target_id = ?';
+
 @Injectable()
 export class VotesService {
   constructor(
@@ -71,11 +92,10 @@ export class VotesService {
         throw new Error('Saved vote could not be retrieved');
       }
 
-      const [scores] = await connection.execute<
-        (RowDataPacket & { score: number | string })[]
-      >(
-        'SELECT COALESCE(SUM(value), 0) AS score FROM votes WHERE target_type = ? AND target_id = ?',
-        [input.target_type, input.target_id],
+      const score = await this.score(
+        connection,
+        input.target_type,
+        input.target_id,
       );
 
       await connection.commit();
@@ -87,7 +107,7 @@ export class VotesService {
         target_id: vote.target_id,
         value: vote.value,
         created_at: new Date(vote.created_at).toISOString(),
-        score: Number(scores[0].score),
+        score,
       };
     } catch (error) {
       if (transactionStarted) {
@@ -99,23 +119,104 @@ export class VotesService {
     }
   }
 
+  // DELETE /posts/:id/vote, DELETE /comments/:id/vote. Same transaction
+  // shape as vote(): the target is locked first, so the returned score is
+  // consistent with the deletion. Idempotent: without a vote nothing is
+  // deleted and the current score is returned.
+  // Deliberately NOT gated on rule acceptance: withdrawing a vote removes
+  // participation rather than adding it, and gating it would leave a user who
+  // declines new rules with votes they cannot retract.
+  async withdraw(
+    targetType: VoteTarget,
+    targetId: string,
+    userId: string,
+  ): Promise<VoteScoreDto> {
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+      await this.lockTarget(connection, targetType, targetId);
+
+      await connection.execute<ResultSetHeader>(
+        'DELETE FROM votes WHERE user_id = ? AND target_type = ? AND target_id = ?',
+        [userId, targetType, targetId],
+      );
+      const score = await this.score(connection, targetType, targetId);
+
+      await connection.commit();
+      return { score };
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  // GET /posts/:id/vote, GET /comments/:id/vote: the caller's own vote, or
+  // null, and the score. A read: no transaction, no lock, no rule gate. The
+  // own-vote lookup is bound to userId, so it never returns another user's
+  // vote; it is served by unique_user_target, the score by idx_votes_target.
+  async state(
+    targetType: VoteTarget,
+    targetId: string,
+    userId: string,
+  ): Promise<VoteStateDto> {
+    await this.findTarget(this.pool, targetType, targetId, false);
+    const [own] = await this.pool.execute<
+      (RowDataPacket & { value: number })[]
+    >(OWN_VOTE_SQL, [userId, targetType, targetId]);
+    const score = await this.score(this.pool, targetType, targetId);
+    return {
+      value: own[0] ? (Number(own[0].value) as -1 | 1) : null,
+      score,
+    };
+  }
+
+  private async score(
+    executor: Executor,
+    targetType: VoteTarget,
+    targetId: string,
+  ): Promise<number> {
+    const [scores] = await executor.execute<
+      (RowDataPacket & { score: number | string })[]
+    >(SCORE_SQL, [targetType, targetId]);
+    return Number(scores[0]?.score ?? 0);
+  }
+
   // Locks the target row and returns its community. A comment's community is
   // its post's; only the comment row is locked, not the post.
-  private async lockTarget(
+  private lockTarget(
     connection: PoolConnection,
-    targetType: CreateVoteDto['target_type'],
+    targetType: VoteTarget,
     targetId: string,
   ): Promise<string> {
-    const [targets] = await connection.execute<
+    return this.findTarget(connection, targetType, targetId, true);
+  }
+
+  // The one target lookup: 404 for an unknown target or one in a deleted
+  // community, resolving a comment's community through comments → posts.
+  private async findTarget(
+    executor: Executor,
+    targetType: VoteTarget,
+    targetId: string,
+    lock: boolean,
+  ): Promise<string> {
+    const [targets] = await executor.execute<
       (RowDataPacket & { id: string; community_id: string })[]
     >(
       targetType === 'post'
-        ? `SELECT id, community_id FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} FOR UPDATE`
+        ? `SELECT id, community_id FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')}${lock ? ' FOR UPDATE' : ''}`
         : `SELECT comments.id, posts.community_id
            FROM comments
            INNER JOIN posts ON posts.id = comments.post_id
-           WHERE comments.id = ? AND ${activeCommunitySql('posts.community_id')}
-           FOR UPDATE OF comments`,
+           WHERE comments.id = ? AND ${activeCommunitySql('posts.community_id')}${
+             lock ? '\n           FOR UPDATE OF comments' : ''
+           }`,
       [targetId],
     );
 

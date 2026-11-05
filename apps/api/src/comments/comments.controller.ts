@@ -1,10 +1,12 @@
 import {
+  Body,
   Controller,
   Delete,
   Get,
   HttpCode,
   HttpStatus,
   Param,
+  Put,
   Query,
   Req,
   UseGuards,
@@ -25,11 +27,26 @@ import { CommentReplyListResponse } from './comments.responses';
 import { CommentsService, type CommentReplyListDto } from './comments.service';
 import { ListCommentRepliesDto } from './dto/list-comment-replies.dto';
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
+import { CastVoteDto } from '../votes/dto/cast-vote.dto';
+import {
+  VoteResponse,
+  VoteScoreResponse,
+  VoteStateResponse,
+} from '../votes/votes.responses';
+import {
+  VotesService,
+  type VoteResponseDto,
+  type VoteScoreDto,
+  type VoteStateDto,
+} from '../votes/votes.service';
 
 @ApiTags('comments')
 @Controller('comments')
 export class CommentsController {
-  constructor(private readonly commentsService: CommentsService) {}
+  constructor(
+    private readonly commentsService: CommentsService,
+    private readonly votesService: VotesService,
+  ) {}
 
   @Get(':id/replies')
   @ApiOperation({
@@ -52,6 +69,79 @@ export class CommentsController {
     @Query() query: ListCommentRepliesDto,
   ): Promise<CommentReplyListDto> {
     return this.commentsService.findReplies(id, query);
+  }
+
+  @Put(':id/vote')
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiTags('votes')
+  @ApiOperation({
+    summary: 'Cast or change your vote on a comment',
+    description:
+      "Idempotent: the caller's one vote on the comment is set to value; " +
+      'repeating the request leaves one vote. Requires acceptance of the ' +
+      "current rules of the post's community.",
+  })
+  @ApiAuthenticated({
+    forbidden: "The caller has not accepted the community's current rules.",
+  })
+  @ApiRouteParam('id', 'id', 'Comment ID.')
+  @ApiOkResponse({ type: VoteResponse })
+  @ApiErrorResponses({
+    400: 'Invalid comment ID or vote data.',
+    404: 'Comment not found.',
+  })
+  castVote(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Body() body: CastVoteDto,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<VoteResponseDto> {
+    return this.votesService.vote(
+      { target_type: 'comment', target_id: id, value: body.value },
+      request.user.id,
+    );
+  }
+
+  @Delete(':id/vote')
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiTags('votes')
+  @ApiOperation({
+    summary: 'Withdraw your vote on a comment',
+    description:
+      'Returns the score after the withdrawal. Idempotent: without a vote ' +
+      'nothing is removed and the current score is returned. Not gated on ' +
+      'rule acceptance.',
+  })
+  @ApiAuthenticated()
+  @ApiRouteParam('id', 'id', 'Comment ID.')
+  @ApiOkResponse({ type: VoteScoreResponse })
+  @ApiErrorResponses({ 400: 'Invalid comment ID.', 404: 'Comment not found.' })
+  withdrawVote(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<VoteScoreDto> {
+    return this.votesService.withdraw('comment', id, request.user.id);
+  }
+
+  @Get(':id/vote')
+  @UseGuards(AuthGuard)
+  @ApiTags('votes')
+  @ApiOperation({
+    summary: 'Read your vote on a comment',
+    description:
+      "The caller's own vote (null when they have none) and the comment's " +
+      'score.',
+  })
+  @ApiAuthenticated()
+  @ApiRouteParam('id', 'id', 'Comment ID.')
+  @ApiOkResponse({ type: VoteStateResponse })
+  @ApiErrorResponses({ 400: 'Invalid comment ID.', 404: 'Comment not found.' })
+  getVote(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<VoteStateDto> {
+    return this.votesService.state('comment', id, request.user.id);
   }
 
   @Delete(':id')

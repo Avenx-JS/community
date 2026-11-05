@@ -45,6 +45,12 @@ export class PostResponse implements PostDto {
       "and also on a pinned post once that moderator's account is deleted.",
   })
   pinned_by!: string | null;
+
+  @ApiProperty({
+    type: 'integer',
+    description: 'Sum of all vote values on the post; 0 without votes.',
+  })
+  score!: number;
 }
 
 export class PostListResponse implements PostListDto {

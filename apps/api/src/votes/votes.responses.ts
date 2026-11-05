@@ -1,5 +1,33 @@
 import { ApiProperty } from '@nestjs/swagger';
-import type { VoteResponseDto } from './votes.service';
+import type {
+  VoteResponseDto,
+  VoteScoreDto,
+  VoteStateDto,
+} from './votes.service';
+
+export class VoteStateResponse implements VoteStateDto {
+  @ApiProperty({
+    type: 'integer',
+    enum: [-1, 1],
+    nullable: true,
+    description: "The caller's own vote; null when they have not voted.",
+  })
+  value!: -1 | 1 | null;
+
+  @ApiProperty({
+    type: 'integer',
+    description: 'Sum of all vote values on the target.',
+  })
+  score!: number;
+}
+
+export class VoteScoreResponse implements VoteScoreDto {
+  @ApiProperty({
+    type: 'integer',
+    description: 'Sum of all vote values on the target after the withdrawal.',
+  })
+  score!: number;
+}
 
 export class VoteResponse implements VoteResponseDto {
   @ApiProperty()

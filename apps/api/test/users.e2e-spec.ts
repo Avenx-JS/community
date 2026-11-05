@@ -24,6 +24,7 @@ import {
   userCommentsSql,
   userPostsSql,
 } from '../src/users/user-activity.service';
+import { answerVoteScores } from './fakes/vote-scores';
 
 type UserFixture = Record<string, string | Date | null>;
 type Row = Record<string, unknown>;
@@ -185,6 +186,10 @@ describe('User profile endpoints (e2e)', () => {
     // tables account deletion and the content listings touch.
     const execute = (sql: string, values: unknown[]) => {
       queryCalls.push({ sql, values });
+      const scoreAnswer = answerVoteScores(sql, values);
+      if (scoreAnswer) {
+        return Promise.resolve(scoreAnswer);
+      }
       if (sql === LOCK_ACCOUNT_SQL) {
         const target = users.find((user) => user.id === values[0]);
         return Promise.resolve([
@@ -1034,6 +1039,7 @@ describe('User profile endpoints (e2e)', () => {
           'id',
           'pinned_at',
           'pinned_by',
+          'score',
           'title',
           'type',
         ].sort(),
@@ -1053,6 +1059,7 @@ describe('User profile endpoints (e2e)', () => {
             edited_at: at(7).toISOString(),
             post_title: 'Title p-other',
             community_name: 'live',
+            score: 0,
           },
           {
             id: 'comment-a',
@@ -1062,6 +1069,7 @@ describe('User profile endpoints (e2e)', () => {
             edited_at: null,
             post_title: 'By A',
             community_name: 'bravo',
+            score: 0,
           },
         ],
         page: 1,

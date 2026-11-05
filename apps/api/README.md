@@ -1344,7 +1344,8 @@ Same `sort` as the post feed. Items are flat:
   "created_at": "2026-10-22T08:00:00.000Z",
   "edited_at": null,
   "post_title": "The post it is on",
-  "community_name": "general"
+  "community_name": "general",
+  "score": 2
 }
 ```
 
@@ -2375,7 +2376,7 @@ of these behaves as if the community did not exist:
 | `GET /posts/:id`, `DELETE /posts/:id`                                                  | `404` for its posts                        |
 | `GET` and `POST /posts/:postId/comments`                                               | `404` for its posts                        |
 | `DELETE /comments/:id`                                                                 | `404` for comments on its posts            |
-| `POST /votes`                                                                          | `404` for its posts and their comments     |
+| `POST /votes`; `PUT`, `DELETE` and `GET /posts/:id/vote` and `/comments/:id/vote`     | `404` for its posts and their comments     |
 
 Content queries apply the shared `activeCommunitySql` predicate
 (`src/common/community-visibility.ts`); community lookups add
@@ -3084,7 +3085,7 @@ check. A guard would repeat those lookups outside that transaction.
 | `POST /communities/:name/subscribe` | the route parameter                              | on the pool, before the insert                            |
 | `POST /posts`                       | `community_id` in the body                       | inside the post's transaction                             |
 | `POST /posts/:postId/comments`      | the post (top-level comments and replies alike)  | inside the comment's transaction                          |
-| `POST /votes`                       | the post, or for a comment, `comments` → `posts` | inside the vote's transaction, after the target is locked |
+| `POST /votes`, `PUT /posts/:id/vote`, `PUT /comments/:id/vote` | the post, or for a comment, `comments` → `posts` | inside the vote's transaction, after the target is locked |
 
 **Exempt paths, each deliberately:**
 
@@ -3103,6 +3104,10 @@ check. A guard would repeat those lookups outside that transaction.
   wrote under the old ones, and a moderator can still remove content.
 - **`DELETE /communities/:name/subscribe`.** Leaving must never require
   acceptance, or a user who declines the rules is trapped in the community.
+- **`DELETE /posts/:id/vote` and `DELETE /comments/:id/vote`.** Withdrawing a
+  vote removes participation; gating it would leave a user who declines new
+  rules with votes they cannot retract (see [Votes](#votes)). The matching
+  `PUT` routes are gated.
 - **`POST /auth/*`** is outside any community, and **`POST /communities`** has
   no community yet (its creator is exempt once it exists).
 - **`POST`/`DELETE /communities/:name/moderators`** are creator-only, and the
@@ -3281,12 +3286,14 @@ Post responses use this DTO:
   "community_id": "community-id",
   "created_at": "2026-10-22T08:00:00.000Z",
   "pinned_at": null,
-  "pinned_by": null
+  "pinned_by": null,
+  "score": 3
 }
 ```
 
 `pinned_at` and `pinned_by` are present on every post response and are `null`
-on a post that is not pinned.
+on a post that is not pinned. `score` is the sum of the post's votes, `0`
+without votes (see [Scores on content](#scores-on-content)).
 
 ### Pinning posts
 
@@ -3446,7 +3453,8 @@ listing indexes that pair the filter with the sort order are separate work.
 `GET /posts/:postId/comments` is public and returns
 `{ "post_id", "comments" }`. Comments are nested recursively through `replies`;
 each comment contains its `id`, `post_id`, `author_id`, `parent_id`, `content`,
-`created_at`, and `replies`. Roots and sibling replies use chronological order
+`created_at`, `score` (see [Scores on content](#scores-on-content)) and
+`replies`. Roots and sibling replies use chronological order
 (`created_at` ascending, then `id` ascending), making the thread order stable.
 An unknown post returns `404`.
 
@@ -3492,7 +3500,8 @@ Each item is:
   "content": "Text",
   "created_at": "2026-10-22T08:00:00.000Z",
   "edited_at": null,
-  "reply_count": 3
+  "reply_count": 3,
+  "score": 5
 }
 ```
 
@@ -3579,18 +3588,28 @@ post. The schema supports either reading; the lock endpoint will define it.
 
 ## Votes
 
-`POST /votes` requires a bearer token and accepts `target_type` (`post` or
-`comment`), `target_id`, and `value` (`1` or `-1`). The voter ID always comes
-from the authenticated user. Invalid input returns `400`; an unknown target
-returns `404`.
+A vote is addressed by the post or comment it is on, like every other action on
+those resources. Each target has three routes, all requiring a bearer token and
+all tagged `votes` in OpenAPI:
 
-The endpoint creates the user's vote or updates its value when a vote already
-exists for that user and target. The database's `unique_user_target` constraint
-enforces one vote per user and target, including concurrent requests. The
-target is locked during the transaction so the response includes the stored
-vote and the score recalculated from all votes for that target.
+| Route | Does | Success | Rule gate |
+| --- | --- | --- | --- |
+| `PUT /posts/:id/vote`, `PUT /comments/:id/vote` | Sets the caller's vote to `value` | `200`, the vote and its score | Yes |
+| `DELETE /posts/:id/vote`, `DELETE /comments/:id/vote` | Withdraws the caller's vote | `200`, `{ "score" }` | **No** |
+| `GET /posts/:id/vote`, `GET /comments/:id/vote` | Reads the caller's vote | `200`, `{ "value", "score" }` | No |
 
-Success returns HTTP `201`:
+On every route a malformed id is `400`, an unknown post or comment, or one in a
+deleted community, is `404`, and a missing token is `401`. The voter is always
+the authenticated user. Every route goes through `VotesService`, so the target
+lookup, the lock, the rule gate, the upsert and the score are each written
+once. A comment's community, for the rule gate, is its post's
+(comments → posts), as `lockTarget` resolves it.
+
+### Casting a vote: `PUT`
+
+The body is `CastVoteDto`: `{ "value": 1 }` or `{ "value": -1 }`. A missing or
+other value, or any other property (`target_type`, `user_id`, …), returns
+`400`. The response is the existing `VoteResponse`:
 
 ```json
 {
@@ -3603,6 +3622,104 @@ Success returns HTTP `201`:
   "score": 3
 }
 ```
+
+**Why `PUT`.** `unique_user_target (user_id, target_type, target_id)` allows
+at most one vote per user and target, even under concurrent requests, so a
+vote is a singleton sub-resource whose entire state is `value`. `PUT` sets that
+state and is idempotent: repeating a request leaves one row and returns the
+same score, and a different `value` updates the row in place
+(`INSERT … ON DUPLICATE KEY UPDATE`). `POST` would suggest a collection of
+votes. The target row is locked for the transaction, so the returned score
+includes this vote.
+
+Voting is participation: a caller who has not accepted the community's current
+rules gets `403` with the payload described under rule acceptance
+(`reason: "community_rules_not_accepted"`), checked after the `404` for an
+unknown target.
+
+### Withdrawing a vote: `DELETE`
+
+Deletes the caller's vote in the same transaction shape as a vote: the target
+is locked first, so the returned score reflects the deletion. It answers `200`
+with the new score, `{ "score": 2 }`, because that is what the client has to
+redraw and cannot otherwise get; a `204` would cost a second request.
+
+It is **idempotent**: without a vote, nothing is deleted and the current score
+is returned with `200`, not `404`, as `DELETE /communities/:name/subscribe`
+does for a user who is not subscribed.
+
+**Withdrawal is not gated on rule acceptance**, and must not be. Withdrawing a
+vote removes participation rather than adding it. Gating it would trap a user
+who declines new community rules with votes they can no longer retract: the
+same reasoning that keeps `DELETE /posts/:id`, `DELETE /comments/:id` and
+`DELETE /communities/:name/subscribe` ungated. `PUT` is gated and `DELETE` is
+not; this asymmetry is deliberate.
+
+### Reading your vote: `GET`
+
+Returns the caller's own vote and the target's score:
+
+```json
+{ "value": -1, "score": 4 }
+```
+
+`value` is `null` when the caller has not voted: `200` with `null`, not `404`,
+because "have I voted?" has a valid negative answer (the same reasoning as
+`GET /communities/:name/subscription`). The lookup is bound to the
+authenticated user, so it never reveals another account's vote, which is why the
+route needs a token. It is a plain read: no transaction, no lock, no rule gate.
+The own-vote lookup is a `const` read of `unique_user_target`, the score a `ref`
+on `idx_votes_target` read from the index alone.
+
+### Scores on content
+
+Every post and comment response carries `score`, the sum of all vote values,
+`0` for unvoted content: `PostResponse` (`GET /posts`, `GET /posts/:id`,
+`GET /communities/:name/posts`, `GET /users/:username/posts`, pin, create), the
+thread's `CommentResponse`, the flat `CommentReplyResponse` and
+`UserCommentResponse`. Score is public; it belongs on the content, and the
+authenticated `GET …/vote` exists only for the caller's own `value`.
+
+Scores are loaded per page, never per row: after the page is selected, one
+statement aggregates the page's ids
+(`loadVoteScores` in `src/votes/vote-scores.ts`):
+
+```sql
+SELECT target_id, SUM(value) AS score FROM votes
+WHERE target_type = ? AND target_id IN (?, …) GROUP BY target_id
+```
+
+This is the per-page join of the scores onto the listing, done as a second
+statement bounded to at most one page of ids (500 for a thread), rather than a
+join against an unbounded derived table. `idx_votes_target (target_type,
+target_id, value)` serves it as a covering range scan (`Using index`, no
+temporary table, no filesort). A newly created post or comment has score `0`
+and issues no vote query.
+
+**A stored score was considered and not taken.** A denormalised `posts.score`
+(and `comments.score`) counter would need a migration, a backfill and a write
+on every vote, withdrawal and cascade delete. The covering index makes the
+aggregate cheap, so the counter stays the named escalation if measurement shows
+the per-page aggregate is too slow. `vote-routes.mysql.spec.ts` asserts the
+plans so that a regression fails a test rather than going unnoticed.
+
+### `POST /votes` (deprecated)
+
+`POST /votes` with `{ "target_type", "target_id", "value" }` still works
+exactly as before: it answers `201` with the same `VoteResponse` and runs the
+same `VotesService.vote` path, so it and `PUT /posts/:id/vote` produce the
+same row and score. It is published API, so it is marked `deprecated` in the
+OpenAPI document only, and will be removed in a future change. New clients
+should use the per-target routes, which can be documented, authorised and
+rate-limited per resource.
+
+### Rate limiting
+
+The global API buckets apply: `PUT` and `DELETE` count against the write
+buckets (`api:write:ip`, 60 per IP, and `api:write:account`, 120 per account
+per minute), `GET` against the read buckets. Voting is the highest-frequency
+legitimate write in the product. If abuse appears, a dedicated vote bucket is
+the candidate, added as a documented per-route override, never an exemption.
 
 ## Notifications
 

@@ -77,6 +77,12 @@ export class UserCommentResponse implements UserCommentDto {
 
   @ApiProperty({ description: 'Name of the community the post is in.' })
   community_name!: string;
+
+  @ApiProperty({
+    type: 'integer',
+    description: 'Sum of all vote values on the comment; 0 without votes.',
+  })
+  score!: number;
 }
 
 export class UserCommentListResponse implements Page<UserCommentDto> {

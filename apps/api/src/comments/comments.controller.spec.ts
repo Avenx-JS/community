@@ -1,3 +1,4 @@
+import { VotesService } from '../votes/votes.service';
 import { Test, TestingModule } from '@nestjs/testing';
 import { AuthService } from '../auth/auth.service';
 import { CommentsController } from './comments.controller';
@@ -12,6 +13,7 @@ describe('CommentsController', () => {
       providers: [
         { provide: CommentsService, useValue: {} },
         { provide: AuthService, useValue: {} },
+        { provide: VotesService, useValue: {} },
       ],
     }).compile();
 

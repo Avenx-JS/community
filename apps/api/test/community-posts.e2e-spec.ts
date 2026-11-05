@@ -9,6 +9,7 @@ import { AuthRateLimitService } from '../src/auth/auth-rate-limit.service';
 import { MYSQL_POOL } from '../src/auth/auth.service';
 import { ApiRateLimitInterceptor } from '../src/common/api-rate-limit.interceptor';
 import { LISTED_COMMUNITY_ID_SQL } from '../src/communities/communities.service';
+import { answerVoteScores } from './fakes/vote-scores';
 
 interface TestCommunity {
   id: string;
@@ -103,6 +104,10 @@ describe('GET /communities/:name/posts (e2e)', () => {
       );
     const execute = (sql: string, values: unknown[]) => {
       queryCalls.push({ sql, values });
+      const scoreAnswer = answerVoteScores(sql, values);
+      if (scoreAnswer) {
+        return Promise.resolve(scoreAnswer);
+      }
       if (sql === LISTED_COMMUNITY_ID_SQL) {
         const community = communities.find(
           (entry) =>
@@ -187,6 +192,7 @@ describe('GET /communities/:name/posts (e2e)', () => {
         'id',
         'pinned_at',
         'pinned_by',
+        'score',
         'title',
         'type',
       ].sort(),

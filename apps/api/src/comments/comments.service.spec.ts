@@ -276,6 +276,7 @@ describe('CommentsService.create notifications', () => {
       parent_id: null,
       content: 'Mine ripened early.',
       created_at: '2026-10-30T08:00:00.000Z',
+      score: 0,
       replies: [],
     });
     expect(notifications.record).toHaveBeenCalledTimes(1);
@@ -864,6 +865,7 @@ describe('CommentsService paginated listings', () => {
           created_at: '2026-10-22T08:00:00.000Z',
           edited_at: null,
           reply_count: 3,
+          score: 0,
         },
         expect.objectContaining({ id: 'leaf', reply_count: 0 }),
       ]);
@@ -891,7 +893,8 @@ describe('CommentsService paginated listings', () => {
         expect(grouping()).toHaveLength(1);
         expect(grouping()[0].values).toHaveLength(size);
       }
-      expect(counts).toEqual([4, 4, 4]);
+      // Page, total, grouped reply count, grouped score: whatever the size.
+      expect(counts).toEqual([5, 5, 5]);
     });
 
     it('answers a comment without replies with an empty page, skipping the grouped count', async () => {

@@ -23,6 +23,7 @@ import {
   type RulesStore,
 } from './fakes/community-rules-store';
 import { CommunityRuleAcceptanceService } from '../src/communities/community-rule-acceptance.service';
+import { answerVoteScores, type FakeVote } from './fakes/vote-scores';
 
 interface TestNotification {
   id: string;
@@ -59,6 +60,7 @@ interface TestModerationEntry {
 describe('Post endpoints (e2e)', () => {
   let app: INestApplication<App>;
   let posts: TestPost[];
+  let votes: FakeVote[];
   let queryCalls: Array<{ sql: string; values: unknown[] }>;
   let notifications: TestNotification[];
   let failNotificationWrite: boolean;
@@ -121,6 +123,7 @@ describe('Post endpoints (e2e)', () => {
         pinned_by: null,
       },
     ];
+    votes = [];
     queryCalls = [];
     notifications = [];
     failNotificationWrite = false;
@@ -154,6 +157,10 @@ describe('Post endpoints (e2e)', () => {
     const pool = {
       execute: async (sql: string, values: unknown[]) => {
         queryCalls.push({ sql, values });
+        const scoreAnswer = answerVoteScores(sql, values, votes);
+        if (scoreAnswer) {
+          return scoreAnswer;
+        }
         const ruleAnswer = rules.handle(sql, values);
         if (ruleAnswer) {
           return ruleAnswer;
@@ -592,6 +599,7 @@ describe('Post endpoints (e2e)', () => {
           'id',
           'pinned_at',
           'pinned_by',
+          'score',
           'title',
           'type',
         ].sort(),
@@ -1094,6 +1102,7 @@ describe('Post endpoints (e2e)', () => {
           created_at: '2026-10-22T08:00:00.000Z',
           pinned_at: '2026-11-01T08:01:00.000Z',
           pinned_by: userId,
+          score: 0,
         });
         expect(JSON.stringify(response.body)).not.toMatch(
           /email|password_hash/,
@@ -1299,6 +1308,70 @@ describe('Post endpoints (e2e)', () => {
         );
       }
       expect(pages).toEqual(expected);
+    });
+  });
+
+  describe('scores', () => {
+    const scoreQueries = () =>
+      queryCalls.filter(({ sql }) =>
+        sql.startsWith('SELECT target_id, SUM(value) AS score FROM votes'),
+      );
+
+    beforeEach(() => {
+      votes.push(
+        { user_id: 'u1', target_type: 'post', target_id: 'post-1', value: 1 },
+        { user_id: 'u2', target_type: 'post', target_id: 'post-1', value: 1 },
+        { user_id: 'u3', target_type: 'post', target_id: 'post-2', value: -1 },
+        // Same id, other target type: never counted for the post.
+        {
+          user_id: 'u1',
+          target_type: 'comment',
+          target_id: 'post-3',
+          value: 1,
+        },
+      );
+    });
+
+    it('puts score on every listed post, 0 when unvoted, from one grouped query per page', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/posts')
+        .expect(200);
+      const body = response.body as { items: { id: string; score: number }[] };
+      expect(
+        Object.fromEntries(body.items.map((post) => [post.id, post.score])),
+      ).toEqual({ 'post-1': 2, 'post-2': -1, 'post-3': 0 });
+      expect(scoreQueries()).toHaveLength(1);
+      expect(scoreQueries()[0].values).toEqual([
+        'post',
+        ...body.items.map((post) => post.id),
+      ]);
+    });
+
+    it('puts score on a single post and on a pinned post', async () => {
+      await request(app.getHttpServer())
+        .get('/posts/post-1')
+        .expect(200)
+        .expect(({ body }) => expect(body).toMatchObject({ score: 2 }));
+      const pinned = await request(app.getHttpServer())
+        .post('/posts/post-2/pin')
+        .set('Authorization', 'Bearer creator-token')
+        .expect(200);
+      expect(pinned.body).toMatchObject({ id: 'post-2', score: -1 });
+    });
+
+    it('answers a new post with score 0 without querying votes', async () => {
+      const created = await request(app.getHttpServer())
+        .post('/posts')
+        .set('Authorization', 'Bearer valid-token')
+        .send({
+          title: 'Fresh',
+          content: 'Body',
+          type: 'text',
+          community_id: 'community-1',
+        })
+        .expect(201);
+      expect(created.body).toMatchObject({ score: 0 });
+      expect(scoreQueries()).toHaveLength(0);
     });
   });
 });

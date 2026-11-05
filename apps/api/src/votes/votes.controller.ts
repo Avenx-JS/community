@@ -14,9 +14,13 @@ export class VotesController {
   @Post()
   @UseGuards(AuthGuard)
   @ApiOperation({
-    summary: 'Cast or change a vote',
+    summary: 'Cast or change a vote (deprecated)',
     description:
-      "Creates the user's vote on a post or comment, or updates its value.",
+      "Creates the user's vote on a post or comment, or updates its value. " +
+      'Deprecated: use PUT /posts/{id}/vote or PUT /comments/{id}/vote, ' +
+      'which behave identically. This route still works and will be ' +
+      'removed in a future change.',
+    deprecated: true,
   })
   @ApiAuthenticated()
   @ApiCreatedResponse({ type: VoteResponse })

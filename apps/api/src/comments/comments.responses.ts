@@ -27,6 +27,12 @@ export class CommentResponse implements CommentDto {
   @ApiProperty({ format: 'date-time' })
   created_at!: string;
 
+  @ApiProperty({
+    type: 'integer',
+    description: 'Sum of all vote values on the comment; 0 without votes.',
+  })
+  score!: number;
+
   @ApiProperty({ type: () => [CommentResponse] })
   replies!: CommentResponse[];
 }
@@ -78,6 +84,12 @@ export class CommentReplyResponse implements CommentReplyDto {
       'GET /comments/{id}/replies.',
   })
   reply_count!: number;
+
+  @ApiProperty({
+    type: 'integer',
+    description: 'Sum of all vote values on the comment; 0 without votes.',
+  })
+  score!: number;
 }
 
 export class CommentReplyListResponse implements CommentReplyListDto {

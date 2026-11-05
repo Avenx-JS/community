@@ -2,9 +2,10 @@ import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { Pool, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { listedCommunitySql } from '../common/community-visibility';
+import { loadVoteScores } from '../votes/vote-scores';
 import {
   POST_COLUMNS,
-  toPostDto,
+  toPostDtos,
   type PostDto,
   type PostRow,
 } from '../posts/posts.service';
@@ -116,6 +117,8 @@ export interface UserCommentDto {
   edited_at: string | null;
   post_title: string;
   community_name: string;
+  // Sum of all vote values on the comment; 0 without votes.
+  score: number;
 }
 
 export interface UserCommunityDto {
@@ -166,7 +169,12 @@ export class UserActivityService {
       offset,
     ]);
     const total = await this.count(USER_POSTS_COUNT_SQL, [userId]);
-    return { items: rows.map(toPostDto), page, limit, total };
+    return {
+      items: await toPostDtos(this.pool, rows),
+      page,
+      limit,
+      total,
+    };
   }
 
   async listComments(
@@ -181,6 +189,11 @@ export class UserActivityService {
       [userId, limit, offset],
     );
     const total = await this.count(USER_COMMENTS_COUNT_SQL, [userId]);
+    const scores = await loadVoteScores(
+      this.pool,
+      'comment',
+      rows.map((row) => row.id),
+    );
     return {
       items: rows.map((row) => ({
         id: row.id,
@@ -190,6 +203,7 @@ export class UserActivityService {
         edited_at: row.edited_at ? new Date(row.edited_at).toISOString() : null,
         post_title: row.post_title,
         community_name: row.community_name,
+        score: scores.get(row.id) ?? 0,
       })),
       page,
       limit,

@@ -131,6 +131,7 @@ describe('UserActivityService', () => {
           created_at: '2026-10-22T08:00:00.000Z',
           pinned_at: null,
           pinned_by: null,
+          score: 0,
         },
       ]);
     });
@@ -202,6 +203,7 @@ describe('UserActivityService', () => {
             edited_at: '2026-10-23T08:00:00.000Z',
             post_title: 'Hello',
             community_name: 'general',
+            score: 0,
           },
           {
             id: 'm2',
@@ -211,6 +213,7 @@ describe('UserActivityService', () => {
             edited_at: null,
             post_title: 'Hello',
             community_name: 'general',
+            score: 0,
           },
         ],
         page: 2,

@@ -276,6 +276,7 @@ describe('PostsService.create notifications', () => {
       ...createdPost,
       id: postId,
       created_at: '2026-10-30T08:00:00.000Z',
+      score: 0,
     });
     expect(queries[1].values[0]).toBe(postId);
     const count = queries.find((query) =>
@@ -820,6 +821,9 @@ function createPinStore() {
             : [],
           [],
         ];
+      }
+      if (sql.startsWith('SELECT target_id, SUM(value) AS score')) {
+        return [[], []];
       }
       throw new Error(`Unexpected SQL: ${sql}`);
     };

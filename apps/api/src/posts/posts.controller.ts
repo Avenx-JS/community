@@ -7,6 +7,7 @@ import {
   HttpStatus,
   Param,
   Post,
+  Put,
   Query,
   Req,
   UseGuards,
@@ -37,6 +38,13 @@ import { CreatePostDto } from './dto/create-post.dto';
 import { ListPostsDto } from './dto/list-posts.dto';
 import { PostsService } from './posts.service';
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
+import { CastVoteDto } from '../votes/dto/cast-vote.dto';
+import {
+  VoteResponse,
+  VoteScoreResponse,
+  VoteStateResponse,
+} from '../votes/votes.responses';
+import { VotesService } from '../votes/votes.service';
 
 @ApiTags('posts')
 @Controller('posts')
@@ -44,6 +52,7 @@ export class PostsController {
   constructor(
     private readonly postsService: PostsService,
     private readonly commentsService: CommentsService,
+    private readonly votesService: VotesService,
   ) {}
 
   @Get()
@@ -152,6 +161,78 @@ export class PostsController {
     @Req() request: AuthenticatedRequest,
   ): Promise<void> {
     return this.postsService.unpin(id, request.user.id);
+  }
+
+  @Put(':id/vote')
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiTags('votes')
+  @ApiOperation({
+    summary: 'Cast or change your vote on a post',
+    description:
+      "Idempotent: the caller's one vote on the post is set to value; " +
+      'repeating the request leaves one vote. Requires acceptance of the ' +
+      "community's current rules.",
+  })
+  @ApiAuthenticated({
+    forbidden: "The caller has not accepted the community's current rules.",
+  })
+  @ApiRouteParam('id', 'id', 'Post ID.')
+  @ApiOkResponse({ type: VoteResponse })
+  @ApiErrorResponses({
+    400: 'Invalid post ID or vote data.',
+    404: 'Post not found.',
+  })
+  castVote(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Body() body: CastVoteDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.votesService.vote(
+      { target_type: 'post', target_id: id, value: body.value },
+      request.user.id,
+    );
+  }
+
+  @Delete(':id/vote')
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiTags('votes')
+  @ApiOperation({
+    summary: 'Withdraw your vote on a post',
+    description:
+      'Returns the score after the withdrawal. Idempotent: without a vote ' +
+      'nothing is removed and the current score is returned. Not gated on ' +
+      'rule acceptance.',
+  })
+  @ApiAuthenticated()
+  @ApiRouteParam('id', 'id', 'Post ID.')
+  @ApiOkResponse({ type: VoteScoreResponse })
+  @ApiErrorResponses({ 400: 'Invalid post ID.', 404: 'Post not found.' })
+  withdrawVote(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.votesService.withdraw('post', id, request.user.id);
+  }
+
+  @Get(':id/vote')
+  @UseGuards(AuthGuard)
+  @ApiTags('votes')
+  @ApiOperation({
+    summary: 'Read your vote on a post',
+    description:
+      "The caller's own vote (null when they have none) and the post's score.",
+  })
+  @ApiAuthenticated()
+  @ApiRouteParam('id', 'id', 'Post ID.')
+  @ApiOkResponse({ type: VoteStateResponse })
+  @ApiErrorResponses({ 400: 'Invalid post ID.', 404: 'Post not found.' })
+  getVote(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.votesService.state('post', id, request.user.id);
   }
 
   @Get(':postId/comments')

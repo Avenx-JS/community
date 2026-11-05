@@ -19,6 +19,7 @@ import {
   createRulesStore,
   type RulesStore,
 } from './fakes/community-rules-store';
+import { answerVoteScores, type FakeVote } from './fakes/vote-scores';
 
 interface TestNotification {
   id: string;
@@ -51,6 +52,12 @@ interface ListedComment {
   [key: string]: unknown;
 }
 
+interface CommentNode {
+  id: string;
+  score: number;
+  replies: CommentNode[];
+}
+
 interface CommentPage {
   items: ListedComment[];
   page: number;
@@ -62,6 +69,7 @@ interface CommentPage {
 describe('Comment endpoints (e2e)', () => {
   let app: INestApplication<App>;
   let comments: TestComment[];
+  let votes: FakeVote[];
   let queryCalls: Array<{ sql: string; values: unknown[] }>;
   let notifications: TestNotification[];
   let failNotificationWrite: boolean;
@@ -123,6 +131,7 @@ describe('Comment endpoints (e2e)', () => {
         created_at: new Date('2026-10-22T08:00:00.000Z'),
       },
     ];
+    votes = [];
     queryCalls = [];
     notifications = [];
     failNotificationWrite = false;
@@ -160,6 +169,10 @@ describe('Comment endpoints (e2e)', () => {
     const pool = {
       execute: async (sql: string, values: unknown[]) => {
         queryCalls.push({ sql, values });
+        const scoreAnswer = answerVoteScores(sql, values, votes);
+        if (scoreAnswer) {
+          return scoreAnswer;
+        }
         const ruleAnswer = rules.handle(sql, values);
         if (ruleAnswer) {
           return ruleAnswer;
@@ -531,6 +544,7 @@ describe('Comment endpoints (e2e)', () => {
         'parent_id',
         'post_id',
         'replies',
+        'score',
       ].sort(),
     );
     expect(topLevel.body).not.toHaveProperty('email');
@@ -1013,6 +1027,7 @@ describe('Comment endpoints (e2e)', () => {
             created_at: '2026-10-22T08:01:00.000Z',
             edited_at: null,
             reply_count: 1,
+            score: 0,
           },
         ],
         page: 1,
@@ -1227,6 +1242,85 @@ describe('Comment endpoints (e2e)', () => {
           expect([...seen].sort()).toEqual([...expected].sort());
         },
       );
+    });
+  });
+
+  describe('scores', () => {
+    const scoreQueries = () =>
+      queryCalls.filter(({ sql }) =>
+        sql.startsWith('SELECT target_id, SUM(value) AS score FROM votes'),
+      );
+
+    beforeEach(() => {
+      votes.push(
+        {
+          user_id: 'u1',
+          target_type: 'comment',
+          target_id: 'root-1',
+          value: 1,
+        },
+        {
+          user_id: 'u2',
+          target_type: 'comment',
+          target_id: 'root-1',
+          value: 1,
+        },
+        {
+          user_id: 'u1',
+          target_type: 'comment',
+          target_id: 'reply-1',
+          value: -1,
+        },
+        // Same id, other target type: never counted for the comment.
+        { user_id: 'u1', target_type: 'post', target_id: 'root-2', value: 1 },
+      );
+    });
+
+    it('scores every node of the tree, 0 when unvoted, from one grouped query', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/posts/post-1/comments')
+        .expect(200);
+      const [root1, root2] = (response.body as { comments: CommentNode[] })
+        .comments;
+      expect(root1).toMatchObject({ id: 'root-1', score: 2 });
+      expect(root1.replies[0]).toMatchObject({ id: 'reply-1', score: -1 });
+      expect(root1.replies[0].replies[0]).toMatchObject({
+        id: 'nested-reply',
+        score: 0,
+      });
+      expect(root2).toMatchObject({ id: 'root-2', score: 0 });
+      expect(scoreQueries()).toHaveLength(1);
+      expect(scoreQueries()[0].values).toHaveLength(5);
+    });
+
+    it('scores the flat listings with one grouped query per page', async () => {
+      const roots = await request(app.getHttpServer())
+        .get('/posts/post-1/comments/top-level')
+        .expect(200);
+      expect(
+        (roots.body as CommentPage).items.map((item) => [item.id, item.score]),
+      ).toEqual([
+        ['root-1', 2],
+        ['root-2', 0],
+      ]);
+      const replies = await request(app.getHttpServer())
+        .get('/comments/root-1/replies')
+        .expect(200);
+      expect((replies.body as CommentPage).items[0]).toMatchObject({
+        id: 'reply-1',
+        score: -1,
+      });
+      expect(scoreQueries()).toHaveLength(2);
+    });
+
+    it('answers a new comment with score 0 without querying votes', async () => {
+      const created = await request(app.getHttpServer())
+        .post('/posts/post-1/comments')
+        .set('Authorization', 'Bearer valid-token')
+        .send({ content: 'Fresh' })
+        .expect(201);
+      expect(created.body).toMatchObject({ score: 0, replies: [] });
+      expect(scoreQueries()).toHaveLength(0);
     });
   });
 });
