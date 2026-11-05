@@ -835,3 +835,43 @@ describe('CommunitiesService', () => {
     });
   });
 });
+
+describe('CommunitiesService.resolveListedId', () => {
+  let queries: Array<{ sql: string; values: unknown[] }>;
+  let rows: unknown[];
+  const service = () =>
+    new CommunitiesService(
+      {
+        execute: (sql: string, values: unknown[]) => {
+          queries.push({ sql, values });
+          return Promise.resolve([rows, []]);
+        },
+      } as never,
+      {} as CommunityRuleAcceptanceService,
+      {} as CommunityModerationLogService,
+    );
+
+  beforeEach(() => {
+    queries = [];
+    rows = [{ id: 'community-1' }];
+  });
+
+  it('binds the name and requires the community to be neither deleted nor suspended', async () => {
+    await expect(service().resolveListedId('general')).resolves.toBe(
+      'community-1',
+    );
+    expect(queries).toEqual([
+      {
+        sql: 'SELECT id FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1',
+        values: ['general'],
+      },
+    ]);
+  });
+
+  it('answers 404 for an unknown, deleted or suspended community', async () => {
+    rows = [];
+    await expect(service().resolveListedId('gone')).rejects.toThrow(
+      new NotFoundException('Community not found'),
+    );
+  });
+});

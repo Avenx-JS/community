@@ -39,6 +39,9 @@ export interface PostRow extends RowDataPacket {
 }
 
 // Every column of a post DTO, in DTO order.
+// A post removed by moderation (removed_at, migration 017) is not listed.
+export const VISIBLE_POST_SQL = 'posts.removed_at IS NULL';
+
 export const POST_COLUMNS =
   'id, title, content, type, author_id, community_id, created_at, pinned_at, pinned_by';
 
@@ -105,10 +108,13 @@ export class PostsService {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
     const offset = (page - 1) * limit;
-    // Posts in a deleted community are never listed.
+    // Posts in a deleted community, and posts removed by moderation, are
+    // never listed. This is the one post listing path: GET /posts, its
+    // community_id filter and GET /communities/:name/posts all run it, so
+    // they cannot drift apart.
     const where = query.community_id
-      ? ` WHERE community_id = ? AND ${activeCommunitySql('posts.community_id')}`
-      : ` WHERE ${activeCommunitySql('posts.community_id')}`;
+      ? ` WHERE community_id = ? AND ${activeCommunitySql('posts.community_id')} AND ${VISIBLE_POST_SQL}`
+      : ` WHERE ${activeCommunitySql('posts.community_id')} AND ${VISIBLE_POST_SQL}`;
     const values: (string | number)[] = query.community_id
       ? [query.community_id]
       : [];

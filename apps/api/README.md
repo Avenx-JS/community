@@ -2123,6 +2123,51 @@ also subscribed. The routes report membership only and say nothing about
 notification delivery. Like every other route except `GET /health`, both count
 against the API read rate limits.
 
+### Community posts
+
+#### `GET /communities/:name/posts`
+
+Public, no bearer token. Lists one community's posts addressed by its public
+name, like every other community sub-resource, so a client holding the name
+needs one request instead of resolving the id first. Accepts `page` (`1` to
+`10000`, default `1`), `limit` (`1` to `100`, default `20`) and `sort=new`
+(the only value), and returns the same `{ "items", "page", "limit", "total",
+"sort" }` envelope as `GET /posts`, with the same post type
+(`PostListResponse`, `PostResponse`).
+
+**Equivalent to `GET /posts?community_id=<its id>`, by construction.** The
+route resolves the name to an id (`CommunitiesService.resolveListedId`) and
+delegates to the one post listing path, `PostsService.findAll`, with that id.
+There is no second copy of the query, so the two cannot drift apart: the same
+items, order, `total` and fields, including the community's pinned posts
+first (`ORDER BY (pinned_at IS NULL), pinned_at DESC, created_at DESC, id
+DESC`; see [Pinning posts](#pinning-posts)). A change to the listing belongs in
+`findAll`, never in the route. This is the form clients should prefer;
+`GET /posts?community_id=` stays valid and is not deprecated.
+
+| Status | When |
+| --- | --- |
+| `200` | The community exists; an empty community returns `items: []` and `total: 0` |
+| `400` | A name `SafeRouteParamPipe('communityName')` rejects, an out-of-range `page` or `limit`, a `sort` other than `new`, or any unknown query property, including `community_id` (it would contradict the path) |
+| `404` | Unknown, soft-deleted or suspended community |
+
+**Exclusions.** Posts removed by moderation (`removed_at`) are omitted, as on
+every post listing. A deleted or suspended community is `404`, not an empty
+list, which would imply the community exists and is merely quiet; the name
+lookup checks both `deleted_at` and `suspended_at`, and no listing query runs.
+`GET /posts?community_id=` does not yet apply suspension (it is not enforced on
+the other reads), which is the one case where the two routes differ.
+
+**Plan.** The community filter is a `ref` lookup on
+`idx_posts_community_created`. Because pins float first, the order needs a
+filesort over that community's posts, exactly as on the filtered `GET /posts`;
+`community-posts.mysql.spec.ts` records the measured plan, and the two-query
+alternative is described under [Pins in listings](#pins-in-listings).
+
+**Rate limits.** The global read buckets apply. This is expected to be the
+hottest read in the product, so it is the first candidate for the explicit,
+documented rate-limit override this README prescribes, never an exemption.
+
 ### Community suspension
 
 **Nothing enforces suspension yet.** Migration `025_add_community_suspension`
@@ -3200,7 +3245,15 @@ credentials that may create a scratch database.
 sort order). Posts are ordered by `created_at` descending, then `id` descending
 to keep pagination stable. **With `community_id`, that community's pinned
 posts come first** (see [Pinning posts](#pinning-posts)); the unfiltered
-listing never floats pins. An empty page is returned with HTTP `200`.
+listing never floats pins. Posts removed by moderation (`removed_at` set,
+migration 017) and posts in a deleted community are never listed. An empty
+page is returned with HTTP `200`.
+
+`GET /posts?community_id=…` is kept and is not deprecated: it is published
+API, still serves clients that hold an id, and its unfiltered form is the only
+listing across all communities. To list one community, clients should prefer
+the name-based [`GET /communities/:name/posts`](#get-communitiesnameposts),
+which returns the same result.
 
 `POST /posts` requires a bearer token and accepts `title` (1-300 characters),
 `type` (`text`, `link`, or `media`), non-empty `content` (up to 16,383

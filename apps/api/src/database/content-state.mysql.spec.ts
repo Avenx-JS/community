@@ -13,7 +13,13 @@ import { CommentsService } from '../comments/comments.service';
 import type { CommunityModerationLogService } from '../communities/community-moderation-log.service';
 import type { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import type { NotificationsService } from '../notifications/notifications.service';
-import { PostsService } from '../posts/posts.service';
+import { activeCommunitySql } from '../common/community-visibility';
+import {
+  POST_COLUMNS,
+  PostsService,
+  toPostDto,
+  type PostRow,
+} from '../posts/posts.service';
 import {
   loadMigrations,
   runMigrations,
@@ -193,8 +199,35 @@ integration('post and comment content state (MySQL)', () => {
       {} as NotificationsService,
       {} as CommunityRuleAcceptanceService,
     );
-    responsesBefore = await responses();
+    // Before 017 the listing cannot run as the service now issues it: its
+    // removed-post predicate names posts.removed_at, which 017 adds. The
+    // baseline therefore runs the listing as it was before that predicate
+    // (same columns, filter and order, rendered by the same DTO mapper); the
+    // detail and thread reads do not name the new columns and run as is.
+    responsesBefore = {
+      list: await legacyListing(),
+      post: await posts.findOne('p1'),
+      thread: await comments.findThread('p1'),
+    };
   }, 120_000);
+
+  const legacyListing = async () => {
+    const where = ` WHERE ${activeCommunitySql('posts.community_id')}`;
+    const [items] = await pool.execute<PostRow[]>(
+      `SELECT ${POST_COLUMNS} FROM posts${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+      [100, 0],
+    );
+    const [counts] = await pool.execute<(RowDataPacket & { total: number })[]>(
+      `SELECT COUNT(*) AS total FROM posts${where}`,
+    );
+    return {
+      items: items.map(toPostDto),
+      page: 1,
+      limit: 100,
+      total: counts[0].total,
+      sort: 'new',
+    };
+  };
 
   afterAll(async () => {
     await pool?.end();

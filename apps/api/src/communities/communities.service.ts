@@ -157,6 +157,10 @@ export interface CommunityMemberListDto {
   total: number;
 }
 
+// Both community predicates: soft deletion (022) and suspension (025).
+export const LISTED_COMMUNITY_ID_SQL =
+  'SELECT id FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1';
+
 @Injectable()
 export class CommunitiesService {
   constructor(
@@ -225,6 +229,21 @@ export class CommunitiesService {
     }
 
     return this.toDto(community);
+  }
+
+  // The id behind a public community name, for routes that address a
+  // community by name and then delegate to an id-keyed service (GET
+  // /communities/:name/posts). A deleted or suspended community is a 404,
+  // never an empty listing that would imply it exists and is merely quiet.
+  async resolveListedId(name: string): Promise<string> {
+    const [communities] = await this.pool.execute<
+      (RowDataPacket & { id: string })[]
+    >(LISTED_COMMUNITY_ID_SQL, [name]);
+    const community = communities[0];
+    if (!community) {
+      throw new NotFoundException('Community not found');
+    }
+    return community.id;
   }
 
   async findOne(name: string): Promise<CommunityDto> {

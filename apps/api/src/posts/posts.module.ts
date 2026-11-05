@@ -5,6 +5,7 @@ import { CommentsModule } from '../comments/comments.module';
 import { DatabaseModule } from '../database/database.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PostsService } from './posts.service';
+import { CommunityPostsController } from './community-posts.controller';
 import { PostsController } from './posts.controller';
 
 @Module({
@@ -16,6 +17,6 @@ import { PostsController } from './posts.controller';
     NotificationsModule,
   ],
   providers: [PostsService],
-  controllers: [PostsController],
+  controllers: [PostsController, CommunityPostsController],
 })
 export class PostsModule {}
