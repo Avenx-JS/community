@@ -40,6 +40,23 @@ interface TestComment {
   parent_id: string | null;
   content: string;
   created_at: Date;
+  removed_at?: Date | null;
+}
+
+interface ListedComment {
+  id: string;
+  post_id: string;
+  parent_id: string | null;
+  reply_count: number;
+  [key: string]: unknown;
+}
+
+interface CommentPage {
+  items: ListedComment[];
+  page: number;
+  limit: number;
+  total: number;
+  sort: string;
 }
 
 describe('Comment endpoints (e2e)', () => {
@@ -125,12 +142,79 @@ describe('Comment endpoints (e2e)', () => {
       'community-2': { name: 'other', creator_id: 'creator-2' },
     });
 
+    // The flat listings: WHERE parent_id = ? (replies) or WHERE post_id = ?
+    // AND parent_id IS NULL (top level), honouring the removal filter only
+    // when the statement carries it.
+    const listedComments = (sql: string, key: string) =>
+      comments.filter(
+        (comment) =>
+          (sql.includes('WHERE parent_id = ?')
+            ? comment.parent_id === key
+            : comment.post_id === key && comment.parent_id === null) &&
+          !(sql.includes('removed_at IS NULL') && comment.removed_at),
+      );
+    const chronological = (left: TestComment, right: TestComment) =>
+      left.created_at.getTime() - right.created_at.getTime() ||
+      (left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+
     const pool = {
       execute: async (sql: string, values: unknown[]) => {
         queryCalls.push({ sql, values });
         const ruleAnswer = rules.handle(sql, values);
         if (ruleAnswer) {
           return ruleAnswer;
+        }
+        if (sql.startsWith('SELECT comments.id FROM comments')) {
+          const [id] = values as [string];
+          const comment = comments.find((entry) => entry.id === id);
+          return [
+            comment && visiblePost(comment.post_id, sql) ? [{ id }] : [],
+            [],
+          ];
+        }
+        if (
+          sql.startsWith(
+            'SELECT id, post_id, parent_id, author_id, content, created_at, edited_at FROM comments',
+          )
+        ) {
+          const [key, limit, offset] = values as [string, number, number];
+          const sorted = listedComments(sql, key).sort(chronological);
+          if (sql.includes('ORDER BY created_at DESC, id DESC')) {
+            sorted.reverse();
+          }
+          return [
+            sorted
+              .slice(offset, offset + limit)
+              .map((comment) => ({ ...comment, edited_at: null })),
+            [],
+          ];
+        }
+        if (sql.startsWith('SELECT COUNT(*) AS total FROM comments')) {
+          const [key] = values as [string];
+          return [[{ total: listedComments(sql, key).length }], []];
+        }
+        if (sql.startsWith('SELECT parent_id, COUNT(*) AS reply_count')) {
+          const ids = values as string[];
+          const counts = new Map<string, number>();
+          for (const comment of comments) {
+            if (
+              comment.parent_id !== null &&
+              ids.includes(comment.parent_id) &&
+              !(sql.includes('removed_at IS NULL') && comment.removed_at)
+            ) {
+              counts.set(
+                comment.parent_id,
+                (counts.get(comment.parent_id) ?? 0) + 1,
+              );
+            }
+          }
+          return [
+            [...counts].map(([parent_id, reply_count]) => ({
+              parent_id,
+              reply_count,
+            })),
+            [],
+          ];
         }
         if (sql.startsWith('SELECT id, author_id, community_id, title')) {
           const [postId] = values as [string];
@@ -879,6 +963,270 @@ describe('Comment endpoints (e2e)', () => {
 
     it('leaves threads in other communities readable', async () => {
       await send('get', '/posts/post-2/comments').expect(200);
+    });
+  });
+
+  describe('paginated listings', () => {
+    const get = (path: string) => request(app.getHttpServer()).get(path);
+    const pageOf = async (path: string) =>
+      (await get(path).expect(200)).body as CommentPage;
+    const ids = (page: CommentPage) => page.items.map((item) => item.id);
+
+    // Every comment reachable from the post: page the roots, then page each
+    // comment's replies, depth first, limit 100.
+    async function crawl(postId: string, sort = 'oldest') {
+      const seen: string[] = [];
+      const pageAll = async (path: string) => {
+        const items: ListedComment[] = [];
+        for (let page = 1; ; page += 1) {
+          const body = await pageOf(
+            `${path}?page=${page}&limit=100&sort=${sort}`,
+          );
+          items.push(...body.items);
+          if (page * 100 >= body.total) {
+            return items;
+          }
+        }
+      };
+      const visit = async (items: ListedComment[]) => {
+        for (const item of items) {
+          seen.push(item.id);
+          if (item.reply_count > 0) {
+            await visit(await pageAll(`/comments/${item.id}/replies`));
+          }
+        }
+      };
+      await visit(await pageAll(`/posts/${postId}/comments/top-level`));
+      return seen;
+    }
+
+    it('serves both routes without a token, with the envelope and flat items', async () => {
+      const replies = await pageOf('/comments/root-1/replies');
+      expect(replies).toEqual({
+        items: [
+          {
+            id: 'reply-1',
+            post_id: 'post-1',
+            parent_id: 'root-1',
+            author_id: 'user-2',
+            content: 'Reply',
+            created_at: '2026-10-22T08:01:00.000Z',
+            edited_at: null,
+            reply_count: 1,
+          },
+        ],
+        page: 1,
+        limit: 20,
+        total: 1,
+        sort: 'oldest',
+      });
+
+      const roots = await pageOf('/posts/post-1/comments/top-level');
+      // Equal created_at: the id tiebreaker decides.
+      expect(ids(roots)).toEqual(['root-1', 'root-2']);
+      expect(roots.items.map((item) => item.reply_count)).toEqual([1, 0]);
+      expect(roots.items.every((item) => item.parent_id === null)).toBe(true);
+      expect(roots.total).toBe(2);
+
+      for (const item of [...replies.items, ...roots.items]) {
+        expect(item).not.toHaveProperty('replies');
+        expect(item).not.toHaveProperty('email');
+      }
+    });
+
+    it('returns only direct children, never a grandchild', async () => {
+      const replies = await pageOf('/comments/root-1/replies');
+      expect(ids(replies)).toEqual(['reply-1']);
+      expect(ids(await pageOf('/comments/reply-1/replies'))).toEqual([
+        'nested-reply',
+      ]);
+    });
+
+    it('answers a comment without replies, and a post without roots, with an empty page', async () => {
+      const empty = { items: [], page: 1, limit: 20, total: 0, sort: 'oldest' };
+      expect(await pageOf('/comments/nested-reply/replies')).toEqual(empty);
+      comments = comments.filter((comment) => comment.post_id !== 'post-2');
+      expect(await pageOf('/posts/post-2/comments/top-level')).toEqual(empty);
+    });
+
+    it.each([
+      ['/comments/missing/replies', 404, 'Comment not found'],
+      ['/posts/missing/comments/top-level', 404, 'Post not found'],
+      ['/comments/root-1%27%20OR%201%3D1/replies', 400, undefined],
+      ['/posts/post-1%27%20OR%201%3D1/comments/top-level', 400, undefined],
+    ])('answers %s with %i', async (path, status, message) => {
+      const response = await get(path).expect(status);
+      if (message) {
+        expect((response.body as { message: string }).message).toBe(message);
+      }
+    });
+
+    it.each([
+      'page=0',
+      'page=10001',
+      'page=1.5',
+      'limit=0',
+      'limit=101',
+      'sort=top',
+      'sort=created_at%20DESC',
+      'depth=2',
+      'unexpected=1',
+    ])('rejects ?%s on both routes with 400', async (query) => {
+      await get(`/comments/root-1/replies?${query}`).expect(400);
+      await get(`/posts/post-1/comments/top-level?${query}`).expect(400);
+    });
+
+    it('honours the bounds at their limits', async () => {
+      await get('/comments/root-1/replies?page=10000&limit=100').expect(200);
+      await get(
+        '/posts/post-1/comments/top-level?page=1&limit=1&sort=new',
+      ).expect(200);
+    });
+
+    it('pages every reply exactly once in both directions, with the id tiebreaker', async () => {
+      // 25 replies, created_at repeating in fives.
+      for (let index = 0; index < 25; index += 1) {
+        comments.push({
+          id: `many-${String(index).padStart(2, '0')}`,
+          post_id: 'post-1',
+          author_id: 'user-1',
+          parent_id: 'root-2',
+          content: `Reply ${index}`,
+          created_at: new Date(Date.UTC(2026, 9, 23, 8, Math.floor(index / 5))),
+        });
+      }
+      for (const sort of ['oldest', 'new']) {
+        const seen: string[] = [];
+        for (let page = 1; page <= 4; page += 1) {
+          const body = await pageOf(
+            `/comments/root-2/replies?page=${page}&limit=7&sort=${sort}`,
+          );
+          expect(body.total).toBe(25);
+          seen.push(...ids(body));
+        }
+        const expected = Array.from(
+          { length: 25 },
+          (_, index) => `many-${String(index).padStart(2, '0')}`,
+        );
+        expect(seen).toEqual(sort === 'new' ? expected.reverse() : expected);
+      }
+    });
+
+    it('omits removed comments but keeps their replies readable', async () => {
+      const reply = comments.find((comment) => comment.id === 'reply-1');
+      reply!.removed_at = new Date('2026-10-24T08:00:00.000Z');
+
+      const replies = await pageOf('/comments/root-1/replies');
+      expect(replies).toMatchObject({ items: [], total: 0 });
+      const roots = await pageOf('/posts/post-1/comments/top-level');
+      expect(roots.items[0]).toMatchObject({ id: 'root-1', reply_count: 0 });
+
+      // The removed comment is hidden, the discussion beneath it is not.
+      expect(ids(await pageOf('/comments/reply-1/replies'))).toEqual([
+        'nested-reply',
+      ]);
+
+      const root = comments.find((comment) => comment.id === 'root-2');
+      root!.removed_at = new Date('2026-10-24T08:00:00.000Z');
+      expect(ids(await pageOf('/posts/post-1/comments/top-level'))).toEqual([
+        'root-1',
+      ]);
+    });
+
+    it('answers 404 on both routes for content of a deleted community', async () => {
+      deletedCommunities.add('community-1');
+      await get('/comments/root-1/replies').expect(404);
+      await get('/comments/reply-1/replies').expect(404);
+      await get('/posts/post-1/comments/top-level').expect(404);
+      await get('/comments/other-post-comment/replies').expect(200);
+      await get('/posts/post-2/comments/top-level').expect(200);
+    });
+
+    it('walks a deeply nested chain one level per request', async () => {
+      let parent = 'nested-reply';
+      for (let depth = 0; depth < 40; depth += 1) {
+        const id = `deep-${depth}`;
+        comments.push({
+          id,
+          post_id: 'post-1',
+          author_id: 'user-1',
+          parent_id: parent,
+          content: `Depth ${depth}`,
+          created_at: new Date(Date.UTC(2026, 9, 25, 8, depth)),
+        });
+        parent = id;
+      }
+
+      let current = 'nested-reply';
+      for (let depth = 0; depth < 40; depth += 1) {
+        const body = await pageOf(`/comments/${current}/replies`);
+        expect(ids(body)).toEqual([`deep-${depth}`]);
+        expect(body.items[0].reply_count).toBe(depth < 39 ? 1 : 0);
+        current = `deep-${depth}`;
+      }
+      expect(await pageOf(`/comments/${current}/replies`)).toMatchObject({
+        items: [],
+        total: 0,
+      });
+      // The tree route still nests the whole chain below the ceiling.
+      await get('/posts/post-1/comments').expect(200);
+    });
+
+    describe('a thread over the ceiling', () => {
+      // 700 more comments on post-1: 50 roots, each with 3 replies, each of
+      // those with 3 replies; all share created_at in tens.
+      beforeEach(() => {
+        let sequence = 0;
+        const add = (parentId: string | null) => {
+          const id = `big-${String(sequence).padStart(4, '0')}`;
+          comments.push({
+            id,
+            post_id: 'post-1',
+            author_id: 'user-1',
+            parent_id: parentId,
+            content: `Comment ${sequence}`,
+            created_at: new Date(
+              Date.UTC(2026, 9, 26, 8, Math.floor(sequence / 10)),
+            ),
+          });
+          sequence += 1;
+          return id;
+        };
+        for (let root = 0; root < 50; root += 1) {
+          const rootId = add(null);
+          for (let child = 0; child < 3; child += 1) {
+            const childId = add(rootId);
+            for (let grandchild = 0; grandchild < 3; grandchild += 1) {
+              add(childId);
+            }
+          }
+        }
+      });
+
+      it('still answers the tree route with 413, naming the paginated routes', async () => {
+        const response = await get('/posts/post-1/comments').expect(413);
+        expect((response.body as { message: string }).message).toBe(
+          'Comment threads are limited to 500 comments; page through ' +
+            'GET /posts/:postId/comments/top-level and ' +
+            'GET /comments/:id/replies instead',
+        );
+      });
+
+      it.each(['oldest', 'new'])(
+        'reaches every comment exactly once through the two routes (sort=%s)',
+        async (sort) => {
+          const expected = comments
+            .filter((comment) => comment.post_id === 'post-1')
+            .map((comment) => comment.id);
+          expect(expected.length).toBeGreaterThan(500);
+
+          const seen = await crawl('post-1', sort);
+
+          expect(seen).toHaveLength(expected.length);
+          expect(new Set(seen).size).toBe(expected.length);
+          expect([...seen].sort()).toEqual([...expected].sort());
+        },
+      );
     });
   });
 });

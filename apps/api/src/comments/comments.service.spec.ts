@@ -743,3 +743,229 @@ describe('CommentsService.remove', () => {
     expectRolledBackAndReleased();
   });
 });
+
+describe('CommentsService paginated listings', () => {
+  let service: CommentsService;
+  let queries: Array<{ sql: string; values: unknown[] }>;
+  let results: unknown[];
+
+  const row = (id: string, parentId: string | null = 'parent-1') => ({
+    id,
+    post_id: 'post-1',
+    parent_id: parentId,
+    author_id: 'user-1',
+    content: `Content of ${id}`,
+    created_at: new Date('2026-10-22T08:00:00.000Z'),
+    edited_at: null,
+  });
+  const listing = () => queries.find(({ sql }) => sql.includes('ORDER BY'));
+  const counting = () =>
+    queries.find(({ sql }) => sql.startsWith('SELECT COUNT(*) AS total'));
+  const grouping = () =>
+    queries.filter(({ sql }) => sql.includes('GROUP BY parent_id'));
+
+  beforeEach(async () => {
+    queries = [];
+    results = [];
+    const pool = {
+      execute: (sql: string, values: unknown[]) => {
+        queries.push({ sql, values });
+        return Promise.resolve([results.shift() ?? [], []]);
+      },
+    };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        acceptingRuleAcceptance,
+        CommentsService,
+        { provide: MYSQL_POOL, useValue: pool },
+        { provide: NotificationsService, useValue: {} },
+      ],
+    }).compile();
+    service = module.get(CommentsService);
+  });
+
+  describe('findReplies', () => {
+    it('binds the parent id, checks the community, and 404s an unknown comment', async () => {
+      results = [[]];
+      await expect(service.findReplies('missing', {})).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(queries).toHaveLength(1);
+      expect(queries[0].values).toEqual(['missing']);
+      expect(queries[0].sql).toContain('comments.id = ?');
+      expect(queries[0].sql).toContain('communities.deleted_at IS NULL');
+      // The parent lookup ignores removal, so the replies of a removed
+      // comment stay readable.
+      expect(queries[0].sql).not.toContain('removed_at');
+    });
+
+    it('selects only visible direct children, oldest first by default', async () => {
+      results = [
+        [{ id: 'parent-1' }],
+        [row('a'), row('b')],
+        [{ total: 2 }],
+        [],
+      ];
+
+      const result = await service.findReplies('parent-1', {});
+
+      expect(result).toMatchObject({
+        page: 1,
+        limit: 20,
+        total: 2,
+        sort: 'oldest',
+      });
+      const { sql, values } = listing()!;
+      expect(sql).toContain('WHERE parent_id = ? AND removed_at IS NULL');
+      expect(sql).not.toContain('post_id = ?');
+      expect(sql).toContain('ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?');
+      expect(values).toEqual(['parent-1', 20, 0]);
+      expect(counting()).toEqual({
+        sql: 'SELECT COUNT(*) AS total FROM comments WHERE parent_id = ? AND removed_at IS NULL',
+        values: ['parent-1'],
+      });
+    });
+
+    it('orders newest first, id descending, for sort=new', async () => {
+      results = [[{ id: 'parent-1' }], [], [{ total: 0 }]];
+      const result = await service.findReplies('parent-1', { sort: 'new' });
+      expect(listing()!.sql).toContain('ORDER BY created_at DESC, id DESC');
+      expect(result.sort).toBe('new');
+    });
+
+    it.each([
+      { page: 1, limit: 20, offset: 0 },
+      { page: 3, limit: 7, offset: 14 },
+      { page: 10000, limit: 100, offset: 999900 },
+    ])('pages with LIMIT/OFFSET for %o', async ({ page, limit, offset }) => {
+      results = [[{ id: 'parent-1' }], [], [{ total: 0 }]];
+      const result = await service.findReplies('parent-1', { page, limit });
+      expect(listing()!.values).toEqual(['parent-1', limit, offset]);
+      expect(result).toMatchObject({ page, limit });
+    });
+
+    it('returns flat items with reply_count from one grouped query', async () => {
+      results = [
+        [{ id: 'parent-1' }],
+        [row('with-children'), row('leaf')],
+        [{ total: 2 }],
+        [{ parent_id: 'with-children', reply_count: '3' }],
+      ];
+
+      const result = await service.findReplies('parent-1', {});
+
+      expect(result.items).toEqual([
+        {
+          id: 'with-children',
+          post_id: 'post-1',
+          parent_id: 'parent-1',
+          author_id: 'user-1',
+          content: 'Content of with-children',
+          created_at: '2026-10-22T08:00:00.000Z',
+          edited_at: null,
+          reply_count: 3,
+        },
+        expect.objectContaining({ id: 'leaf', reply_count: 0 }),
+      ]);
+      for (const item of result.items) {
+        expect(item).not.toHaveProperty('replies');
+      }
+      expect(grouping()).toEqual([
+        {
+          sql: 'SELECT parent_id, COUNT(*) AS reply_count FROM comments WHERE parent_id IN (?, ?) AND removed_at IS NULL GROUP BY parent_id',
+          values: ['with-children', 'leaf'],
+        },
+      ]);
+    });
+
+    it('issues the same number of queries whatever the page size', async () => {
+      const counts: number[] = [];
+      for (const size of [1, 20, 100]) {
+        queries = [];
+        const page = Array.from({ length: size }, (_, index) =>
+          row(`r-${index}`),
+        );
+        results = [[{ id: 'parent-1' }], page, [{ total: size }], []];
+        await service.findReplies('parent-1', { limit: size });
+        counts.push(queries.length);
+        expect(grouping()).toHaveLength(1);
+        expect(grouping()[0].values).toHaveLength(size);
+      }
+      expect(counts).toEqual([4, 4, 4]);
+    });
+
+    it('answers a comment without replies with an empty page, skipping the grouped count', async () => {
+      results = [[{ id: 'parent-1' }], [], [{ total: 0 }]];
+      await expect(service.findReplies('parent-1', {})).resolves.toEqual({
+        items: [],
+        page: 1,
+        limit: 20,
+        total: 0,
+        sort: 'oldest',
+      });
+      expect(grouping()).toHaveLength(0);
+    });
+
+    it('renders edited_at when set', async () => {
+      results = [
+        [{ id: 'parent-1' }],
+        [{ ...row('a'), edited_at: new Date('2026-10-23T08:00:00.000Z') }],
+        [{ total: 1 }],
+        [],
+      ];
+      const result = await service.findReplies('parent-1', {});
+      expect(result.items[0].edited_at).toBe('2026-10-23T08:00:00.000Z');
+    });
+  });
+
+  describe('findTopLevel', () => {
+    it('404s an unknown post or one in a deleted community, listing nothing', async () => {
+      results = [[]];
+      await expect(service.findTopLevel('missing', {})).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(queries).toHaveLength(1);
+      expect(queries[0].sql).toContain('communities.deleted_at IS NULL');
+    });
+
+    it('selects visible roots of the post with the parent_id IS NULL predicate', async () => {
+      results = [[{ id: 'post-1' }], [row('root', null)], [{ total: 1 }], []];
+
+      const result = await service.findTopLevel('post-1', {
+        page: 2,
+        limit: 5,
+        sort: 'new',
+      });
+
+      const { sql, values } = listing()!;
+      expect(sql).toContain(
+        'WHERE post_id = ? AND parent_id IS NULL AND removed_at IS NULL',
+      );
+      expect(sql).toContain('ORDER BY created_at DESC, id DESC');
+      expect(values).toEqual(['post-1', 5, 5]);
+      expect(counting()!.sql).toContain(
+        'WHERE post_id = ? AND parent_id IS NULL AND removed_at IS NULL',
+      );
+      expect(result).toMatchObject({
+        items: [{ id: 'root', parent_id: null, reply_count: 0 }],
+        page: 2,
+        limit: 5,
+        total: 1,
+        sort: 'new',
+      });
+    });
+  });
+
+  it('names the paginated routes in the 413 of the tree route', async () => {
+    results = [
+      [{ id: 'post-1' }],
+      Array.from({ length: 501 }, (_, index) => row(`c-${index}`, null)),
+    ];
+    await expect(service.findThread('post-1')).rejects.toMatchObject({
+      status: 413,
+      message: expect.stringContaining(
+        'GET /posts/:postId/comments/top-level and GET /comments/:id/replies',
+      ) as unknown,
+    });
+  });
+});

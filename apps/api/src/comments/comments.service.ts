@@ -17,6 +17,10 @@ import type { NotificationEntry } from '../notifications/notification-metadata';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreateCommentDto } from './dto/create-comment.dto';
+import type {
+  CommentListSort,
+  ListCommentRepliesDto,
+} from './dto/list-comment-replies.dto';
 
 interface CommentRow extends RowDataPacket {
   id: string;
@@ -35,7 +39,36 @@ interface RemovableCommentRow extends RowDataPacket {
   can_moderate: number | string | boolean;
 }
 
-const MAX_COMMENTS_PER_THREAD = 500;
+interface CommentReplyRow extends RowDataPacket {
+  id: string;
+  post_id: string;
+  parent_id: string | null;
+  author_id: string;
+  content: string;
+  created_at: Date | string;
+  edited_at: Date | string | null;
+}
+
+export const MAX_COMMENTS_PER_THREAD = 500;
+
+// The 413 of the tree route names the way out: the two paginated routes
+// together reach every comment of a thread of any size.
+export const THREAD_TOO_LARGE_MESSAGE =
+  `Comment threads are limited to ${MAX_COMMENTS_PER_THREAD} comments; ` +
+  'page through GET /posts/:postId/comments/top-level and ' +
+  'GET /comments/:id/replies instead';
+
+// Columns of a flat listed comment. No replies: see CommentReplyDto.
+const COMMENT_REPLY_COLUMNS =
+  'id, post_id, parent_id, author_id, content, created_at, edited_at';
+
+// Comments removed by moderation are never listed by the paginated routes.
+const VISIBLE_COMMENT_SQL = 'removed_at IS NULL';
+
+const commentListOrder = (sort: CommentListSort): string =>
+  sort === 'new'
+    ? 'ORDER BY created_at DESC, id DESC'
+    : 'ORDER BY created_at ASC, id ASC';
 
 export interface CommentDto {
   id: string;
@@ -50,6 +83,30 @@ export interface CommentDto {
 export interface CommentThreadDto {
   post_id: string;
   comments: CommentDto[];
+}
+
+// One comment of a paginated listing (GET /comments/:id/replies,
+// GET /posts/:postId/comments/top-level). Deliberately flat: a reply_count
+// instead of a replies array, because a page whose items carried their
+// subtrees would be as unbounded as the tree route it is the escape from. A
+// client recurses through GET /comments/:id/replies when reply_count > 0.
+export interface CommentReplyDto {
+  id: string;
+  post_id: string;
+  parent_id: string | null;
+  author_id: string;
+  content: string;
+  created_at: string;
+  edited_at: string | null;
+  reply_count: number;
+}
+
+export interface CommentReplyListDto {
+  items: CommentReplyDto[];
+  page: number;
+  limit: number;
+  total: number;
+  sort: CommentListSort;
 }
 
 @Injectable()
@@ -67,9 +124,7 @@ export class CommentsService {
       [postId, MAX_COMMENTS_PER_THREAD + 1],
     );
     if (rows.length > MAX_COMMENTS_PER_THREAD) {
-      throw new PayloadTooLargeException(
-        `Comment threads are limited to ${MAX_COMMENTS_PER_THREAD} comments`,
-      );
+      throw new PayloadTooLargeException(THREAD_TOO_LARGE_MESSAGE);
     }
 
     const nodes = new Map<string, CommentDto>();
@@ -107,6 +162,105 @@ export class CommentsService {
     }
 
     return { post_id: postId, comments };
+  }
+
+  // Direct, visible children of one comment, a page at a time. The parent
+  // itself may be removed: removing a comment hides it, not the discussion
+  // beneath it, so its replies stay readable here. A comment on a post in a
+  // deleted community is not found.
+  async findReplies(
+    commentId: string,
+    query: ListCommentRepliesDto,
+  ): Promise<CommentReplyListDto> {
+    const [parents] = await this.pool.execute<
+      (RowDataPacket & { id: string })[]
+    >(
+      `SELECT comments.id FROM comments
+       INNER JOIN posts ON posts.id = comments.post_id
+       WHERE comments.id = ? AND ${activeCommunitySql('posts.community_id')}
+       LIMIT 1`,
+      [commentId],
+    );
+    if (!parents[0]) {
+      throw new NotFoundException('Comment not found');
+    }
+    return this.listComments(
+      `parent_id = ? AND ${VISIBLE_COMMENT_SQL}`,
+      [commentId],
+      query,
+    );
+  }
+
+  // The post's visible root comments, a page at a time. With findReplies,
+  // every comment of a thread of any size is reachable.
+  async findTopLevel(
+    postId: string,
+    query: ListCommentRepliesDto,
+  ): Promise<CommentReplyListDto> {
+    await this.ensurePostExists(postId);
+    return this.listComments(
+      `post_id = ? AND parent_id IS NULL AND ${VISIBLE_COMMENT_SQL}`,
+      [postId],
+      query,
+    );
+  }
+
+  // Three statements whatever the page size: the page, its total, and one
+  // grouped reply count over the page's ids (skipped for an empty page).
+  private async listComments(
+    where: string,
+    values: string[],
+    query: ListCommentRepliesDto,
+  ): Promise<CommentReplyListDto> {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+    const sort = query.sort ?? 'oldest';
+    const offset = (page - 1) * limit;
+
+    const [rows] = await this.pool.execute<CommentReplyRow[]>(
+      `SELECT ${COMMENT_REPLY_COLUMNS} FROM comments WHERE ${where} ${commentListOrder(sort)} LIMIT ? OFFSET ?`,
+      [...values, limit, offset],
+    );
+    const [countRows] = await this.pool.execute<
+      (RowDataPacket & { total: number | string })[]
+    >(`SELECT COUNT(*) AS total FROM comments WHERE ${where}`, values);
+    const replyCounts = await this.countReplies(rows.map((row) => row.id));
+
+    return {
+      items: rows.map((row) => ({
+        id: row.id,
+        post_id: row.post_id,
+        parent_id: row.parent_id,
+        author_id: row.author_id,
+        content: row.content,
+        created_at: new Date(row.created_at).toISOString(),
+        edited_at:
+          row.edited_at === null || row.edited_at === undefined
+            ? null
+            : new Date(row.edited_at).toISOString(),
+        reply_count: replyCounts.get(row.id) ?? 0,
+      })),
+      page,
+      limit,
+      total: Number(countRows[0]?.total ?? 0),
+      sort,
+    };
+  }
+
+  // Visible direct replies per comment id: one grouped query over the
+  // page's ids, not a subquery per row. An id absent from the result has
+  // no replies.
+  private async countReplies(ids: string[]): Promise<Map<string, number>> {
+    if (ids.length === 0) {
+      return new Map();
+    }
+    const [rows] = await this.pool.execute<
+      (RowDataPacket & { parent_id: string; reply_count: number | string })[]
+    >(
+      `SELECT parent_id, COUNT(*) AS reply_count FROM comments WHERE parent_id IN (${ids.map(() => '?').join(', ')}) AND ${VISIBLE_COMMENT_SQL} GROUP BY parent_id`,
+      ids,
+    );
+    return new Map(rows.map((row) => [row.parent_id, Number(row.reply_count)]));
   }
 
   // Exactly one notification per comment: a top-level comment notifies the

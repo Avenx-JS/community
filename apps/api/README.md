@@ -193,8 +193,8 @@ only query plans change.
 | `idx_posts_community_created` | `posts (community_id, created_at, id)` | One community's posts, newest first (`GET /posts?community_id=…` before pinning; see [Pins in listings](#pins-in-listings)) |
 | `idx_posts_author_created` | `posts (author_id, created_at, id)` | One author's posts, newest first |
 | `idx_comments_author_created` | `comments (author_id, created_at, id)` | One author's comments, newest first |
-| `idx_comments_parent_created` | `comments (parent_id, created_at, id)` | Paginated replies of one comment |
-| `idx_comments_post_created` | `comments (post_id, created_at, id)` | `CommentsService.findThread` (`GET /posts/:postId/comments`) |
+| `idx_comments_parent_created` | `comments (parent_id, created_at, id)` | Paginated replies of one comment (`GET /comments/:id/replies`) and their grouped `reply_count` |
+| `idx_comments_post_created` | `comments (post_id, created_at, id)` | `CommentsService.findThread` (`GET /posts/:postId/comments`) and the post's root comments (`GET /posts/:postId/comments/top-level`) |
 
 **The `(filter, created_at, id)` shape.** Every list orders by
 `created_at DESC, id DESC` (threads ascending). With the filter column first,
@@ -3450,6 +3450,103 @@ each comment contains its `id`, `post_id`, `author_id`, `parent_id`, `content`,
 (`created_at` ascending, then `id` ascending), making the thread order stable.
 An unknown post returns `404`.
 
+The tree is built in memory from one unpaginated read, so it is capped at 500
+comments (`MAX_COMMENTS_PER_THREAD`). A larger thread returns `413` with:
+
+```text
+Comment threads are limited to 500 comments; page through GET /posts/:postId/comments/top-level and GET /comments/:id/replies instead
+```
+
+Before the paginated routes below existed, that `413` was the only answer: a
+thread that grew past 500 comments became permanently unreadable through the
+API, with no way to read its first page, its newest replies or anything else.
+The ceiling stays: raising it only moves the cliff, and removing it lets one
+request build an unbounded payload in memory. The tree route is otherwise
+unchanged, so no existing client breaks; the `413` now names the way out.
+
+### Paginated comments
+
+Two public routes page a thread one level at a time, and together reach every
+comment of a thread of any size: page the post's root comments, then page the
+replies of each comment whose `reply_count` is above `0`, recursively.
+
+| Route | Lists | `404` when |
+| --- | --- | --- |
+| `GET /posts/:postId/comments/top-level` | The post's root comments (`parent_id IS NULL`) | The post is unknown or its community is deleted |
+| `GET /comments/:id/replies` | The direct replies of comment `:id` (`parent_id = :id`), one level only | The comment is unknown or its post's community is deleted |
+
+Both take the same query (`ListCommentRepliesDto`): `page` (1-10,000, default
+`1`), `limit` (1-100, default `20`) and `sort` (`oldest` or `new`, default
+`oldest`). Out-of-range values and unknown query properties return `400`, as
+does a malformed id. Both return the standard envelope
+`{ "items", "page", "limit", "total", "sort" }`; a comment without replies, or
+a post without root comments, returns `200` with `items: []` and `total: 0`.
+Each item is:
+
+```json
+{
+  "id": "comment-id",
+  "post_id": "post-id",
+  "parent_id": "parent-comment-id",
+  "author_id": "user-id",
+  "content": "Text",
+  "created_at": "2026-10-22T08:00:00.000Z",
+  "edited_at": null,
+  "reply_count": 3
+}
+```
+
+**Items are flat and must never nest.** The tree route's `CommentDto` is a
+recursive node; reusing it here would put each item's whole subtree into the
+page and reintroduce exactly the unbounded read these routes exist to remove: a
+paginated endpoint whose items carry subtrees is not bounded. Items therefore
+use a separate flat type (`CommentReplyResponse` in OpenAPI, distinct from the
+recursive `CommentResponse`) with a `reply_count` that tells a client whether
+to recurse. Do not add a `replies` array, or a `depth` parameter, to them.
+
+**Why the tree route was not paginated instead.** Adding `page`/`limit` to
+`GET /posts/:postId/comments` was considered and rejected. Its contract is a
+nested tree, and paginating a tree has no well-defined meaning: a page boundary
+can fall inside a subtree, so a page is either cut mid-discussion or unbounded
+again. Two flat routes are honest; one half-paginated tree is not.
+
+**`oldest` is the default, unlike every other listing.** Every other collection
+in this API defaults to `new`. A reply chain reads in the order it was written,
+and the tree route already orders `created_at` ascending, so the paginated
+routes and the tree agree by default. `sort=new` reverses both keys.
+
+**Ordering and plans.** `oldest` orders `created_at ASC, id ASC`, `new` orders
+`created_at DESC, id DESC`; `id` is the tiebreaker, so paging returns each
+comment exactly once in either direction. Replies are a ref on
+`idx_comments_parent_created (parent_id, created_at, id)` and roots a ref on
+`idx_comments_post_created (post_id, created_at, id)` with `parent_id IS NULL`
+filtered from it, both read in index order (backwards for `new`) without a
+filesort (`comment-listings.mysql.spec.ts` asserts the plans). On a table
+where the post's comments outnumber all root comments site-wide, the optimiser
+may prefer `idx_comments_parent_created` for the roots instead; that plan is
+also index-ordered without a filesort.
+
+**`reply_count`** counts an item's visible direct replies. It comes from one
+`COUNT(*) … WHERE parent_id IN (…) GROUP BY parent_id` over the page's ids, not
+a correlated subquery per row, so a page is three statements whatever its size
+(plus the parent or post lookup). It is not a stored counter column: that would
+need a migration, a backfill and a change to the insert and delete paths, and
+the grouped count, a range on `idx_comments_parent_created` over at most 100
+ids, has not been measured to need it.
+
+**Removal.** Both routes omit comments with `removed_at` set (migration `017`),
+from `items`, from `total` and from `reply_count`. A removed comment's own
+replies **remain readable** through `GET /comments/:id/replies` with the
+removed comment's id: removing one comment hides that comment, not the
+discussion beneath it, so the route does not 404 a removed parent. Its replies
+are not reachable by crawling from the roots, since the removed comment is not
+listed; a client reaches them with an id it already holds (a link, a
+notification). The tree route does not read `removed_at` yet.
+
+**Rate limiting.** The global read buckets apply; there is no dedicated bucket.
+The routes replace one expensive unbounded read with several cheap bounded
+ones, which is a net improvement.
+
 `POST /posts/:postId/comments` requires a bearer token and accepts non-empty
 `content` (1-16,383 characters) and an optional `parent_id`. The author is
 always taken from the authenticated user. The post must exist, and a supplied
@@ -3473,8 +3570,9 @@ are nullable timestamps with optional actors, coherent through
 `chk_comments_lock` and `chk_comments_removal`, and the actors are
 `ON DELETE SET NULL`, so readers must tolerate a `NULL` actor. There is no
 `edited_by`, because only the author edits. `idx_comments_removed_at` indexes
-the removal filter. **No endpoint reads, writes or honours these columns yet**:
-threads, comment creation and `DELETE /comments/:id` are unchanged.
+the removal filter. Only the paginated comment routes read `removed_at` (see
+[Paginated comments](#paginated-comments)); nothing writes these columns yet,
+and the thread, comment creation and `DELETE /comments/:id` do not honour them.
 
 A comment's `locked_at` is meant to lock that comment's subtree, not the whole
 post. The schema supports either reading; the lock endpoint will define it.

@@ -20,9 +20,11 @@ import {
 } from '@nestjs/swagger';
 import { AuthGuard, type AuthenticatedRequest } from '../auth/auth.guard';
 import {
+  CommentReplyListResponse,
   CommentResponse,
   CommentThreadResponse,
 } from '../comments/comments.responses';
+import { ListCommentRepliesDto } from '../comments/dto/list-comment-replies.dto';
 import {
   ApiAuthenticated,
   ApiErrorResponses,
@@ -163,10 +165,36 @@ export class PostsController {
   @ApiErrorResponses({
     400: 'Invalid post ID.',
     404: 'Post not found.',
-    413: 'The thread exceeds the maximum number of comments.',
+    413:
+      'The thread exceeds the maximum number of comments; page it through ' +
+      'GET /posts/{postId}/comments/top-level and GET /comments/{id}/replies.',
   })
   getComments(@Param('postId', new SafeRouteParamPipe('id')) postId: string) {
     return this.commentsService.findThread(postId);
+  }
+
+  @Get(':postId/comments/top-level')
+  @ApiTags('comments')
+  @ApiOperation({
+    summary: "List a post's top-level comments",
+    description:
+      'Root comments only (no parent), oldest first by default (created_at, ' +
+      'then id). Items are flat and carry a reply_count; page each subtree ' +
+      'through GET /comments/{id}/replies. Together the two routes reach ' +
+      'every comment of a thread of any size. Omits comments removed by ' +
+      'moderators.',
+  })
+  @ApiRouteParam('postId', 'id', 'Post ID.')
+  @ApiOkResponse({ type: CommentReplyListResponse })
+  @ApiErrorResponses({
+    400: 'Invalid post ID or query parameters.',
+    404: 'Post not found, or its community is deleted.',
+  })
+  getTopLevelComments(
+    @Param('postId', new SafeRouteParamPipe('id')) postId: string,
+    @Query() query: ListCommentRepliesDto,
+  ) {
+    return this.commentsService.findTopLevel(postId, query);
   }
 
   @Post(':postId/comments')
