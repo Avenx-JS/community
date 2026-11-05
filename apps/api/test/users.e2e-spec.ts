@@ -240,7 +240,7 @@ describe('User profile endpoints (e2e)', () => {
       }
       if (
         sql.startsWith(
-          'SELECT id, title, content, type, author_id, community_id, created_at, pinned_at, pinned_by, edited_at FROM posts WHERE EXISTS',
+          'SELECT id, title, content, type, author_id, community_id, created_at, pinned_at, pinned_by, edited_at, locked_at, locked_by FROM posts WHERE EXISTS',
         )
       ) {
         return Promise.resolve([tables.posts, []]);
@@ -256,7 +256,7 @@ describe('User profile endpoints (e2e)', () => {
       }
       if (
         sql.startsWith(
-          'SELECT id, post_id, author_id, parent_id, content, created_at, edited_at FROM comments WHERE post_id = ?',
+          'SELECT id, post_id, author_id, parent_id, content, created_at, edited_at, locked_at, locked_by FROM comments WHERE post_id = ?',
         )
       ) {
         return Promise.resolve([
@@ -1040,6 +1040,8 @@ describe('User profile endpoints (e2e)', () => {
           'pinned_at',
           'pinned_by',
           'edited_at',
+          'locked_at',
+          'locked_by',
           'score',
           'title',
           'type',

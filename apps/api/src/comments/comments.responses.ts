@@ -37,6 +37,25 @@ export class CommentResponse implements CommentDto {
   edited_at!: string | null;
 
   @ApiProperty({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description:
+      'When a moderator locked the comment, closing its whole subtree to ' +
+      'new replies; null if open.',
+  })
+  locked_at!: string | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'Who locked the comment. Also null on a locked comment once that ' +
+      "moderator's account is deleted.",
+  })
+  locked_by!: string | null;
+
+  @ApiProperty({
     type: 'integer',
     description: 'Sum of all vote values on the comment; 0 without votes.',
   })
@@ -85,6 +104,25 @@ export class CommentReplyResponse implements CommentReplyDto {
 
   @ApiProperty({ type: String, format: 'date-time', nullable: true })
   edited_at!: string | null;
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description:
+      'When a moderator locked the comment, closing its whole subtree to ' +
+      'new replies; null if open.',
+  })
+  locked_at!: string | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'Who locked the comment. Also null on a locked comment once that ' +
+      "moderator's account is deleted.",
+  })
+  locked_by!: string | null;
 
   @ApiProperty({
     type: 'integer',

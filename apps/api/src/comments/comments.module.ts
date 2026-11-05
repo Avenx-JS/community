@@ -6,6 +6,8 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { VotesModule } from '../votes/votes.module';
 import { CommentsService } from './comments.service';
 import { CommentsController } from './comments.controller';
+import { CommentLocksController } from './comment-locks.controller';
+import { CommentLocksService } from './comment-locks.service';
 
 @Module({
   imports: [
@@ -15,8 +17,8 @@ import { CommentsController } from './comments.controller';
     NotificationsModule,
     VotesModule,
   ],
-  providers: [CommentsService],
-  controllers: [CommentsController],
+  providers: [CommentsService, CommentLocksService],
+  controllers: [CommentsController, CommentLocksController],
   exports: [CommentsService],
 })
 export class CommentsModule {}

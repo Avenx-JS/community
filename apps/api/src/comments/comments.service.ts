@@ -41,15 +41,15 @@ interface CommentRow extends RowDataPacket {
   content: string;
   created_at: Date | string;
   edited_at?: Date | string | null;
+  locked_at?: Date | string | null;
+  locked_by?: string | null;
 }
 
 interface EditableCommentRow extends RowDataPacket {
   id: string;
   author_id: string;
   content: string;
-  locked_at: Date | string | null;
   removed_at: Date | string | null;
-  post_locked_at: Date | string | null;
   post_removed_at: Date | string | null;
 }
 
@@ -74,9 +74,53 @@ interface CommentReplyRow extends RowDataPacket {
   content: string;
   created_at: Date | string;
   edited_at: Date | string | null;
+  locked_at?: Date | string | null;
+  locked_by?: string | null;
 }
 
 export const MAX_COMMENTS_PER_THREAD = 500;
+
+// The furthest a reply's ancestor walk goes. A chain this deep cannot be
+// shown by the tree route anyway (MAX_COMMENTS_PER_THREAD), and the bound
+// stays below MySQL's default cte_max_recursion_depth (1000), so the walk
+// ends by its own WHERE rather than by a server error.
+export const MAX_LOCK_ANCESTOR_DEPTH = 500;
+
+// The parent of a reply, and whether it or any ancestor up to the root is
+// locked: a comment lock closes its whole subtree, at any depth. The first
+// recursive query in this codebase. It walks parent_id from the parent
+// upwards, one primary-key lookup per level, stopping at the root or at
+// MAX_LOCK_ANCESTOR_DEPTH levels. depth_exceeded is true when the walk
+// stopped at the bound with ancestors left unchecked; the reply is then
+// refused rather than let through unchecked (fail closed). Checking only the
+// direct parent was rejected: replying one level deeper would bypass the
+// lock. A denormalised thread_locked flag was rejected too: locking would
+// have to rewrite a whole subtree, and the flag could drift.
+// Values: parent id, post id, the bound, the bound. An unknown parent (or
+// one on another post) yields one row of NULLs, read as not found.
+export const PARENT_WITH_ANCESTRY_SQL = `WITH RECURSIVE ancestors (id, author_id, parent_id, locked_at, depth) AS (
+  SELECT id, author_id, parent_id, locked_at, 1
+  FROM comments
+  WHERE id = ? AND post_id = ?
+  UNION ALL
+  SELECT comments.id, comments.author_id, comments.parent_id, comments.locked_at, ancestors.depth + 1
+  FROM ancestors
+  INNER JOIN comments ON comments.id = ancestors.parent_id
+  WHERE ancestors.depth < ?
+)
+SELECT
+  MAX(CASE WHEN depth = 1 THEN id END) AS id,
+  MAX(CASE WHEN depth = 1 THEN author_id END) AS author_id,
+  MAX(locked_at IS NOT NULL) AS thread_locked,
+  MAX(depth = ? AND parent_id IS NOT NULL) AS depth_exceeded
+FROM ancestors`;
+
+interface ParentWithAncestryRow extends RowDataPacket {
+  id: string | null;
+  author_id: string;
+  thread_locked: number | string | boolean | null;
+  depth_exceeded: number | string | boolean | null;
+}
 
 // The 413 of the tree route names the way out: the two paginated routes
 // together reach every comment of a thread of any size.
@@ -87,7 +131,7 @@ export const THREAD_TOO_LARGE_MESSAGE =
 
 // Columns of a flat listed comment. No replies: see CommentReplyDto.
 const COMMENT_REPLY_COLUMNS =
-  'id, post_id, parent_id, author_id, content, created_at, edited_at';
+  'id, post_id, parent_id, author_id, content, created_at, edited_at, locked_at, locked_by';
 
 // Comments removed by moderation are never listed by the paginated routes.
 const VISIBLE_COMMENT_SQL = 'removed_at IS NULL';
@@ -106,6 +150,10 @@ export interface CommentDto {
   created_at: string;
   // When the author last changed the content; null if never edited.
   edited_at: string | null;
+  // A lock closes this comment's whole subtree to new replies.
+  locked_at: string | null;
+  // NULL on a locked comment once the locking moderator's account is deleted.
+  locked_by: string | null;
   // Sum of all vote values; 0 without votes.
   score: number;
   replies: CommentDto[];
@@ -129,6 +177,8 @@ export interface CommentReplyDto {
   content: string;
   created_at: string;
   edited_at: string | null;
+  locked_at: string | null;
+  locked_by: string | null;
   reply_count: number;
   score: number;
 }
@@ -152,7 +202,7 @@ export class CommentsService {
   async findThread(postId: string): Promise<CommentThreadDto> {
     await this.ensurePostExists(postId);
     const [rows] = await this.pool.execute<CommentRow[]>(
-      'SELECT id, post_id, author_id, parent_id, content, created_at, edited_at FROM comments WHERE post_id = ? ORDER BY created_at ASC, id ASC LIMIT ?',
+      'SELECT id, post_id, author_id, parent_id, content, created_at, edited_at, locked_at, locked_by FROM comments WHERE post_id = ? ORDER BY created_at ASC, id ASC LIMIT ?',
       [postId, MAX_COMMENTS_PER_THREAD + 1],
     );
     if (rows.length > MAX_COMMENTS_PER_THREAD) {
@@ -175,6 +225,8 @@ export class CommentsService {
         content: row.content,
         created_at: new Date(row.created_at).toISOString(),
         edited_at: toIsoOrNull(row.edited_at),
+        locked_at: toIsoOrNull(row.locked_at),
+        locked_by: row.locked_by ?? null,
         score: scores.get(row.id) ?? 0,
         replies: [],
       });
@@ -273,6 +325,21 @@ export class CommentsService {
     };
   }
 
+  // One comment as the flat item of the paginated routes, read on the
+  // caller's connection (inside its transaction). The response of
+  // PATCH /comments/:id and POST /comments/:id/lock.
+  async readFlat(executor: Executor, id: string): Promise<CommentReplyDto> {
+    const [rows] = await executor.execute<CommentReplyRow[]>(
+      `SELECT ${COMMENT_REPLY_COLUMNS} FROM comments WHERE id = ? LIMIT 1`,
+      [id],
+    );
+    if (!rows[0]) {
+      throw new Error(`Comment ${id} could not be retrieved`);
+    }
+    const [dto] = await this.toReplyDtos(executor, [rows[0]]);
+    return dto;
+  }
+
   // Flat comments with their reply counts and scores: two grouped queries
   // over the rows' ids, whatever their number.
   private async toReplyDtos(
@@ -290,6 +357,8 @@ export class CommentsService {
       content: row.content,
       created_at: new Date(row.created_at).toISOString(),
       edited_at: toIsoOrNull(row.edited_at),
+      locked_at: toIsoOrNull(row.locked_at),
+      locked_by: row.locked_by ?? null,
       reply_count: replyCounts.get(row.id) ?? 0,
       score: scores.get(row.id) ?? 0,
     }));
@@ -318,11 +387,12 @@ export class CommentsService {
   // community creator (unlike remove(), where moderators may act). Not gated
   // on rule acceptance: correcting existing content is not new
   // participation. Order: 404 (unknown, or deleted or suspended community),
-  // 403 (not the author), 409 (the comment or its post removed, or the
-  // comment or its post locked: a lock closes the discussion, which a
-  // comment is part of). Submitting the stored content changes nothing and
-  // leaves edited_at untouched. Returns the flat comment, not a thread node
-  // with an empty replies array that would misrepresent its replies.
+  // 403 (not the author), 409 (the comment or its post removed). A lock does
+  // not stop the edit: a lock closes the discussion to new replies, it does
+  // not freeze what was already written (as for a locked post). Submitting
+  // the stored content changes nothing and leaves edited_at untouched.
+  // Returns the flat comment, not a thread node with an empty replies array
+  // that would misrepresent its replies.
   async update(
     id: string,
     input: UpdateCommentDto,
@@ -337,8 +407,7 @@ export class CommentsService {
 
       const [comments] = await connection.execute<EditableCommentRow[]>(
         `SELECT comments.id, comments.author_id, comments.content,
-           comments.locked_at, comments.removed_at,
-           posts.locked_at AS post_locked_at, posts.removed_at AS post_removed_at
+           comments.removed_at, posts.removed_at AS post_removed_at
          FROM comments
          INNER JOIN posts ON posts.id = comments.post_id
          WHERE comments.id = ? AND ${listedCommunitySql('posts.community_id')}
@@ -359,11 +428,6 @@ export class CommentsService {
             : 'The post of this comment was removed and its comments cannot be edited',
         );
       }
-      if (comment.locked_at || comment.post_locked_at) {
-        throw new ConflictException(
-          'This discussion is locked; its comments cannot be edited',
-        );
-      }
 
       if (input.content !== comment.content) {
         await connection.execute<ResultSetHeader>(
@@ -372,14 +436,7 @@ export class CommentsService {
         );
       }
 
-      const [rows] = await connection.execute<CommentReplyRow[]>(
-        `SELECT ${COMMENT_REPLY_COLUMNS} FROM comments WHERE id = ? LIMIT 1`,
-        [id],
-      );
-      if (!rows[0]) {
-        throw new Error('Edited comment could not be retrieved');
-      }
-      const [dto] = await this.toReplyDtos(connection, [rows[0]]);
+      const dto = await this.readFlat(connection, id);
 
       await connection.commit();
       return dto;
@@ -410,15 +467,18 @@ export class CommentsService {
       await connection.beginTransaction();
       transactionStarted = true;
 
+      // A share lock on the post serialises this insert against a concurrent
+      // POST /posts/:id/lock, which takes the row FOR UPDATE.
       const [posts] = await connection.execute<
         (RowDataPacket & {
           id: string;
           author_id: string;
           community_id: string;
           title: string;
+          locked_at: Date | string | null;
         })[]
       >(
-        `SELECT id, author_id, community_id, title FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} LIMIT 1`,
+        `SELECT id, author_id, community_id, title, locked_at FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} LIMIT 1 FOR SHARE`,
         [postId],
       );
       const post = posts[0];
@@ -428,23 +488,44 @@ export class CommentsService {
 
       const parentId = input.parent_id ?? null;
       let parentAuthorId: string | null = null;
+      let threadLocked = false;
+      let threadTooDeep = false;
       if (parentId !== null) {
-        const [parents] = await connection.execute<
-          (RowDataPacket & { id: string; author_id: string })[]
-        >(
-          'SELECT id, author_id FROM comments WHERE id = ? AND post_id = ? LIMIT 1',
-          [parentId, postId],
+        const [parents] = await connection.execute<ParentWithAncestryRow[]>(
+          PARENT_WITH_ANCESTRY_SQL,
+          [parentId, postId, MAX_LOCK_ANCESTOR_DEPTH, MAX_LOCK_ANCESTOR_DEPTH],
         );
-        if (!parents[0]) {
+        const parent = parents[0];
+        if (!parent?.id) {
           throw new NotFoundException('Parent comment not found for this post');
         }
-        parentAuthorId = parents[0].author_id;
+        parentAuthorId = parent.author_id;
+        threadLocked = isSqlTrue(parent.thread_locked ?? 0);
+        threadTooDeep = isSqlTrue(parent.depth_exceeded ?? 0);
       }
       await this.ruleAcceptance.assertAcceptedOrThrow(
         authorId,
         post.community_id,
         connection,
       );
+      // After the 404s and the rule gate, so a caller sees the most specific
+      // error. A lock binds everyone, moderators and the creator included:
+      // they must unlock first, which leaves a log entry.
+      if (post.locked_at) {
+        throw new ConflictException(
+          'This post is locked; it accepts no new comments',
+        );
+      }
+      if (threadLocked) {
+        throw new ConflictException(
+          'A comment above this reply is locked; its thread accepts no new replies',
+        );
+      }
+      if (threadTooDeep) {
+        throw new ConflictException(
+          `This thread is nested more than ${MAX_LOCK_ANCESTOR_DEPTH} levels deep and accepts no new replies`,
+        );
+      }
 
       const id = randomUUID();
       await connection.execute<ResultSetHeader>(
@@ -453,7 +534,7 @@ export class CommentsService {
       );
 
       const [comments] = await connection.execute<CommentRow[]>(
-        'SELECT id, post_id, author_id, parent_id, content, created_at, edited_at FROM comments WHERE id = ? LIMIT 1',
+        'SELECT id, post_id, author_id, parent_id, content, created_at, edited_at, locked_at, locked_by FROM comments WHERE id = ? LIMIT 1',
         [id],
       );
       const comment = comments[0];
@@ -500,6 +581,8 @@ export class CommentsService {
         content: comment.content,
         created_at: new Date(comment.created_at).toISOString(),
         edited_at: toIsoOrNull(comment.edited_at),
+        locked_at: toIsoOrNull(comment.locked_at),
+        locked_by: comment.locked_by ?? null,
         // A new comment has no votes yet.
         score: 0,
         replies: [],

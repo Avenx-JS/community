@@ -193,6 +193,8 @@ describe('GET /communities/:name/posts (e2e)', () => {
         'pinned_at',
         'pinned_by',
         'edited_at',
+        'locked_at',
+        'locked_by',
         'score',
         'title',
         'type',

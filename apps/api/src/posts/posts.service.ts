@@ -48,6 +48,9 @@ export interface PostRow extends RowDataPacket {
   pinned_by: string | null;
   // NULL until the author's first effective edit (migration 017).
   edited_at: Date | string | null;
+  locked_at: Date | string | null;
+  // NULL on a locked post once the locking moderator's account is deleted.
+  locked_by: string | null;
 }
 
 // Every column of a post DTO, in DTO order.
@@ -55,7 +58,7 @@ export interface PostRow extends RowDataPacket {
 export const VISIBLE_POST_SQL = 'posts.removed_at IS NULL';
 
 export const POST_COLUMNS =
-  'id, title, content, type, author_id, community_id, created_at, pinned_at, pinned_by, edited_at';
+  'id, title, content, type, author_id, community_id, created_at, pinned_at, pinned_by, edited_at, locked_at, locked_by';
 
 interface EditablePostRow extends RowDataPacket {
   id: string;
@@ -66,6 +69,14 @@ interface EditablePostRow extends RowDataPacket {
   locked_at: Date | string | null;
   removed_at: Date | string | null;
   community_id: string;
+}
+
+interface LockablePostRow extends RowDataPacket {
+  id: string;
+  community_id: string;
+  locked_at: Date | string | null;
+  removed_at: Date | string | null;
+  can_moderate: number | string | boolean;
 }
 
 interface PinnablePostRow extends RowDataPacket {
@@ -97,6 +108,10 @@ export interface PostDto {
   pinned_by: string | null;
   // When the author last changed the post; null if never edited.
   edited_at: string | null;
+  // When a moderator closed the post to new comments; null if open.
+  locked_at: string | null;
+  // NULL on a locked post once the locking moderator's account is deleted.
+  locked_by: string | null;
   // Sum of all vote values; 0 without votes.
   score: number;
 }
@@ -521,6 +536,127 @@ export class PostsService {
     }
   }
 
+  // POST /posts/:id/lock: closes the post to new comments. A moderation
+  // power, like pinning: only the community creator or a moderator may lock,
+  // never the author as such (the opposite of editing, where only the author
+  // may act). Idempotent without refreshing locked_at: locking a locked post
+  // changes and logs nothing. A removed post is 409: it has no open
+  // discussion to close.
+  async lock(id: string, actorId: string): Promise<PostDto> {
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+
+      const post = await this.lockPostForLocking(connection, id, actorId);
+      if (post.removed_at !== null) {
+        throw new ConflictException('A removed post cannot be locked');
+      }
+      const [result] = await connection.execute<ResultSetHeader>(
+        'UPDATE posts SET locked_at = UTC_TIMESTAMP(), locked_by = ? WHERE id = ? AND locked_at IS NULL',
+        [actorId, id],
+      );
+      // affectedRows 0: already locked, so nothing changed or is logged.
+      if (result.affectedRows === 1) {
+        await this.moderationLog.record(connection, {
+          actorId,
+          communityId: post.community_id,
+          action: 'post_locked',
+          targetType: 'post',
+          targetId: id,
+        });
+      }
+
+      const [posts] = await connection.execute<PostRow[]>(
+        `SELECT ${POST_COLUMNS} FROM posts WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      if (!posts[0]) {
+        throw new Error('Locked post could not be retrieved');
+      }
+      const [dto] = await toPostDtos(connection, [posts[0]]);
+
+      await connection.commit();
+      return dto;
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  // DELETE /posts/:id/lock. Same authorisation and 409 as lock().
+  // Idempotent: unlocking an unlocked post changes and logs nothing.
+  async unlock(id: string, actorId: string): Promise<void> {
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+
+      const post = await this.lockPostForLocking(connection, id, actorId);
+      if (post.removed_at !== null) {
+        throw new ConflictException('A removed post cannot be unlocked');
+      }
+      const [result] = await connection.execute<ResultSetHeader>(
+        'UPDATE posts SET locked_at = NULL, locked_by = NULL WHERE id = ? AND locked_at IS NOT NULL',
+        [id],
+      );
+      if (result.affectedRows === 1) {
+        await this.moderationLog.record(connection, {
+          actorId,
+          communityId: post.community_id,
+          action: 'post_unlocked',
+          targetType: 'post',
+          targetId: id,
+        });
+      }
+
+      await connection.commit();
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  // As lockPostForModeration, for the lock routes: 404 for an unknown post
+  // or one in a deleted community, 403 unless the actor created or
+  // moderates the post's community. Authorship is deliberately not enough.
+  private async lockPostForLocking(
+    connection: PoolConnection,
+    id: string,
+    actorId: string,
+  ): Promise<LockablePostRow> {
+    const [posts] = await connection.execute<LockablePostRow[]>(
+      `SELECT posts.id, posts.community_id, posts.locked_at, posts.removed_at,
+         ${canModerateCommunitySql('posts.community_id')} AS can_moderate
+       FROM posts
+       WHERE posts.id = ? AND ${activeCommunitySql('posts.community_id')}
+       LIMIT 1 FOR UPDATE`,
+      [actorId, actorId, id],
+    );
+    const post = posts[0];
+    if (!post) {
+      throw new NotFoundException('Post not found');
+    }
+    if (!isSqlTrue(post.can_moderate)) {
+      throw new ForbiddenException(
+        'Only the community creator and moderators can lock or unlock posts',
+      );
+    }
+    return post;
+  }
+
   // Locks the post row and decides moderation rights from it: 404 for an
   // unknown post or one in a deleted community, 403 unless the actor created
   // or moderates the post's community. Authorship is deliberately not enough.
@@ -578,6 +714,8 @@ export function toPostDto(post: PostRow, score: number): PostDto {
     pinned_at: post.pinned_at ? new Date(post.pinned_at).toISOString() : null,
     pinned_by: post.pinned_by ?? null,
     edited_at: post.edited_at ? new Date(post.edited_at).toISOString() : null,
+    locked_at: post.locked_at ? new Date(post.locked_at).toISOString() : null,
+    locked_by: post.locked_by ?? null,
     score,
   };
 }

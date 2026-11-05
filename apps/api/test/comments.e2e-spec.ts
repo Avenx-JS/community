@@ -44,6 +44,7 @@ interface TestComment {
   removed_at?: Date | null;
   locked_at?: Date | null;
   edited_at?: Date | null;
+  locked_by?: string | null;
 }
 
 interface ListedComment {
@@ -81,6 +82,17 @@ describe('Comment endpoints (e2e)', () => {
   let suspendedCommunities: Set<string>;
   let lockedPosts: Set<string>;
   let removedPosts: Set<string>;
+  let ancestryReads: number;
+  let moderationLog: Array<{
+    community_id: string;
+    actor_id: string;
+    action: string;
+    target_type: string;
+    target_id: string;
+  }>;
+  let failModerationLog: boolean;
+  // The database clock of UTC_TIMESTAMP() in a lock.
+  const lockClock = '2026-11-06T09:00:00.000Z';
   // The database clock of UTC_TIMESTAMP() in an edit.
   const editClock = '2026-11-05T12:00:00.000Z';
   const postIds = ['post-1', 'post-2'];
@@ -93,7 +105,10 @@ describe('Comment endpoints (e2e)', () => {
     ['post-2', 'community-2'],
   ]);
   const communityCreators = new Map([['community-1', 'creator-1']]);
-  const moderatorAssignments = new Set(['community-1:user-mod']);
+  const moderatorAssignments = new Set([
+    'community-1:user-mod',
+    'community-2:user-other-mod',
+  ]);
 
   beforeEach(async () => {
     comments = [
@@ -147,6 +162,9 @@ describe('Comment endpoints (e2e)', () => {
     suspendedCommunities = new Set();
     lockedPosts = new Set();
     removedPosts = new Set();
+    ancestryReads = 0;
+    moderationLog = [];
+    failModerationLog = false;
     // A statement that excludes deleted communities does not see a post in
     // one; a statement that forgets the exclusion still does.
     const visiblePost = (postId: string, sql: string) =>
@@ -192,7 +210,7 @@ describe('Comment endpoints (e2e)', () => {
         // a rollback's snapshot restores the previous version.
         if (
           sql.startsWith('SELECT comments.id, comments.author_id') &&
-          sql.includes('comments.locked_at')
+          sql.includes('post_removed_at')
         ) {
           const [id] = values as [string];
           const comment = comments.find((entry) => entry.id === id);
@@ -235,7 +253,7 @@ describe('Comment endpoints (e2e)', () => {
         }
         if (
           sql.startsWith(
-            'SELECT id, post_id, parent_id, author_id, content, created_at, edited_at FROM comments WHERE id = ?',
+            'SELECT id, post_id, parent_id, author_id, content, created_at, edited_at, locked_at, locked_by FROM comments WHERE id = ?',
           )
         ) {
           const [id] = values as [string];
@@ -249,6 +267,69 @@ describe('Comment endpoints (e2e)', () => {
             [],
           ];
         }
+        // POST and DELETE /comments/:id/lock: the locking read with the
+        // moderation check, the guarded update and the log write.
+        if (sql.startsWith('SELECT comments.id, posts.community_id')) {
+          const [creatorId, moderatorId, id] = values as string[];
+          const comment = comments.find((entry) => entry.id === id);
+          if (!comment || !visiblePost(comment.post_id, sql)) {
+            return [[], []];
+          }
+          const communityId = postCommunities.get(comment.post_id) as string;
+          return [
+            [
+              {
+                id,
+                community_id: communityId,
+                locked_at: comment.locked_at ?? null,
+                removed_at: comment.removed_at ?? null,
+                can_moderate:
+                  communityCreators.get(communityId) === creatorId ||
+                  moderatorAssignments.has(`${communityId}:${moderatorId}`)
+                    ? 1
+                    : 0,
+              },
+            ],
+            [],
+          ];
+        }
+        if (sql.startsWith('UPDATE comments SET locked_at')) {
+          const locking = sql.includes('UTC_TIMESTAMP()');
+          const id = values[values.length - 1] as string;
+          const target = comments.find((comment) => comment.id === id);
+          if (!target || Boolean(target.locked_at) === locking) {
+            return [{ affectedRows: 0 }, []];
+          }
+          const lockedBy = locking ? (values[0] as string) : null;
+          comments = comments.map((comment) =>
+            comment.id === id
+              ? {
+                  ...comment,
+                  locked_at: locking ? new Date(lockClock) : null,
+                  locked_by: lockedBy,
+                }
+              : comment,
+          );
+          return [{ affectedRows: 1 }, []];
+        }
+        if (sql === 'SELECT username FROM users WHERE id = ? LIMIT 1') {
+          return [[{ username: `name-of-${values[0] as string}` }], []];
+        }
+        if (sql.startsWith('INSERT INTO community_moderation_actions')) {
+          if (failModerationLog) {
+            throw new Error('moderation log write failed');
+          }
+          const [, communityId, actorId, , action, targetType, targetId] =
+            values as string[];
+          moderationLog.push({
+            community_id: communityId,
+            actor_id: actorId,
+            action,
+            target_type: targetType,
+            target_id: targetId,
+          });
+          return [{ affectedRows: 1 }, []];
+        }
         if (sql.startsWith('SELECT comments.id FROM comments')) {
           const [id] = values as [string];
           const comment = comments.find((entry) => entry.id === id);
@@ -259,7 +340,7 @@ describe('Comment endpoints (e2e)', () => {
         }
         if (
           sql.startsWith(
-            'SELECT id, post_id, parent_id, author_id, content, created_at, edited_at FROM comments',
+            'SELECT id, post_id, parent_id, author_id, content, created_at, edited_at, locked_at, locked_by FROM comments',
           )
         ) {
           const [key, limit, offset] = values as [string, number, number];
@@ -311,6 +392,9 @@ describe('Comment endpoints (e2e)', () => {
                     author_id: postAuthors.get(postId),
                     community_id: postCommunities.get(postId),
                     title: `Title of ${postId}`,
+                    locked_at: lockedPosts.has(postId)
+                      ? new Date('2026-11-01T00:00:00.000Z')
+                      : null,
                   },
                 ]
               : [],
@@ -400,18 +484,51 @@ describe('Comment endpoints (e2e)', () => {
             [],
           ];
         }
-        if (
-          sql.startsWith(
-            'SELECT id, author_id FROM comments WHERE id = ? AND post_id',
-          )
-        ) {
-          const [id, postId] = values as [string, string];
+        // PARENT_WITH_ANCESTRY_SQL: walks parent_id from the parent upwards,
+        // at most `bound` levels, as the recursive CTE does. Like the real
+        // aggregate it answers one row, of NULLs for an unknown parent.
+        if (sql.startsWith('WITH RECURSIVE ancestors')) {
+          const [id, postId, bound] = values as [string, string, number];
+          const parent = comments.find(
+            (comment) => comment.id === id && comment.post_id === postId,
+          );
+          if (!parent) {
+            return [
+              [
+                {
+                  id: null,
+                  author_id: null,
+                  thread_locked: null,
+                  depth_exceeded: null,
+                },
+              ],
+              [],
+            ];
+          }
+          let current: TestComment | undefined = parent;
+          let depth = 1;
+          let locked = false;
+          let exceeded = false;
+          while (current) {
+            locked ||= Boolean(current.locked_at);
+            if (depth === bound) {
+              exceeded = current.parent_id !== null;
+              break;
+            }
+            const parentId: string | null = current.parent_id;
+            current = comments.find((comment) => comment.id === parentId);
+            depth += 1;
+          }
+          ancestryReads += 1;
           return [
-            comments
-              .filter(
-                (comment) => comment.id === id && comment.post_id === postId,
-              )
-              .map((comment) => ({ id, author_id: comment.author_id })),
+            [
+              {
+                id: parent.id,
+                author_id: parent.author_id,
+                thread_locked: locked ? 1 : 0,
+                depth_exceeded: exceeded ? 1 : 0,
+              },
+            ],
             [],
           ];
         }
@@ -531,6 +648,7 @@ describe('Comment endpoints (e2e)', () => {
       'moderator-token': 'user-mod',
       'post-author-token': 'user-2',
       'creator-token': 'creator-1',
+      'other-moderator-token': 'user-other-mod',
     };
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
@@ -618,6 +736,8 @@ describe('Comment endpoints (e2e)', () => {
         'post_id',
         'replies',
         'edited_at',
+        'locked_at',
+        'locked_by',
         'score',
       ].sort(),
     );
@@ -1100,6 +1220,8 @@ describe('Comment endpoints (e2e)', () => {
             content: 'Reply',
             created_at: '2026-10-22T08:01:00.000Z',
             edited_at: null,
+            locked_at: null,
+            locked_by: null,
             reply_count: 1,
             score: 0,
           },
@@ -1426,6 +1548,8 @@ describe('Comment endpoints (e2e)', () => {
         content: 'Corrected',
         created_at: '2026-10-22T08:00:00.000Z',
         edited_at: editClock,
+        locked_at: null,
+        locked_by: null,
         reply_count: 1,
         score: 0,
       });
@@ -1521,13 +1645,6 @@ describe('Comment endpoints (e2e)', () => {
         },
       ],
       ['its post is removed', () => removedPosts.add('post-1')],
-      [
-        'the comment is locked',
-        () => {
-          stored('root-1')!.locked_at = new Date('2026-11-01T00:00:00.000Z');
-        },
-      ],
-      ['its post is locked', () => lockedPosts.add('post-1')],
     ] as [string, () => void][])(
       'answers 409 when %s',
       async (_label, arrange) => {
@@ -1536,6 +1653,27 @@ describe('Comment endpoints (e2e)', () => {
           409,
         );
         expect(edits()).toHaveLength(0);
+      },
+    );
+
+    // A lock closes the discussion; it does not freeze what was written.
+    it.each([
+      [
+        'the comment is locked',
+        () => {
+          stored('root-1')!.locked_at = new Date('2026-11-01T00:00:00.000Z');
+        },
+      ],
+      ['its post is locked', () => lockedPosts.add('post-1')],
+    ] as [string, () => void][])(
+      'still lets the author edit when %s',
+      async (_label, arrange) => {
+        arrange();
+        await patch(
+          '/comments/root-1',
+          { content: 'Corrected' },
+          'valid-token',
+        ).expect(200);
       },
     );
 
@@ -1565,6 +1703,300 @@ describe('Comment endpoints (e2e)', () => {
         .set('Authorization', 'Bearer valid-token')
         .send({ content: 'New' })
         .expect(403);
+    });
+  });
+
+  describe('locking', () => {
+    const as = (token?: string) => {
+      const server = () => request(app.getHttpServer());
+      const auth = (call: request.Test) =>
+        token ? call.set('Authorization', `Bearer ${token}`) : call;
+      return {
+        lock: (id: string) => auth(server().post(`/comments/${id}/lock`)),
+        unlock: (id: string) => auth(server().delete(`/comments/${id}/lock`)),
+        reply: (parentId: string, content = 'A reply') =>
+          auth(server().post('/posts/post-1/comments')).send({
+            content,
+            parent_id: parentId,
+          }),
+        comment: (postId = 'post-1') =>
+          auth(server().post(`/posts/${postId}/comments`)).send({
+            content: 'Top level',
+          }),
+        edit: (id: string) =>
+          auth(server().patch(`/comments/${id}`)).send({ content: 'Fixed' }),
+        remove: (id: string) => auth(server().delete(`/comments/${id}`)),
+      };
+    };
+    const stored = (id: string) =>
+      comments.find((comment) => comment.id === id);
+    const inserts = () =>
+      queryCalls.filter(({ sql }) => sql.startsWith('INSERT INTO comments'));
+    const lockedBy = (id: string, actor = 'creator-1') => {
+      comments = comments.map((comment) =>
+        comment.id === id
+          ? {
+              ...comment,
+              locked_at: new Date('2026-11-01T00:00:00.000Z'),
+              locked_by: actor,
+            }
+          : comment,
+      );
+    };
+    // root-1 → reply-1 → nested-reply → deep-3 → deep-4: the reply chain
+    // used for the depth tests.
+    const addDeepChain = () => {
+      comments.push(
+        {
+          id: 'deep-3',
+          post_id: 'post-1',
+          author_id: 'user-2',
+          parent_id: 'nested-reply',
+          content: 'Depth 3',
+          created_at: new Date('2026-10-22T08:03:00.000Z'),
+        },
+        {
+          id: 'deep-4',
+          post_id: 'post-1',
+          author_id: 'user-1',
+          parent_id: 'deep-3',
+          content: 'Depth 4',
+          created_at: new Date('2026-10-22T08:04:00.000Z'),
+        },
+      );
+    };
+
+    afterEach(() => {
+      expect(openConnections).toBe(0);
+    });
+
+    describe('POST and DELETE /comments/:id/lock', () => {
+      it.each(['moderator-token', 'creator-token'])(
+        'lets %s lock with 200 and the flat comment, from the database clock and the token, and unlock with 204',
+        async (token) => {
+          const actor = token === 'creator-token' ? 'creator-1' : 'user-mod';
+          const locked = await as(token).lock('reply-1').expect(200);
+          expect(locked.body).toMatchObject({
+            id: 'reply-1',
+            parent_id: 'root-1',
+            locked_at: lockClock,
+            locked_by: actor,
+            reply_count: 1,
+          });
+          expect(locked.body).not.toHaveProperty('replies');
+
+          await as(token).unlock('reply-1').expect(204);
+          expect(stored('reply-1')).toMatchObject({
+            locked_at: null,
+            locked_by: null,
+          });
+          expect(moderationLog).toEqual([
+            {
+              community_id: 'community-1',
+              actor_id: actor,
+              action: 'comment_locked',
+              target_type: 'comment',
+              target_id: 'reply-1',
+            },
+            {
+              community_id: 'community-1',
+              actor_id: actor,
+              action: 'comment_unlocked',
+              target_type: 'comment',
+              target_id: 'reply-1',
+            },
+          ]);
+        },
+      );
+
+      it('is idempotent: a second lock keeps locked_at and a second unlock is 204, logging once each', async () => {
+        lockedBy('reply-1');
+        const again = await as('moderator-token').lock('reply-1').expect(200);
+        expect(again.body).toMatchObject({
+          locked_at: '2026-11-01T00:00:00.000Z',
+          locked_by: 'creator-1',
+        });
+        expect(moderationLog).toHaveLength(0);
+
+        await as('moderator-token').unlock('reply-1').expect(204);
+        await as('moderator-token').unlock('reply-1').expect(204);
+        expect(moderationLog.map((entry) => entry.action)).toEqual([
+          'comment_unlocked',
+        ]);
+      });
+
+      it('renders a lock by a since-deleted moderator with locked_by null', async () => {
+        lockedBy('reply-1', null as unknown as string);
+        await as('moderator-token')
+          .lock('reply-1')
+          .expect(200)
+          .expect(({ body }) =>
+            expect(body).toMatchObject({ locked_by: null }),
+          );
+      });
+
+      it.each([
+        ['valid-token', "the comment's own author"],
+        ['other-moderator-token', 'a moderator of another community'],
+        ['post-author-token', 'an unrelated user'],
+      ])('answers %s (%s) with 403 on both methods', async (token) => {
+        await as(token).lock('root-1').expect(403);
+        await as(token).unlock('root-1').expect(403);
+        expect(stored('root-1')?.locked_at ?? null).toBeNull();
+        expect(moderationLog).toHaveLength(0);
+      });
+
+      it('answers 401, 404 and 400 on both methods', async () => {
+        await as().lock('root-1').expect(401);
+        await as().unlock('root-1').expect(401);
+        await as('moderator-token').lock('missing').expect(404);
+        await as('moderator-token').unlock('missing').expect(404);
+        await as('moderator-token').lock('x%27%20OR%201%3D1').expect(400);
+        await as('moderator-token').unlock('x%27%20OR%201%3D1').expect(400);
+      });
+
+      it('answers 409 for a removed comment on both methods', async () => {
+        stored('root-1')!.removed_at = new Date('2026-11-01T00:00:00.000Z');
+        await as('moderator-token').lock('root-1').expect(409);
+        await as('moderator-token').unlock('root-1').expect(409);
+      });
+
+      it('answers 404 once the community is deleted', async () => {
+        deletedCommunities.add('community-1');
+        await as('moderator-token').lock('root-1').expect(404);
+      });
+
+      it('rolls the lock back when the log entry cannot be written', async () => {
+        failModerationLog = true;
+        await as('moderator-token').lock('root-1').expect(500);
+        expect(stored('root-1')?.locked_at ?? null).toBeNull();
+        await as('valid-token').reply('root-1').expect(201);
+      });
+
+      it('rolls the unlock back when the log entry cannot be written', async () => {
+        lockedBy('root-1');
+        failModerationLog = true;
+        await as('moderator-token').unlock('root-1').expect(500);
+        expect(stored('root-1')?.locked_at).not.toBeNull();
+      });
+    });
+
+    describe('enforcement on new comments', () => {
+      it('refuses a top-level comment on a locked post, and allows it again once unlocked', async () => {
+        lockedPosts.add('post-1');
+        const refused = await as('valid-token').comment().expect(409);
+        expect((refused.body as { message: string }).message).toBe(
+          'This post is locked; it accepts no new comments',
+        );
+        // A reply anywhere on the locked post is refused the same way.
+        await as('valid-token').reply('root-2').expect(409);
+        expect(inserts()).toHaveLength(0);
+
+        lockedPosts.delete('post-1');
+        await as('valid-token').comment().expect(201);
+      });
+
+      it('refuses replies under a locked comment, then allows them after unlocking', async () => {
+        await as('moderator-token').lock('root-1').expect(200);
+        const refused = await as('valid-token').reply('root-1').expect(409);
+        expect((refused.body as { message: string }).message).toBe(
+          'A comment above this reply is locked; its thread accepts no new replies',
+        );
+        expect(inserts()).toHaveLength(0);
+
+        await as('moderator-token').unlock('root-1').expect(204);
+        await as('valid-token').reply('root-1').expect(201);
+      });
+
+      // A direct-parent-only check would let each of these through.
+      it.each([
+        ['the direct parent', 'root-1', 'root-1'],
+        ['the grandparent', 'root-1', 'reply-1'],
+        ['the great-grandparent', 'root-1', 'nested-reply'],
+        ['the root, four levels up', 'root-1', 'deep-4'],
+        ['a comment mid-chain', 'reply-1', 'deep-4'],
+      ])(
+        'refuses a reply when %s is locked',
+        async (_label, lockedId, parentId) => {
+          addDeepChain();
+          lockedBy(lockedId);
+          await as('valid-token').reply(parentId).expect(409);
+          expect(inserts()).toHaveLength(0);
+        },
+      );
+
+      it('keeps a sibling subtree and the locked comment’s ancestors open', async () => {
+        addDeepChain();
+        lockedBy('nested-reply');
+        // Siblings of the locked subtree and its ancestors still take replies.
+        await as('valid-token').reply('root-2').expect(201);
+        await as('valid-token').reply('reply-1').expect(201);
+        await as('valid-token').reply('root-1').expect(201);
+        await as('valid-token').comment().expect(201);
+        // Beneath it, nothing.
+        await as('valid-token').reply('deep-3').expect(409);
+        await as('valid-token').reply('deep-4').expect(409);
+      });
+
+      it.each(['moderator-token', 'creator-token'])(
+        'refuses %s too: a lock binds moderators until they unlock',
+        async (token) => {
+          lockedBy('root-1');
+          await as(token).reply('reply-1').expect(409);
+          lockedPosts.add('post-1');
+          await as(token).comment().expect(409);
+          expect(inserts()).toHaveLength(0);
+        },
+      );
+
+      it('answers 404 for an unknown post or parent before any lock is consulted', async () => {
+        lockedPosts.add('post-1');
+        lockedBy('root-1');
+        await as('valid-token').comment('missing-post').expect(404);
+        await as('valid-token').reply('unknown-parent').expect(404);
+        await as('valid-token').reply('other-post-comment').expect(404);
+      });
+
+      it('answers the rule gate (403) before the lock (409)', async () => {
+        rules.publish('community-1');
+        lockedPosts.add('post-1');
+        const response = await as('valid-token').comment().expect(403);
+        expect(response.body).toMatchObject({
+          reason: 'community_rules_not_accepted',
+        });
+      });
+    });
+
+    describe('what a lock does not affect', () => {
+      it('keeps locked content readable in the tree and the flat routes, with its lock state', async () => {
+        lockedBy('reply-1', 'user-mod');
+        const thread = await request(app.getHttpServer())
+          .get('/posts/post-1/comments')
+          .expect(200);
+        expect(
+          (thread.body as { comments: CommentNode[] }).comments[0].replies[0],
+        ).toMatchObject({
+          id: 'reply-1',
+          locked_at: '2026-11-01T00:00:00.000Z',
+          locked_by: 'user-mod',
+          replies: [{ id: 'nested-reply', locked_at: null }],
+        });
+        const replies = await request(app.getHttpServer())
+          .get('/comments/root-1/replies')
+          .expect(200);
+        expect((replies.body as CommentPage).items[0]).toMatchObject({
+          id: 'reply-1',
+          locked_at: '2026-11-01T00:00:00.000Z',
+        });
+      });
+
+      it('lets the author edit and delete their own locked comment', async () => {
+        lockedBy('nested-reply');
+        lockedPosts.add('post-1');
+        await as('valid-token').edit('nested-reply').expect(200);
+        await as('valid-token').remove('nested-reply').expect(204);
+        expect(stored('nested-reply')).toBeUndefined();
+      });
     });
   });
 });

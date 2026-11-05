@@ -196,13 +196,13 @@ integration('content editing (MySQL)', () => {
     ).rejects.toMatchObject({ status: 404 });
   });
 
-  it('refuses a comment on a locked post with 409, while the post itself stays editable', async () => {
+  it('lets the author edit a locked post and their comments on it: a lock does not freeze text', async () => {
     await connection.query(
       "UPDATE posts SET locked_at = UTC_TIMESTAMP(), locked_by = 'mod' WHERE id = 'p-text'",
     );
     await expect(
-      comments.update('m-nested', { content: 'x' }, 'author'),
-    ).rejects.toMatchObject({ status: 409 });
+      comments.update('m-nested', { content: 'Nested, fixed' }, 'author'),
+    ).resolves.toMatchObject({ content: 'Nested, fixed' });
     await expect(
       posts.update('p-text', { title: 'Still mine' }, 'author'),
     ).resolves.toMatchObject({ title: 'Still mine' });

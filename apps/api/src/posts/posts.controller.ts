@@ -193,6 +193,62 @@ export class PostsController {
     return this.postsService.unpin(id, request.user.id);
   }
 
+  @Post(':id/lock')
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Lock a post',
+    description:
+      'Closes the post to new comments, for everyone including moderators; ' +
+      'it stays readable, votable and editable by its author. Community ' +
+      'creator and moderators only: the post author may not lock their own ' +
+      'post (as for pinning, and unlike editing, which only the author may ' +
+      'do). Idempotent: locking a locked post returns it unchanged, keeping ' +
+      'locked_at.',
+  })
+  @ApiAuthenticated({
+    forbidden: 'The caller does not moderate this community.',
+  })
+  @ApiRouteParam('id', 'id', 'Post ID.')
+  @ApiOkResponse({ type: PostResponse })
+  @ApiErrorResponses({
+    400: 'Invalid post ID.',
+    404: 'Post not found.',
+    409: 'The post was removed by a moderator.',
+  })
+  lock(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.postsService.lock(id, request.user.id);
+  }
+
+  @Delete(':id/lock')
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary: 'Unlock a post',
+    description:
+      'Reopens the post to new comments. Same authorisation as locking. ' +
+      'Idempotent: unlocking an unlocked post also returns 204.',
+  })
+  @ApiAuthenticated({
+    forbidden: 'The caller does not moderate this community.',
+  })
+  @ApiRouteParam('id', 'id', 'Post ID.')
+  @ApiNoContentResponse({ description: 'The post is not locked.' })
+  @ApiErrorResponses({
+    400: 'Invalid post ID.',
+    404: 'Post not found.',
+    409: 'The post was removed by a moderator.',
+  })
+  unlock(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<void> {
+    return this.postsService.unlock(id, request.user.id);
+  }
+
   @Put(':id/vote')
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.OK)
@@ -321,6 +377,9 @@ export class PostsController {
   @ApiErrorResponses({
     400: 'Invalid post ID or comment data.',
     404: 'Post or parent comment not found.',
+    409:
+      'The post is locked, or a comment above the reply is locked (a lock ' +
+      'binds moderators too), or the thread is nested too deeply.',
   })
   addComment(
     @Param('postId', new SafeRouteParamPipe('id')) postId: string,

@@ -8,7 +8,11 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { CommentsService } from './comments.service';
+import {
+  CommentsService,
+  MAX_LOCK_ANCESTOR_DEPTH,
+  PARENT_WITH_ANCESTRY_SQL,
+} from './comments.service';
 
 // Every community's rules count as accepted unless a test says otherwise.
 const acceptingRuleAcceptance = {
@@ -147,7 +151,12 @@ describe('CommentsService', () => {
         'user-1',
       ),
     ).rejects.toBeInstanceOf(NotFoundException);
-    expect(queries[2].values).toEqual(['foreign-parent', 'post-1']);
+    expect(queries[2].values).toEqual([
+      'foreign-parent',
+      'post-1',
+      MAX_LOCK_ANCESTOR_DEPTH,
+      MAX_LOCK_ANCESTOR_DEPTH,
+    ]);
   });
 
   it('creates comments with the authenticated author', async () => {
@@ -278,6 +287,8 @@ describe('CommentsService.create notifications', () => {
       content: 'Mine ripened early.',
       created_at: '2026-10-30T08:00:00.000Z',
       edited_at: null,
+      locked_at: null,
+      locked_by: null,
       score: 0,
       replies: [],
     });
@@ -316,8 +327,13 @@ describe('CommentsService.create notifications', () => {
     );
 
     expect(queries[1]).toEqual({
-      sql: 'SELECT id, author_id FROM comments WHERE id = ? AND post_id = ? LIMIT 1',
-      values: ['parent-1', 'post-1'],
+      sql: PARENT_WITH_ANCESTRY_SQL,
+      values: [
+        'parent-1',
+        'post-1',
+        MAX_LOCK_ANCESTOR_DEPTH,
+        MAX_LOCK_ANCESTOR_DEPTH,
+      ],
     });
     expect(notifications.record).toHaveBeenCalledTimes(1);
     expect(notifications.record).toHaveBeenCalledWith(connection, {
@@ -492,7 +508,7 @@ describe('CommentsService.create with NotificationsService', () => {
             [],
           ]);
         }
-        if (sql.startsWith('SELECT id, author_id FROM comments')) {
+        if (sql.startsWith('WITH RECURSIVE ancestors')) {
           return Promise.resolve([
             comments.filter(
               (comment) =>
@@ -760,6 +776,8 @@ describe('CommentsService paginated listings', () => {
     content: `Content of ${id}`,
     created_at: new Date('2026-10-22T08:00:00.000Z'),
     edited_at: null,
+    locked_at: null,
+    locked_by: null,
   });
   const listing = () => queries.find(({ sql }) => sql.includes('ORDER BY'));
   const counting = () =>
@@ -866,6 +884,8 @@ describe('CommentsService paginated listings', () => {
           content: 'Content of with-children',
           created_at: '2026-10-22T08:00:00.000Z',
           edited_at: null,
+          locked_at: null,
+          locked_by: null,
           reply_count: 3,
           score: 0,
         },
@@ -1120,6 +1140,8 @@ describe('CommentsService.update', () => {
       content: 'Fixed',
       created_at: '2026-10-22T08:00:00.000Z',
       edited_at: clock.toISOString(),
+      locked_at: null,
+      locked_by: null,
       reply_count: 2,
       score: 3,
     });
@@ -1160,14 +1182,21 @@ describe('CommentsService.update', () => {
   it.each([
     ['the comment is removed', { removed_at: clock }],
     ['its post is removed', { post_removed_at: clock }],
-    ['the comment is locked', { locked_at: clock }],
-    ['its post is locked', { post_locked_at: clock }],
   ])('refuses with 409 when %s', async (_label, state) => {
     addComment('comment-1', state);
     await expect(
       service.update('comment-1', { content: 'x' }, 'author'),
     ).rejects.toBeInstanceOf(ConflictException);
     expectRolledBackAndReleased();
+  });
+
+  // A lock closes the discussion to new replies; it does not freeze what
+  // was written, so the author may still correct a locked comment.
+  it('lets the author edit a locked comment, or one on a locked post', async () => {
+    addComment('comment-1', { locked_at: clock, post_locked_at: clock });
+    await expect(
+      service.update('comment-1', { content: 'Corrected' }, 'author'),
+    ).resolves.toMatchObject({ content: 'Corrected' });
   });
 
   it('answers 403, not 409, to a non-author of a removed comment', async () => {
@@ -1185,5 +1214,210 @@ describe('CommentsService.update', () => {
     expect(connection.commit).not.toHaveBeenCalled();
     expect(connection.rollback).toHaveBeenCalledTimes(1);
     expect(connection.release).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('CommentsService.create on locked threads', () => {
+  let service: CommentsService;
+  let queries: Array<{ sql: string; values: unknown[] }>;
+  let postLocked: boolean;
+  let ancestry: {
+    id: string | null;
+    author_id: string | null;
+    thread_locked: number | string | null;
+    depth_exceeded: number | string | null;
+  };
+  let assertAccepted: jest.Mock;
+  let connection: {
+    beginTransaction: jest.Mock;
+    commit: jest.Mock;
+    rollback: jest.Mock;
+    release: jest.Mock;
+    execute: (sql: string, values: unknown[]) => Promise<[unknown, unknown]>;
+  };
+
+  beforeEach(async () => {
+    queries = [];
+    postLocked = false;
+    ancestry = {
+      id: 'parent-1',
+      author_id: 'parent-author',
+      thread_locked: 0,
+      depth_exceeded: 0,
+    };
+    assertAccepted = jest.fn().mockResolvedValue(undefined);
+    connection = {
+      beginTransaction: jest.fn().mockResolvedValue(undefined),
+      commit: jest.fn().mockResolvedValue(undefined),
+      rollback: jest.fn().mockResolvedValue(undefined),
+      release: jest.fn(),
+      execute: (sql, values) => {
+        queries.push({ sql, values });
+        if (sql.startsWith('SELECT id, author_id, community_id, title')) {
+          return Promise.resolve([
+            values[0] === 'post-1'
+              ? [
+                  {
+                    id: 'post-1',
+                    author_id: 'post-author',
+                    community_id: 'community-1',
+                    title: 'Title',
+                    locked_at: postLocked
+                      ? new Date('2026-11-01T00:00:00.000Z')
+                      : null,
+                  },
+                ]
+              : [],
+            [],
+          ]);
+        }
+        if (sql.startsWith('WITH RECURSIVE ancestors')) {
+          return Promise.resolve([[ancestry], []]);
+        }
+        if (sql.startsWith('INSERT INTO comments')) {
+          return Promise.resolve([{ affectedRows: 1 }, []]);
+        }
+        if (sql.startsWith('SELECT id, post_id, author_id, parent_id')) {
+          return Promise.resolve([
+            [
+              {
+                id: values[0],
+                post_id: 'post-1',
+                author_id: 'commenter',
+                parent_id: null,
+                content: 'Hi',
+                created_at: new Date('2026-11-06T09:00:00.000Z'),
+                edited_at: null,
+                locked_at: null,
+                locked_by: null,
+              },
+            ],
+            [],
+          ]);
+        }
+        return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
+      },
+    };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        CommentsService,
+        {
+          provide: MYSQL_POOL,
+          useValue: { getConnection: () => Promise.resolve(connection) },
+        },
+        {
+          provide: NotificationsService,
+          useValue: { record: jest.fn().mockResolvedValue(undefined) },
+        },
+        {
+          provide: CommunityRuleAcceptanceService,
+          useValue: { assertAcceptedOrThrow: assertAccepted },
+        },
+      ],
+    }).compile();
+    service = module.get(CommentsService);
+  });
+
+  const inserts = () =>
+    queries.filter(({ sql }) => sql.startsWith('INSERT INTO comments'));
+  const expectRefusedAndReleased = () => {
+    expect(inserts()).toHaveLength(0);
+    expect(connection.commit).not.toHaveBeenCalled();
+    expect(connection.rollback).toHaveBeenCalledTimes(1);
+    expect(connection.release).toHaveBeenCalledTimes(1);
+  };
+
+  it('reads the post with its lock state under a share lock', async () => {
+    await service.create('post-1', { content: 'Hi' }, 'commenter');
+    expect(queries[0].sql).toContain('locked_at');
+    expect(queries[0].sql).toContain('FOR SHARE');
+  });
+
+  it('refuses a top-level comment on a locked post with 409, naming the post', async () => {
+    postLocked = true;
+    await expect(
+      service.create('post-1', { content: 'Hi' }, 'commenter'),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: 'This post is locked; it accepts no new comments',
+    });
+    expectRefusedAndReleased();
+  });
+
+  it('refuses a reply when the parent or an ancestor is locked, naming the thread', async () => {
+    ancestry.thread_locked = 1;
+    await expect(
+      service.create(
+        'post-1',
+        { content: 'Hi', parent_id: 'parent-1' },
+        'commenter',
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      message:
+        'A comment above this reply is locked; its thread accepts no new replies',
+    });
+    expectRefusedAndReleased();
+  });
+
+  it('reads the ancestry with the bound, parent id and post id first', async () => {
+    await service.create(
+      'post-1',
+      { content: 'Hi', parent_id: 'parent-1' },
+      'commenter',
+    );
+    const read = queries.find(({ sql }) => sql.startsWith('WITH RECURSIVE'));
+    expect(read).toEqual({
+      sql: PARENT_WITH_ANCESTRY_SQL,
+      values: [
+        'parent-1',
+        'post-1',
+        MAX_LOCK_ANCESTOR_DEPTH,
+        MAX_LOCK_ANCESTOR_DEPTH,
+      ],
+    });
+    expect(MAX_LOCK_ANCESTOR_DEPTH).toBeLessThan(1000);
+    expect(inserts()).toHaveLength(1);
+  });
+
+  it('fails closed when the walk reaches the bound with ancestors left', async () => {
+    ancestry.depth_exceeded = '1';
+    await expect(
+      service.create(
+        'post-1',
+        { content: 'Hi', parent_id: 'parent-1' },
+        'commenter',
+      ),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expectRefusedAndReleased();
+  });
+
+  it('answers 404 before 409: an unknown post or parent on a locked path', async () => {
+    postLocked = true;
+    ancestry = {
+      id: null,
+      author_id: null,
+      thread_locked: null,
+      depth_exceeded: null,
+    };
+    await expect(
+      service.create('missing', { content: 'Hi' }, 'commenter'),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    await expect(
+      service.create(
+        'post-1',
+        { content: 'Hi', parent_id: 'gone' },
+        'commenter',
+      ),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(assertAccepted).not.toHaveBeenCalled();
+  });
+
+  it('answers the rule gate before the lock', async () => {
+    postLocked = true;
+    assertAccepted.mockRejectedValueOnce(new ForbiddenException('rules'));
+    await expect(
+      service.create('post-1', { content: 'Hi' }, 'commenter'),
+    ).rejects.toBeInstanceOf(ForbiddenException);
   });
 });

@@ -132,6 +132,8 @@ describe('UserActivityService', () => {
           pinned_at: null,
           pinned_by: null,
           edited_at: null,
+          locked_at: null,
+          locked_by: null,
           score: 0,
         },
       ]);

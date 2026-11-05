@@ -57,6 +57,24 @@ export class PostResponse implements PostDto {
   edited_at!: string | null;
 
   @ApiProperty({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description:
+      'When a moderator closed the post to new comments; null if open.',
+  })
+  locked_at!: string | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      "Who locked the post. Also null on a locked post once that moderator's " +
+      'account is deleted.',
+  })
+  locked_by!: string | null;
+
+  @ApiProperty({
     type: 'integer',
     description: 'Sum of all vote values on the post; 0 without votes.',
   })

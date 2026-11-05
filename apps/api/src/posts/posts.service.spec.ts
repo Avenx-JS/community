@@ -277,6 +277,8 @@ describe('PostsService.create notifications', () => {
       id: postId,
       created_at: '2026-10-30T08:00:00.000Z',
       edited_at: null,
+      locked_at: null,
+      locked_by: null,
       score: 0,
     });
     expect(queries[1].values[0]).toBe(postId);
@@ -1457,6 +1459,8 @@ describe('PostsService.update', () => {
       content: 'Body',
       created_at: '2026-10-22T08:00:00.000Z',
       edited_at: clock.toISOString(),
+      locked_at: null,
+      locked_by: null,
       score: 4,
     });
     expectCommittedAndReleased();
@@ -1599,5 +1603,278 @@ describe('PostsService.update', () => {
     expect(connection.commit).not.toHaveBeenCalled();
     expect(connection.rollback).toHaveBeenCalledTimes(1);
     expect(connection.release).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('PostsService.lock and unlock', () => {
+  type StoredPost = {
+    id: string;
+    author_id: string;
+    community_id: string;
+    locked_at: Date | null;
+    locked_by: string | null;
+    removed_at: Date | null;
+  };
+  let service: PostsService;
+  let posts: Map<string, StoredPost>;
+  let queries: Array<{ sql: string; values: unknown[] }>;
+  let log: { record: jest.Mock };
+  let connection: {
+    beginTransaction: jest.Mock;
+    commit: jest.Mock;
+    rollback: jest.Mock;
+    release: jest.Mock;
+    execute: (sql: string, values: unknown[]) => Promise<[unknown, unknown]>;
+  };
+  const clock = new Date('2026-11-06T09:00:00.000Z');
+  // community-1 is created by creator-1 and moderated by moderator.
+  const canModerate = (actor: unknown) =>
+    actor === 'creator-1' || actor === 'moderator';
+
+  beforeEach(async () => {
+    queries = [];
+    posts = new Map([
+      [
+        'post-1',
+        {
+          id: 'post-1',
+          author_id: 'author',
+          community_id: 'community-1',
+          locked_at: null,
+          locked_by: null,
+          removed_at: null,
+        },
+      ],
+    ]);
+    log = { record: jest.fn().mockResolvedValue(undefined) };
+    connection = {
+      beginTransaction: jest.fn().mockResolvedValue(undefined),
+      commit: jest.fn().mockResolvedValue(undefined),
+      rollback: jest.fn().mockResolvedValue(undefined),
+      release: jest.fn(),
+      execute: (sql, values) => {
+        queries.push({ sql, values });
+        if (
+          sql.startsWith('SELECT posts.id, posts.community_id, posts.locked_at')
+        ) {
+          const post = posts.get(values[2] as string);
+          return Promise.resolve([
+            post
+              ? [{ ...post, can_moderate: canModerate(values[0]) ? 1 : 0 }]
+              : [],
+            [],
+          ]);
+        }
+        if (sql.startsWith('UPDATE posts SET locked_at')) {
+          const locking = sql.includes('UTC_TIMESTAMP()');
+          const id = values[values.length - 1] as string;
+          const post = posts.get(id)!;
+          if (Boolean(post.locked_at) === locking) {
+            return Promise.resolve([{ affectedRows: 0 }, []]);
+          }
+          posts.set(id, {
+            ...post,
+            locked_at: locking ? clock : null,
+            locked_by: locking ? (values[0] as string) : null,
+          });
+          return Promise.resolve([{ affectedRows: 1 }, []]);
+        }
+        if (sql.startsWith('SELECT id, title, content, type')) {
+          const post = posts.get(values[0] as string)!;
+          return Promise.resolve([
+            [
+              {
+                ...post,
+                title: 'Title',
+                content: 'Body',
+                type: 'text',
+                created_at: new Date('2026-10-22T08:00:00.000Z'),
+                pinned_at: null,
+                pinned_by: null,
+                edited_at: null,
+              },
+            ],
+            [],
+          ]);
+        }
+        if (sql.startsWith('SELECT target_id, SUM(value) AS score')) {
+          return Promise.resolve([[], []]);
+        }
+        return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
+      },
+    };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        PostsService,
+        {
+          provide: MYSQL_POOL,
+          useValue: { getConnection: () => Promise.resolve(connection) },
+        },
+        { provide: NotificationsService, useValue: {} },
+        acceptingRuleAcceptance,
+        { provide: CommunityModerationLogService, useValue: log },
+      ],
+    }).compile();
+    service = module.get(PostsService);
+  });
+
+  const writes = () =>
+    queries.filter(({ sql }) => sql.startsWith('UPDATE posts'));
+  const expectCommittedAndReleased = () => {
+    expect(connection.commit).toHaveBeenCalledTimes(1);
+    expect(connection.rollback).not.toHaveBeenCalled();
+    expect(connection.release).toHaveBeenCalledTimes(1);
+  };
+  const expectRolledBackAndReleased = () => {
+    expect(connection.commit).not.toHaveBeenCalled();
+    expect(connection.rollback).toHaveBeenCalledTimes(1);
+    expect(connection.release).toHaveBeenCalledTimes(1);
+  };
+
+  it('reads the post FOR UPDATE with the moderation check bound to the actor', async () => {
+    await service.lock('post-1', 'moderator');
+    expect(queries[0].values).toEqual(['moderator', 'moderator', 'post-1']);
+    expect(queries[0].sql).toContain('FOR UPDATE');
+    expect(queries[0].sql).toContain('community_moderators');
+  });
+
+  it.each(['moderator', 'creator-1'])(
+    'lets %s lock, from the database clock and the token, logging post_locked',
+    async (actor) => {
+      const result = await service.lock('post-1', actor);
+      expect(writes()).toEqual([
+        {
+          sql: 'UPDATE posts SET locked_at = UTC_TIMESTAMP(), locked_by = ? WHERE id = ? AND locked_at IS NULL',
+          values: [actor, 'post-1'],
+        },
+      ]);
+      expect(result).toMatchObject({
+        id: 'post-1',
+        locked_at: clock.toISOString(),
+        locked_by: actor,
+      });
+      expect(log.record).toHaveBeenCalledTimes(1);
+      expect(log.record).toHaveBeenCalledWith(connection, {
+        actorId: actor,
+        communityId: 'community-1',
+        action: 'post_locked',
+        targetType: 'post',
+        targetId: 'post-1',
+      });
+      expectCommittedAndReleased();
+    },
+  );
+
+  it('is idempotent: locking a locked post keeps locked_at and logs nothing', async () => {
+    const earlier = new Date('2026-11-01T00:00:00.000Z');
+    posts.set('post-1', {
+      ...posts.get('post-1')!,
+      locked_at: earlier,
+      locked_by: 'creator-1',
+    });
+    const result = await service.lock('post-1', 'moderator');
+    expect(result).toMatchObject({
+      locked_at: earlier.toISOString(),
+      locked_by: 'creator-1',
+    });
+    expect(log.record).not.toHaveBeenCalled();
+    expectCommittedAndReleased();
+  });
+
+  it('renders a lock by a since-deleted moderator with locked_by null', async () => {
+    posts.set('post-1', {
+      ...posts.get('post-1')!,
+      locked_at: clock,
+      locked_by: null,
+    });
+    await expect(service.lock('post-1', 'moderator')).resolves.toMatchObject({
+      locked_at: clock.toISOString(),
+      locked_by: null,
+    });
+  });
+
+  it('unlocks, clearing both columns and logging post_unlocked', async () => {
+    await service.lock('post-1', 'moderator');
+    log.record.mockClear();
+    connection.commit.mockClear();
+    connection.release.mockClear();
+
+    await service.unlock('post-1', 'creator-1');
+    expect(writes()[1]).toEqual({
+      sql: 'UPDATE posts SET locked_at = NULL, locked_by = NULL WHERE id = ? AND locked_at IS NOT NULL',
+      values: ['post-1'],
+    });
+    expect(posts.get('post-1')).toMatchObject({
+      locked_at: null,
+      locked_by: null,
+    });
+    expect(log.record).toHaveBeenCalledWith(connection, {
+      actorId: 'creator-1',
+      communityId: 'community-1',
+      action: 'post_unlocked',
+      targetType: 'post',
+      targetId: 'post-1',
+    });
+    expectCommittedAndReleased();
+  });
+
+  it('is idempotent: unlocking an unlocked post logs nothing', async () => {
+    await service.unlock('post-1', 'moderator');
+    expect(log.record).not.toHaveBeenCalled();
+    expectCommittedAndReleased();
+  });
+
+  describe.each([
+    ['lock', (s: PostsService, actor: string) => s.lock('post-1', actor)],
+    ['unlock', (s: PostsService, actor: string) => s.unlock('post-1', actor)],
+  ] as const)('%s', (_name, run) => {
+    it.each(['author', 'stranger', 'moderator-elsewhere'])(
+      'refuses %s with 403: authorship is not enough',
+      async (actor) => {
+        await expect(run(service, actor)).rejects.toBeInstanceOf(
+          ForbiddenException,
+        );
+        expect(writes()).toHaveLength(0);
+        expectRolledBackAndReleased();
+      },
+    );
+
+    it('answers 404 for an unknown post', async () => {
+      posts.clear();
+      await expect(run(service, 'moderator')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expectRolledBackAndReleased();
+    });
+
+    it('answers 409 for a removed post, writing nothing', async () => {
+      posts.set('post-1', { ...posts.get('post-1')!, removed_at: clock });
+      await expect(run(service, 'moderator')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(writes()).toHaveLength(0);
+      expectRolledBackAndReleased();
+    });
+  });
+
+  it('rolls the lock back when the log write fails', async () => {
+    log.record.mockRejectedValueOnce(new Error('log failed'));
+    await expect(service.lock('post-1', 'moderator')).rejects.toThrow(
+      'log failed',
+    );
+    expectRolledBackAndReleased();
+  });
+
+  it('rolls the unlock back when the log write fails', async () => {
+    posts.set('post-1', {
+      ...posts.get('post-1')!,
+      locked_at: clock,
+      locked_by: 'moderator',
+    });
+    log.record.mockRejectedValueOnce(new Error('log failed'));
+    await expect(service.unlock('post-1', 'moderator')).rejects.toThrow(
+      'log failed',
+    );
+    expectRolledBackAndReleased();
   });
 });

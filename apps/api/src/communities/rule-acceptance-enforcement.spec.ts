@@ -158,7 +158,7 @@ describe('Rule acceptance enforcement', () => {
         return rows(postById(values[0]) ? [{ id: values[0] }] : []);
       }
       if (
-        sql.startsWith('SELECT id, author_id, community_id, title FROM posts')
+        sql.startsWith('SELECT id, author_id, community_id, title, locked_at FROM posts')
       ) {
         const post = postById(values[0]);
         return rows(post ? [post] : []);
@@ -178,7 +178,7 @@ describe('Rule acceptance enforcement', () => {
       }
       if (
         sql.startsWith(
-          'SELECT id, author_id FROM comments WHERE id = ? AND post_id',
+          'WITH RECURSIVE ancestors',
         )
       ) {
         return rows(

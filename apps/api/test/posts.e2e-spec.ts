@@ -48,6 +48,7 @@ interface TestPost {
   pinned_by: string | null;
   removed_at?: Date | null;
   locked_at?: Date | null;
+  locked_by?: string | null;
   edited_at?: Date | null;
 }
 
@@ -75,6 +76,8 @@ describe('Post endpoints (e2e)', () => {
   let pinClock: number;
   // The database clock of UTC_TIMESTAMP() in an edit.
   const editClock = '2026-11-05T12:00:00.000Z';
+  // The database clock of UTC_TIMESTAMP() in a lock.
+  const lockClock = '2026-11-06T09:00:00.000Z';
   const communities = [
     'community-1',
     'community-2',
@@ -379,6 +382,7 @@ describe('Post endpoints (e2e)', () => {
                     id: post.id,
                     community_id: post.community_id,
                     pinned_at: post.pinned_at,
+                    locked_at: post.locked_at ?? null,
                     removed_at: post.removed_at ?? null,
                     can_moderate:
                       communityCreators.get(post.community_id) === creatorId ||
@@ -392,6 +396,26 @@ describe('Post endpoints (e2e)', () => {
               : [],
             [],
           ];
+        }
+        // POST and DELETE /posts/:id/lock: the guarded update. It replaces
+        // the row object, so a rollback's snapshot restores it.
+        if (sql.startsWith('UPDATE posts SET locked_at')) {
+          const locking = sql.includes('UTC_TIMESTAMP()');
+          const id = values[values.length - 1] as string;
+          const target = posts.find((post) => post.id === id);
+          if (!target || Boolean(target.locked_at) === locking) {
+            return [{ affectedRows: 0 }, []];
+          }
+          posts = posts.map((post) =>
+            post.id === id
+              ? {
+                  ...post,
+                  locked_at: locking ? new Date(lockClock) : null,
+                  locked_by: locking ? (values[0] as string) : null,
+                }
+              : post,
+          );
+          return [{ affectedRows: 1 }, []];
         }
         if (sql.startsWith('SELECT COUNT(*) AS pinned FROM posts')) {
           const [communityId] = values as [string];
@@ -641,6 +665,8 @@ describe('Post endpoints (e2e)', () => {
           'pinned_at',
           'pinned_by',
           'edited_at',
+          'locked_at',
+          'locked_by',
           'score',
           'title',
           'type',
@@ -1144,6 +1170,8 @@ describe('Post endpoints (e2e)', () => {
           created_at: '2026-10-22T08:00:00.000Z',
           pinned_at: '2026-11-01T08:01:00.000Z',
           edited_at: null,
+          locked_at: null,
+          locked_by: null,
           pinned_by: userId,
           score: 0,
         });
@@ -1462,6 +1490,8 @@ describe('Post endpoints (e2e)', () => {
         pinned_at: null,
         pinned_by: null,
         edited_at: editClock,
+        locked_at: null,
+        locked_by: null,
         score: 0,
       });
       expect(stored('post-1')).toMatchObject({
@@ -1655,6 +1685,156 @@ describe('Post endpoints (e2e)', () => {
         { content: 'Not a URL, and fine for a text post' },
         'valid-token',
       ).expect(200);
+    });
+  });
+
+  describe('POST and DELETE /posts/:id/lock', () => {
+    const as = (token?: string) => {
+      const server = () => request(app.getHttpServer());
+      const auth = (call: request.Test) =>
+        token ? call.set('Authorization', `Bearer ${token}`) : call;
+      return {
+        lock: (id: string) => auth(server().post(`/posts/${id}/lock`)),
+        unlock: (id: string) => auth(server().delete(`/posts/${id}/lock`)),
+      };
+    };
+    const stored = (id: string) => posts.find((post) => post.id === id);
+    const lockWrites = () =>
+      queryCalls.filter(({ sql }) =>
+        sql.startsWith('UPDATE posts SET locked_at'),
+      );
+
+    afterEach(() => {
+      expect(openConnections).toBe(0);
+    });
+
+    it.each([
+      ['creator-token', 'creator-1'],
+      ['moderator-token', 'user-mod'],
+    ])(
+      'lets %s lock with 200 and the post DTO, from the database clock and the token, and unlock with 204',
+      async (token, actor) => {
+        const locked = await as(token).lock('post-1').expect(200);
+        expect(locked.body).toMatchObject({
+          id: 'post-1',
+          title: 'First',
+          locked_at: lockClock,
+          locked_by: actor,
+        });
+        expect(lockWrites()[0].values).toEqual([actor, 'post-1']);
+
+        await as(token).unlock('post-1').expect(204);
+        expect(stored('post-1')).toMatchObject({
+          locked_at: null,
+          locked_by: null,
+        });
+        expect(moderationLog).toEqual([
+          {
+            community_id: 'community-1',
+            actor_id: actor,
+            action: 'post_locked',
+            target_type: 'post',
+            target_id: 'post-1',
+          },
+          {
+            community_id: 'community-1',
+            actor_id: actor,
+            action: 'post_unlocked',
+            target_type: 'post',
+            target_id: 'post-1',
+          },
+        ]);
+      },
+    );
+
+    it('is idempotent: a repeated lock keeps locked_at, a repeated unlock is 204, each logged once', async () => {
+      const first = await as('moderator-token').lock('post-1').expect(200);
+      const second = await as('creator-token').lock('post-1').expect(200);
+      expect(second.body).toMatchObject({
+        locked_at: (first.body as { locked_at: string }).locked_at,
+        locked_by: 'user-mod',
+      });
+      await as('moderator-token').unlock('post-1').expect(204);
+      await as('moderator-token').unlock('post-1').expect(204);
+      expect(moderationLog.map((entry) => entry.action)).toEqual([
+        'post_locked',
+        'post_unlocked',
+      ]);
+    });
+
+    it('renders a lock by a since-deleted moderator with locked_by null', async () => {
+      Object.assign(stored('post-1')!, {
+        locked_at: new Date('2026-11-01T00:00:00.000Z'),
+        locked_by: null,
+      });
+      await request(app.getHttpServer())
+        .get('/posts/post-1')
+        .expect(200)
+        .expect(({ body }) =>
+          expect(body).toMatchObject({
+            locked_at: '2026-11-01T00:00:00.000Z',
+            locked_by: null,
+          }),
+        );
+    });
+
+    it.each([
+      ['valid-token', "the post's own author, who does not moderate"],
+      ['other-moderator-token', 'a moderator of another community'],
+      ['fixture-author-token', 'an unrelated user'],
+    ])('answers %s (%s) with 403 on both methods', async (token) => {
+      await as(token).lock('post-1').expect(403);
+      await as(token).unlock('post-1').expect(403);
+      expect(lockWrites()).toHaveLength(0);
+      expect(moderationLog).toHaveLength(0);
+    });
+
+    it('answers 401, 404 and 400 on both methods', async () => {
+      await as().lock('post-1').expect(401);
+      await as().unlock('post-1').expect(401);
+      await as('moderator-token').lock('missing').expect(404);
+      await as('moderator-token').unlock('missing').expect(404);
+      await as('moderator-token').lock('post-1%27%20OR%201%3D1').expect(400);
+      await as('moderator-token').unlock('post-1%27%20OR%201%3D1').expect(400);
+    });
+
+    it('answers 409 for a removed post on both methods', async () => {
+      stored('post-1')!.removed_at = new Date('2026-11-01T00:00:00.000Z');
+      await as('moderator-token').lock('post-1').expect(409);
+      await as('moderator-token').unlock('post-1').expect(409);
+      expect(lockWrites()).toHaveLength(0);
+    });
+
+    it('rolls the lock back when the log entry cannot be written', async () => {
+      failModerationLog = true;
+      await as('moderator-token').lock('post-1').expect(500);
+      expect(stored('post-1')?.locked_at ?? null).toBeNull();
+    });
+
+    it('rolls the unlock back when the log entry cannot be written', async () => {
+      await as('moderator-token').lock('post-1').expect(200);
+      failModerationLog = true;
+      await as('moderator-token').unlock('post-1').expect(500);
+      expect(stored('post-1')?.locked_at).not.toBeNull();
+    });
+
+    it('leaves a locked post editable and deletable by its author', async () => {
+      await as('moderator-token').lock('post-1').expect(200);
+      await request(app.getHttpServer())
+        .patch('/posts/post-1')
+        .set('Authorization', 'Bearer valid-token')
+        .send({ title: 'Still mine' })
+        .expect(200)
+        .expect(({ body }) =>
+          expect(body).toMatchObject({
+            title: 'Still mine',
+            locked_by: 'user-mod',
+          }),
+        );
+      await request(app.getHttpServer())
+        .delete('/posts/post-1')
+        .set('Authorization', 'Bearer valid-token')
+        .expect(204);
     });
   });
 });

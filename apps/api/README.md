@@ -2424,10 +2424,23 @@ content. A moderator or creator can additionally delete content only within
 their own community. Other users receive `403`; missing content returns `404`.
 A deletion by a moderator or creator notifies the author without naming who
 removed it (see [Moderation notifications](#moderation-notifications)).
-No edit, lock, ban, or other moderator-only operations are exposed by this API
-yet; future such routes must enforce the same server-side, community-scoped
-checks, and record what they do in the
-[community moderation log](#community-moderation-log).
+
+What each role may do with content:
+
+| Action | Author | Moderator or creator |
+| --- | --- | --- |
+| Delete (`DELETE /posts/:id`, `DELETE /comments/:id`) | Yes | Yes, in their community |
+| Edit (`PATCH /posts/:id`, `PATCH /comments/:id`) | Yes | **No**: content-removal powers, not authorship |
+| Pin (`POST`/`DELETE /posts/:id/pin`) | No | Yes |
+| Lock (`POST`/`DELETE /posts/:id/lock`, `/comments/:id/lock`) | No | Yes |
+
+Locking closes a post, or a comment's whole subtree, to new comments, for
+moderators too until they unlock (see
+[Locking posts and comments](#locking-posts-and-comments)). Pins and locks are
+recorded in the [community moderation log](#community-moderation-log). No ban
+or other moderator-only operation is exposed by this API yet; future such routes
+must enforce the same server-side, community-scoped checks and record what they
+do in the moderation log.
 
 #### Moderator and member lists
 
@@ -3294,6 +3307,8 @@ Post responses use this DTO:
   "pinned_at": null,
   "pinned_by": null,
   "edited_at": null,
+  "locked_at": null,
+  "locked_by": null,
   "score": 3
 }
 ```
@@ -3301,6 +3316,8 @@ Post responses use this DTO:
 `pinned_at` and `pinned_by` are present on every post response and are `null`
 on a post that is not pinned. `edited_at` is `null` until the author's first
 effective edit (see [Editing posts and comments](#editing-posts-and-comments)).
+`locked_at` and `locked_by` are `null` on an open post (see
+[Locking posts and comments](#locking-posts-and-comments)).
 `score` is the sum of the post's votes, `0` without votes (see
 [Scores on content](#scores-on-content)).
 
@@ -3362,7 +3379,7 @@ order:
 | --- | --- |
 | `404` | Unknown id, or the community is deleted or suspended (`listedCommunitySql`) |
 | `403` | The caller is not the author |
-| `409` | The post or comment was removed by moderation (`removed_at`); for a comment, also when its post was removed, or the comment or its post is locked |
+| `409` | The post or comment was removed by moderation (`removed_at`); for a comment, also when its post was removed |
 | `400` | Post content that is not valid for the stored type |
 
 Only then does it write, commit, roll back on any error, and release the
@@ -3370,14 +3387,12 @@ connection in `finally`. A non-author therefore learns nothing about the
 content's moderation state. A removed post or comment is refused so that an
 author cannot rewrite content a moderator removed before any restoration.
 
-**Locks: a locked post stays editable by its author; comments on it do not.**
-A lock closes the discussion; it does not freeze the original text, so the
-author of a locked post may still correct it. A comment is part of the
-discussion, so a comment on a locked post, or a locked comment, is `409`. Only
-the comment's own lock and its post's lock are consulted. A comment's
-`locked_at` is meant to lock its subtree, but locks on ancestor comments are not
-consulted, because the lock endpoint that defines subtree locking does not
-exist yet.
+**Locks do not stop an edit.** A lock closes the discussion to new comments; it
+does not freeze what was already written. The author of a locked post, of a
+locked comment, or of a comment anywhere in a locked thread may still correct
+it (see [Locking posts and comments](#locking-posts-and-comments)). This
+replaces the first version of this route, which refused edits to comments in a
+locked thread with `409`.
 
 **`edited_at` and the no-op rule.** A successful edit sets `edited_at` from the
 database clock (`UTC_TIMESTAMP()`), on every effective edit. The trimmed
@@ -3415,6 +3430,137 @@ rejected, because their cooldown would block a quick correction right after
 posting. No dedicated edit bucket is added in this change. If abuse appears, an
 `api:content:edit:*` bucket keyed on `PATCH /posts/:id` and
 `PATCH /comments/:id` is the follow-up, as a documented per-route override.
+
+### Locking posts and comments
+
+A lock closes a discussion to new comments while the content stays readable.
+Before it, a moderator's only tool against a thread that had gone wrong, a
+resolved question that kept attracting replies, or an announcement that should
+not be debated, was deletion.
+
+| Route | Success | Effect |
+| --- | --- | --- |
+| `POST /posts/:id/lock` | `200`, `PostResponse` | No new comments anywhere on the post |
+| `DELETE /posts/:id/lock` | `204` | Reopens the post |
+| `POST /comments/:id/lock` | `200`, the flat `CommentReplyResponse` | No new replies anywhere beneath the comment, at any depth |
+| `DELETE /comments/:id/lock` | `204` | Reopens that subtree (unless the post or another ancestor is locked) |
+
+All four require a bearer token and take no body: a lock records only its actor
+and time. A reason was considered; nothing would display it, and
+`removal_reason` exists for the case where a reason matters. The routes are
+`POST`/`DELETE` on a `/lock` sub-resource, like `/pin` and `/subscribe`, not a
+`POST …/unlock` verb. Locking sets `locked_at` from the database clock
+(`UTC_TIMESTAMP()`) and `locked_by` from the token; unlocking clears both.
+
+**Moderators only.** Only the community's creator or one of its moderators may
+lock or unlock (`canModerateCommunitySql`, evaluated in the `FOR UPDATE` read).
+A comment's community is resolved through its post (comments → posts), as for
+votes. The content's author may not lock their own post or comment: closing
+replies on a shared feed is a moderation act, and an author who wants no
+replies can delete their own content. This is the same rule as
+[pinning](#pinning-posts), which is also moderator only, and the opposite of
+[editing](#editing-posts-and-comments), which only the author may do.
+
+| Status | When |
+| --- | --- |
+| `400` | Malformed id |
+| `401` | No token |
+| `403` | The caller does not moderate the community: the content's author, a moderator of another community, anyone else |
+| `404` | Unknown post or comment, or its community is deleted |
+| `409` | The content was removed by moderation: it has no open discussion to close |
+
+**Idempotent, without refreshing the timestamp.** The writes are guarded
+(`… WHERE id = ? AND locked_at IS NULL`, `… AND locked_at IS NOT NULL`).
+Locking locked content returns `200` with the original `locked_at` and
+`locked_by`; unlocking open content returns `204`. Each route that changes
+something writes exactly one entry (`post_locked`, `post_unlocked`,
+`comment_locked`, `comment_unlocked`) to the
+[community moderation log](#community-moderation-log) inside the same
+transaction, and a failed log write rolls the change back. A route that
+changes nothing logs nothing.
+
+`locked_at` and `locked_by` are on every post response and on the thread and
+flat comment responses, so clients can show the state and hide the reply box.
+`locked_by` is `ON DELETE SET NULL`: content locked by a moderator whose
+account has since been deleted renders `locked_at` with `locked_by: null`.
+They are not on `UserCommentResponse`, the author's activity listing, where no
+reply box is shown.
+
+#### How a lock is enforced
+
+`POST /posts/:postId/comments` refuses a new comment with `409` when:
+
+- the post is locked: "This post is locked; it accepts no new comments", for
+  top-level comments and replies alike; or
+- the parent comment **or any of its ancestors** is locked: "A comment above
+  this reply is locked; its thread accepts no new replies".
+
+**A comment lock closes its whole subtree.** A lock that blocked only direct
+replies to the locked comment could be bypassed by replying one level deeper,
+which would make it decorative. Siblings of the locked comment, its ancestors
+and other subtrees stay open.
+
+**The recursive check.** `comments.parent_id` is a self-referencing chain with
+no depth limit, so "is any ancestor locked?" is a recursive question. It is
+answered by the statement that already resolves the parent
+(`PARENT_WITH_ANCESTRY_SQL` in `comments.service.ts`), the first recursive
+query in this codebase: a `WITH RECURSIVE` CTE that walks `parent_id` from the
+parent towards the root and aggregates whether any row on the path has
+`locked_at` set. The anchor is a `const` read of the parent by primary key and
+each step an `eq_ref` on the primary key: one index lookup per level, never a
+scan (`content-locking.mysql.spec.ts` asserts the plan). The post's own lock
+is read in the post lookup, which is a `FOR SHARE` read, so a concurrent post
+lock (`FOR UPDATE`) and a new comment are serialised.
+
+**The bound.** The walk stops after `MAX_LOCK_ANCESTOR_DEPTH` (500) levels, by
+its own `WHERE`. That is below MySQL's default `cte_max_recursion_depth`
+(1000), so the walk ends normally rather than with a server error, and no chain
+that deep fits the tree route (`MAX_COMMENTS_PER_THREAD`, 500) anyway. A
+parent deeper than the bound, whose ancestors could not all be checked, is
+refused with `409` ("nested more than 500 levels deep"): the check fails
+closed.
+
+**Rejected alternatives:**
+
+- **Checking only the post and the direct parent.** Simple, and wrong: a reply
+  one level deeper bypasses the lock. This is the shortcut a contributor will
+  reach for. Do not take it.
+- **A denormalised `thread_locked` flag on descendants.** It makes the check a
+  column read, but locking would have to rewrite a potentially large subtree
+  inside the lock transaction, and the flag can drift from the real state.
+
+**Ordering.** The lock checks run after the `404`s for the post and the parent
+and after the rule-acceptance gate (`403`). An unknown post or parent is still
+`404` even next to locked content, and a caller sees the most specific error.
+
+**`409`, not `403`.** The caller may well be allowed to comment in general; it
+is the resource's state that forbids it, which is what `409` ("not possible in
+the current state") means in this API.
+
+**Moderators are not exempt.** A locked thread refuses new comments from
+everyone, including the community's moderators and its creator. A moderator
+who needs to post there must unlock first, which leaves a log entry. A silent
+moderator bypass would make the lock state untrustworthy.
+
+#### What a lock does not affect
+
+Each of these is a decision:
+
+- **Voting stays open.** `VotesService.vote` is untouched. A lock closes the
+  discussion, not the signal on content already written.
+- **Editing your own content stays open**, for posts and comments alike. A lock
+  does not freeze the original text (see
+  [Editing posts and comments](#editing-posts-and-comments)).
+- **Deleting your own content stays open.** A user must be able to withdraw
+  their words from a closed thread.
+- **Reading is unaffected.** Locked content is fully visible in every listing.
+
+**No notification.** `notifications.type` is an `ENUM` that would need its own
+migration, and a lock is not an action against a particular person. A
+`thread_locked` notification is a possible follow-up.
+
+**Rate limiting.** The global write buckets apply (60 per IP and 120 per account
+per minute). Moderator actions are rare, so there is no dedicated bucket.
 
 ### Pinning posts
 
@@ -3538,11 +3684,13 @@ is an `ENUM` whose new value would need its own migration. A
 
 Migration `017_add_post_and_comment_content_state` adds edit, lock and
 moderative-removal state to `posts`. `PATCH /posts/:id` writes `edited_at` and
-honours `locked_at` and `removed_at` (see
-[Editing posts and comments](#editing-posts-and-comments)), and listings omit
-removed posts. Nothing writes `locked_at` or `removed_at` yet, and
-`DELETE /posts/:id` is still a hard delete. The lock and removal endpoints are
-separate work.
+refuses removed posts (see
+[Editing posts and comments](#editing-posts-and-comments)); `POST` and
+`DELETE /posts/:id/lock` write `locked_at` and `locked_by`, and comment creation
+honours them (see [Locking posts and comments](#locking-posts-and-comments));
+listings omit removed posts. Nothing writes `removed_at` yet, and
+`DELETE /posts/:id` is still a hard delete. The removal endpoint is separate
+work.
 
 | Column | Meaning when set |
 | --- | --- |
@@ -3576,7 +3724,8 @@ listing indexes that pair the filter with the sort order are separate work.
 `GET /posts/:postId/comments` is public and returns
 `{ "post_id", "comments" }`. Comments are nested recursively through `replies`;
 each comment contains its `id`, `post_id`, `author_id`, `parent_id`, `content`,
-`created_at`, `score` (see [Scores on content](#scores-on-content)) and
+`created_at`, `edited_at`, `locked_at`, `locked_by`, `score` (see
+[Scores on content](#scores-on-content)) and
 `replies`. Roots and sibling replies use chronological order
 (`created_at` ascending, then `id` ascending), making the thread order stable.
 An unknown post returns `404`.
@@ -3623,6 +3772,8 @@ Each item is:
   "content": "Text",
   "created_at": "2026-10-22T08:00:00.000Z",
   "edited_at": null,
+  "locked_at": null,
+  "locked_by": null,
   "reply_count": 3,
   "score": 5
 }
@@ -3697,6 +3848,11 @@ table uses `ON DELETE CASCADE` for `parent_id`.
 in place, keeping the reply chain; moderators may delete a comment but never
 edit it. See [Editing posts and comments](#editing-posts-and-comments).
 
+`POST` and `DELETE /comments/:id/lock` let a moderator or the creator close a
+comment's whole subtree to new replies. `POST /posts/:postId/comments` answers
+`409` on a locked post or below a locked comment at any depth, for moderators
+too. See [Locking posts and comments](#locking-posts-and-comments).
+
 ### Comment content state
 
 Migration `017` adds the same six columns and the same rules to `comments` as
@@ -3708,13 +3864,12 @@ are nullable timestamps with optional actors, coherent through
 `edited_by`, because only the author edits. `idx_comments_removed_at` indexes
 the removal filter. The paginated comment routes read `removed_at` (see
 [Paginated comments](#paginated-comments)), and `PATCH /comments/:id` writes
-`edited_at` and refuses removed or locked comments (see
-[Editing posts and comments](#editing-posts-and-comments)). Nothing writes
-`locked_at` or `removed_at` yet, and the thread, comment creation and
-`DELETE /comments/:id` do not honour them.
-
-A comment's `locked_at` is meant to lock that comment's subtree, not the whole
-post. The schema supports either reading; the lock endpoint will define it.
+`edited_at` and refuses removed comments (see
+[Editing posts and comments](#editing-posts-and-comments)). `POST` and
+`DELETE /comments/:id/lock` write `locked_at` and `locked_by`. A comment's lock
+closes its whole subtree, not the post, and comment creation enforces it (see
+[Locking posts and comments](#locking-posts-and-comments)). Nothing writes
+`removed_at` yet, and the thread and `DELETE /comments/:id` do not honour it.
 
 ## Votes
 
