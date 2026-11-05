@@ -198,17 +198,22 @@ CREATE TABLE posts (
     removed_at TIMESTAMP NULL DEFAULT NULL,
     removed_by VARCHAR(36) NULL,
     removal_reason TEXT NULL,
+    pinned_at TIMESTAMP NULL DEFAULT NULL,
+    pinned_by VARCHAR(36) NULL,
     INDEX idx_posts_removed_at (removed_at),
     CONSTRAINT chk_posts_lock CHECK ((locked_at IS NULL AND locked_by IS NULL) OR locked_at IS NOT NULL),
     CONSTRAINT chk_posts_removal CHECK ((removed_at IS NULL AND removed_by IS NULL AND removal_reason IS NULL) OR removed_at IS NOT NULL),
+    CONSTRAINT chk_posts_pin CHECK ((pinned_at IS NULL AND pinned_by IS NULL) OR pinned_at IS NOT NULL),
     FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE,
     CONSTRAINT fk_posts_locked_by FOREIGN KEY (locked_by) REFERENCES users(id) ON DELETE SET NULL,
-    CONSTRAINT fk_posts_removed_by FOREIGN KEY (removed_by) REFERENCES users(id) ON DELETE SET NULL
+    CONSTRAINT fk_posts_removed_by FOREIGN KEY (removed_by) REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT fk_posts_pinned_by FOREIGN KEY (pinned_by) REFERENCES users(id) ON DELETE SET NULL
 );
 CREATE FULLTEXT INDEX ft_posts_title_content ON posts (title, content);
 CREATE INDEX idx_posts_community_created ON posts (community_id, created_at, id);
 CREATE INDEX idx_posts_author_created ON posts (author_id, created_at, id);
+CREATE INDEX idx_posts_community_pinned ON posts (community_id, pinned_at);
 
 CREATE TABLE comments (
     id VARCHAR(36) PRIMARY KEY,
@@ -405,4 +410,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('022_add_community_deletion'),
     ('023_add_community_moderation_community_actions'),
     ('024_add_community_subscriptions_community_index'),
-    ('025_add_community_suspension');
+    ('025_add_community_suspension'),
+    ('026_add_post_pinning');

@@ -103,7 +103,7 @@ describe('migration 025 (community suspension)', () => {
       `target_type ENUM(${enumList(ADMIN_ACTION_TARGETS)}) NOT NULL`,
     );
     expect(normalisedSnapshot).toContain(
-      "('024_add_community_subscriptions_community_index'), ('025_add_community_suspension');",
+      "('024_add_community_subscriptions_community_index'), ('025_add_community_suspension')",
     );
   });
 });

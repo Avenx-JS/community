@@ -1,6 +1,13 @@
-import { ForbiddenException, Logger, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import type { Pool } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { CommunityModerationLogService } from '../communities/community-moderation-log.service';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { COMMUNITY_NEW_POST_RECIPIENTS_SQL } from '../communities/community-notification-recipients';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -10,6 +17,14 @@ import { PostsService } from './posts.service';
 const acceptingRuleAcceptance = {
   provide: CommunityRuleAcceptanceService,
   useValue: { assertAcceptedOrThrow: () => Promise.resolve() },
+};
+
+// The read, create and delete paths never write the moderation log.
+const unusedModerationLog = {
+  provide: CommunityModerationLogService,
+  useValue: {
+    record: () => Promise.reject(new Error('unexpected moderation log write')),
+  },
 };
 
 describe('PostsService', () => {
@@ -40,6 +55,7 @@ describe('PostsService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         acceptingRuleAcceptance,
+        unusedModerationLog,
         PostsService,
         { provide: MYSQL_POOL, useValue: pool },
         {
@@ -80,8 +96,9 @@ describe('PostsService', () => {
 
     expect(result).toMatchObject({ page: 2, limit: 1, total: 2, sort: 'new' });
     expect(result.items[0].id).toBe('post-1');
+    // A single-community listing floats that community's pins.
     expect(queries[0].sql).toContain(
-      'ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?',
+      'ORDER BY (pinned_at IS NULL), pinned_at DESC, created_at DESC, id DESC LIMIT ? OFFSET ?',
     );
     expect(queries[0].values).toEqual(['community-1', 1, 1]);
     expect(queries[1].values).toEqual(['community-1']);
@@ -166,6 +183,8 @@ describe('PostsService.create notifications', () => {
     author_id: 'author',
     community_id: 'community-1',
     created_at: new Date('2026-10-30T08:00:00.000Z'),
+    pinned_at: null,
+    pinned_by: null,
   };
 
   let queries: Array<{ sql: string; values: unknown[] }>;
@@ -191,6 +210,7 @@ describe('PostsService.create notifications', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         acceptingRuleAcceptance,
+        unusedModerationLog,
         PostsService,
         NotificationsService,
         { provide: MYSQL_POOL, useValue: pool },
@@ -412,6 +432,7 @@ describe('PostsService.remove', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         acceptingRuleAcceptance,
+        unusedModerationLog,
         PostsService,
         {
           provide: MYSQL_POOL,
@@ -530,5 +551,746 @@ describe('PostsService.remove', () => {
 
     expect(connection.rollback).not.toHaveBeenCalled();
     expect(connection.release).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('PostsService.findAll ordering', () => {
+  let queries: Array<{ sql: string; values: unknown[] }>;
+  let rows: unknown[];
+  let service: PostsService;
+
+  beforeEach(() => {
+    queries = [];
+    rows = [];
+    const pool = {
+      execute: (sql: string, values: unknown[]) => {
+        queries.push({ sql, values });
+        return Promise.resolve([
+          sql.startsWith('SELECT COUNT(*)') ? [{ total: rows.length }] : rows,
+          [],
+        ]);
+      },
+    };
+    service = new PostsService(
+      pool as unknown as Pool,
+      {} as NotificationsService,
+      {} as CommunityRuleAcceptanceService,
+      {} as CommunityModerationLogService,
+    );
+  });
+
+  it("floats a single community's pins, most recently pinned first", async () => {
+    await service.findAll({ community_id: 'community-1', page: 3, limit: 2 });
+
+    expect(queries[0].sql).toMatch(
+      / ORDER BY \(pinned_at IS NULL\), pinned_at DESC, created_at DESC, id DESC LIMIT \? OFFSET \?$/,
+    );
+    expect(queries[0].values).toEqual(['community-1', 2, 4]);
+    // The total counts pinned and unpinned posts alike.
+    expect(queries[1].sql).not.toContain('pinned_at');
+  });
+
+  it('keeps the unfiltered feed in its previous order, without floating pins', async () => {
+    await service.findAll({ page: 1, limit: 20 });
+
+    expect(queries[0].sql).toMatch(
+      / ORDER BY created_at DESC, id DESC LIMIT \? OFFSET \?$/,
+    );
+    expect(queries[0].sql).not.toContain('pinned_at IS NULL');
+    expect(queries[0].values).toEqual([20, 0]);
+  });
+
+  it('returns pinned_at and pinned_by on every post, null when unpinned', async () => {
+    const row = {
+      title: 'Hello',
+      content: 'World',
+      type: 'text',
+      author_id: 'author',
+      community_id: 'community-1',
+      created_at: new Date('2026-10-22T08:00:00.000Z'),
+    };
+    rows = [
+      {
+        ...row,
+        id: 'pinned',
+        pinned_at: new Date('2026-11-01T09:00:00.000Z'),
+        pinned_by: 'moderator',
+      },
+      // Pinned by a moderator whose account was since deleted.
+      {
+        ...row,
+        id: 'orphaned',
+        pinned_at: new Date('2026-11-01T08:00:00.000Z'),
+        pinned_by: null,
+      },
+      { ...row, id: 'plain', pinned_at: null, pinned_by: null },
+    ];
+
+    const { items } = await service.findAll({ community_id: 'community-1' });
+
+    expect(
+      items.map(({ id, pinned_at, pinned_by }) => ({
+        id,
+        pinned_at,
+        pinned_by,
+      })),
+    ).toEqual([
+      {
+        id: 'pinned',
+        pinned_at: '2026-11-01T09:00:00.000Z',
+        pinned_by: 'moderator',
+      },
+      {
+        id: 'orphaned',
+        pinned_at: '2026-11-01T08:00:00.000Z',
+        pinned_by: null,
+      },
+      { id: 'plain', pinned_at: null, pinned_by: null },
+    ]);
+  });
+});
+
+interface StoredPost {
+  id: string;
+  author_id: string;
+  community_id: string;
+  pinned_at: Date | null;
+  pinned_by: string | null;
+  removed_at: Date | null;
+}
+
+// An in-memory posts table behind connections that model what pin and unpin
+// rely on: FOR UPDATE on a communities row blocks until its holder commits or
+// rolls back, and a rollback undoes only that connection's own writes.
+function createPinStore() {
+  const posts = new Map<string, StoredPost>();
+  const creators = new Map([
+    ['community-1', 'creator'],
+    ['community-2', 'other-creator'],
+  ]);
+  const moderators = new Set([
+    'community-1:moderator',
+    'community-2:other-moderator',
+  ]);
+  const deletedCommunities = new Set<string>();
+  const log: Array<{ connection: number; action: string; targetId: string }> =
+    [];
+  const queries: Array<{ connection: number; sql: string; values: unknown[] }> =
+    [];
+  const communityLocks = new Map<string, Promise<void>>();
+  const hooks: {
+    beforeCount?: (connection: number) => Promise<void>;
+    // How the driver returns the EXISTS column.
+    canModerate: (allowed: boolean) => unknown;
+    failBegin: boolean;
+    zeroAffectedPin: boolean;
+  } = {
+    canModerate: (allowed) => (allowed ? 1 : 0),
+    failBegin: false,
+    zeroAffectedPin: false,
+  };
+  let clock = Date.parse('2026-11-01T08:00:00.000Z');
+  let nextConnection = 0;
+  let open = 0;
+
+  const addPost = (id: string, communityId = 'community-1') =>
+    posts.set(id, {
+      id,
+      author_id: 'author',
+      community_id: communityId,
+      pinned_at: null,
+      pinned_by: null,
+      removed_at: null,
+    });
+  for (const id of ['post-1', 'post-2', 'post-3', 'post-4']) {
+    addPost(id);
+  }
+  addPost('other-post', 'community-2');
+
+  const connection = () => {
+    const number = (nextConnection += 1);
+    const undo: Array<() => void> = [];
+    const releases: Array<() => void> = [];
+    const unlock = () => releases.splice(0).forEach((release) => release());
+    open += 1;
+
+    const execute = async (
+      sql: string,
+      values: unknown[],
+    ): Promise<[unknown, unknown]> => {
+      queries.push({ connection: number, sql, values });
+      if (sql.startsWith('SELECT posts.id, posts.community_id')) {
+        const [creatorId, moderatorId, id] = values as string[];
+        const post = posts.get(id);
+        if (
+          !post ||
+          (sql.includes('deleted_at IS NULL') &&
+            deletedCommunities.has(post.community_id))
+        ) {
+          return [[], []];
+        }
+        const allowed =
+          creators.get(post.community_id) === creatorId ||
+          moderators.has(`${post.community_id}:${moderatorId}`);
+        return [
+          [
+            {
+              id: post.id,
+              community_id: post.community_id,
+              pinned_at: post.pinned_at,
+              removed_at: post.removed_at,
+              can_moderate: hooks.canModerate(allowed),
+            },
+          ],
+          [],
+        ];
+      }
+      if (
+        sql === 'SELECT id FROM communities WHERE id = ? LIMIT 1 FOR UPDATE'
+      ) {
+        const [id] = values as [string];
+        while (communityLocks.has(id)) {
+          await communityLocks.get(id);
+        }
+        let release!: () => void;
+        communityLocks.set(
+          id,
+          new Promise<void>((resolve) => {
+            release = () => {
+              communityLocks.delete(id);
+              resolve();
+            };
+          }),
+        );
+        releases.push(release);
+        return [[{ id }], []];
+      }
+      if (sql.startsWith('SELECT COUNT(*) AS pinned FROM posts')) {
+        await hooks.beforeCount?.(number);
+        const [communityId] = values as [string];
+        const pinned = [...posts.values()].filter(
+          (post) => post.community_id === communityId && post.pinned_at,
+        ).length;
+        return [[{ pinned }], []];
+      }
+      if (sql.startsWith('UPDATE posts SET pinned_at = UTC_TIMESTAMP()')) {
+        const [actorId, id] = values as [string, string];
+        const post = posts.get(id);
+        if (!post || post.pinned_at || hooks.zeroAffectedPin) {
+          return [{ affectedRows: 0 }, []];
+        }
+        const previous = { ...post };
+        undo.push(() => posts.set(id, previous));
+        clock += 60_000;
+        posts.set(id, {
+          ...post,
+          pinned_at: new Date(clock),
+          pinned_by: actorId,
+        });
+        return [{ affectedRows: 1 }, []];
+      }
+      if (sql.startsWith('UPDATE posts SET pinned_at = NULL')) {
+        const [id] = values as [string];
+        const post = posts.get(id);
+        if (!post || !post.pinned_at) {
+          return [{ affectedRows: 0 }, []];
+        }
+        const previous = { ...post };
+        undo.push(() => posts.set(id, previous));
+        posts.set(id, { ...post, pinned_at: null, pinned_by: null });
+        return [{ affectedRows: 1 }, []];
+      }
+      if (sql.startsWith('SELECT id, title, content, type')) {
+        const post = posts.get(values[0] as string);
+        return [
+          post
+            ? [
+                {
+                  id: post.id,
+                  title: 'Title',
+                  content: 'Body',
+                  type: 'text',
+                  author_id: post.author_id,
+                  community_id: post.community_id,
+                  created_at: new Date('2026-10-22T08:00:00.000Z'),
+                  pinned_at: post.pinned_at,
+                  pinned_by: post.pinned_by,
+                },
+              ]
+            : [],
+          [],
+        ];
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    };
+
+    return {
+      number,
+      execute,
+      beginTransaction: jest.fn(() =>
+        hooks.failBegin
+          ? Promise.reject(new Error('no tx'))
+          : Promise.resolve(),
+      ),
+      commit: jest.fn(() => {
+        undo.length = 0;
+        unlock();
+        return Promise.resolve();
+      }),
+      rollback: jest.fn(() => {
+        undo
+          .splice(0)
+          .reverse()
+          .forEach((step) => step());
+        for (let i = log.length - 1; i >= 0; i -= 1) {
+          if (log[i].connection === number) {
+            log.splice(i, 1);
+          }
+        }
+        unlock();
+        return Promise.resolve();
+      }),
+      release: jest.fn(() => {
+        open -= 1;
+      }),
+    };
+  };
+
+  return {
+    posts,
+    addPost,
+    deletedCommunities,
+    log,
+    queries,
+    hooks,
+    connection,
+    openConnections: () => open,
+  };
+}
+
+describe('PostsService.pin and unpin', () => {
+  let store: ReturnType<typeof createPinStore>;
+  let connections: ReturnType<
+    ReturnType<typeof createPinStore>['connection']
+  >[];
+  let moderationLog: { record: jest.Mock };
+  let service: PostsService;
+
+  const createService = () => {
+    const pool = {
+      execute: () =>
+        Promise.reject(new Error('pinning must use one connection')),
+      getConnection: () => {
+        const connection = store.connection();
+        connections.push(connection);
+        return Promise.resolve(connection);
+      },
+    };
+    return new PostsService(
+      pool as unknown as Pool,
+      {} as NotificationsService,
+      {} as CommunityRuleAcceptanceService,
+      moderationLog as unknown as CommunityModerationLogService,
+    );
+  };
+
+  beforeEach(() => {
+    store = createPinStore();
+    connections = [];
+    moderationLog = {
+      record: jest.fn(
+        (
+          connection: { number: number },
+          entry: { action: string; targetId: string },
+        ) => {
+          store.log.push({
+            connection: connection.number,
+            action: entry.action,
+            targetId: entry.targetId,
+          });
+          return Promise.resolve();
+        },
+      ),
+    };
+    service = createService();
+  });
+
+  afterEach(() => {
+    delete process.env.COMMUNITY_PINNED_POSTS_MAX;
+  });
+
+  const lastConnection = () => connections[connections.length - 1];
+
+  function expectCommittedAndReleased() {
+    const connection = lastConnection();
+    expect(connection.commit).toHaveBeenCalledTimes(1);
+    expect(connection.rollback).not.toHaveBeenCalled();
+    expect(connection.release).toHaveBeenCalledTimes(1);
+  }
+
+  function expectRolledBackAndReleased() {
+    const connection = lastConnection();
+    expect(connection.commit).not.toHaveBeenCalled();
+    expect(connection.rollback).toHaveBeenCalledTimes(1);
+    expect(connection.release).toHaveBeenCalledTimes(1);
+  }
+
+  const pinWrites = () =>
+    store.queries.filter(({ sql }) => sql.startsWith('UPDATE posts'));
+
+  describe('pin', () => {
+    it('locks and reads the post, deciding moderation rights in the service', async () => {
+      await service.pin('post-1', 'moderator');
+
+      const [read] = store.queries;
+      expect(read.sql).toMatch(/^SELECT posts\.id, posts\.community_id/);
+      expect(read.sql).toContain('community_moderators');
+      expect(read.sql).toContain('deleted_at IS NULL');
+      expect(read.sql).toMatch(/FOR UPDATE$/);
+      expect(read.values).toEqual(['moderator', 'moderator', 'post-1']);
+    });
+
+    it.each([
+      ['the community creator', 'creator'],
+      ['a community moderator', 'moderator'],
+    ])(
+      'lets %s pin, from the database clock and the token',
+      async (_who, actor) => {
+        const result = await service.pin('post-1', actor);
+
+        expect(result).toMatchObject({
+          id: 'post-1',
+          pinned_at: '2026-11-01T08:01:00.000Z',
+          pinned_by: actor,
+        });
+        expect(pinWrites()).toEqual([
+          {
+            connection: 1,
+            sql: 'UPDATE posts SET pinned_at = UTC_TIMESTAMP(), pinned_by = ? WHERE id = ? AND pinned_at IS NULL',
+            values: [actor, 'post-1'],
+          },
+        ]);
+        expect(moderationLog.record).toHaveBeenCalledTimes(1);
+        expect(moderationLog.record).toHaveBeenCalledWith(lastConnection(), {
+          actorId: actor,
+          communityId: 'community-1',
+          action: 'post_pinned',
+          targetType: 'post',
+          targetId: 'post-1',
+        });
+        expect(moderationLog.record.mock.invocationCallOrder[0]).toBeLessThan(
+          lastConnection().commit.mock.invocationCallOrder[0],
+        );
+        expectCommittedAndReleased();
+      },
+    );
+
+    it.each([1, '1', true])(
+      'reads can_moderate through isSqlTrue (%p)',
+      async (value) => {
+        store.hooks.canModerate = (allowed) => (allowed ? value : 0);
+        await expect(service.pin('post-1', 'moderator')).resolves.toMatchObject(
+          { pinned_by: 'moderator' },
+        );
+      },
+    );
+
+    it.each([0, '0', false])(
+      'treats can_moderate %p as not moderating',
+      async (value) => {
+        store.hooks.canModerate = () => value;
+        await expect(service.pin('post-1', 'moderator')).rejects.toBeInstanceOf(
+          ForbiddenException,
+        );
+      },
+    );
+
+    it.each([
+      ['the post author, who moderates nothing', 'author'],
+      ['any other member', 'stranger'],
+      ['a moderator of a different community', 'other-moderator'],
+      ['the creator of a different community', 'other-creator'],
+    ])('returns 403 to %s and pins nothing', async (_who, actor) => {
+      await expect(service.pin('post-1', actor)).rejects.toThrow(
+        new ForbiddenException(
+          'Only the community creator and moderators can pin or unpin posts',
+        ),
+      );
+
+      expect(pinWrites()).toEqual([]);
+      expect(store.posts.get('post-1')?.pinned_at).toBeNull();
+      expect(moderationLog.record).not.toHaveBeenCalled();
+      expectRolledBackAndReleased();
+    });
+
+    it('returns 404 for an unknown post and for a post in a deleted community', async () => {
+      await expect(service.pin('missing', 'moderator')).rejects.toThrow(
+        new NotFoundException('Post not found'),
+      );
+      expectRolledBackAndReleased();
+
+      store.deletedCommunities.add('community-1');
+      await expect(service.pin('post-1', 'creator')).rejects.toThrow(
+        new NotFoundException('Post not found'),
+      );
+      expectRolledBackAndReleased();
+      expect(pinWrites()).toEqual([]);
+    });
+
+    it('returns 409 for a post removed by a moderator', async () => {
+      const post = store.posts.get('post-1')!;
+      store.posts.set('post-1', { ...post, removed_at: new Date() });
+
+      await expect(service.pin('post-1', 'moderator')).rejects.toThrow(
+        new ConflictException('A removed post cannot be pinned'),
+      );
+
+      expect(pinWrites()).toEqual([]);
+      expectRolledBackAndReleased();
+    });
+
+    it('is idempotent: a second pin returns the post unchanged, keeping pinned_at', async () => {
+      const first = await service.pin('post-1', 'moderator');
+      const second = await service.pin('post-1', 'creator');
+
+      expect(second).toEqual(first);
+      expect(second.pinned_by).toBe('moderator');
+      expect(pinWrites()).toHaveLength(1);
+      expect(store.log).toEqual([
+        { connection: 1, action: 'post_pinned', targetId: 'post-1' },
+      ]);
+      expectCommittedAndReleased();
+    });
+
+    it('treats a guarded UPDATE that affects no row as already pinned, logging nothing', async () => {
+      store.hooks.zeroAffectedPin = true;
+
+      const result = await service.pin('post-1', 'moderator');
+
+      expect(result.id).toBe('post-1');
+      expect(moderationLog.record).not.toHaveBeenCalled();
+      expectCommittedAndReleased();
+    });
+
+    it('counts pins after locking the community, as a locking read on the same connection', async () => {
+      await service.pin('post-1', 'moderator');
+
+      const sql = store.queries.map((query) => query.sql);
+      const lock = sql.indexOf(
+        'SELECT id FROM communities WHERE id = ? LIMIT 1 FOR UPDATE',
+      );
+      const count = sql.findIndex((statement) =>
+        statement.startsWith('SELECT COUNT(*) AS pinned FROM posts'),
+      );
+      const update = sql.findIndex((statement) =>
+        statement.startsWith('UPDATE posts SET pinned_at'),
+      );
+      expect(lock).toBe(1);
+      expect(store.queries[lock].values).toEqual(['community-1']);
+      expect(count).toBeGreaterThan(lock);
+      expect(update).toBeGreaterThan(count);
+      expect(sql[count]).toBe(
+        'SELECT COUNT(*) AS pinned FROM posts WHERE community_id = ? AND pinned_at IS NOT NULL FOR SHARE',
+      );
+      expect(store.queries[count].values).toEqual(['community-1']);
+      expect(store.queries.every(({ connection }) => connection === 1)).toBe(
+        true,
+      );
+    });
+
+    it('returns 409 naming the limit at COMMUNITY_PINNED_POSTS_MAX, pinning nothing', async () => {
+      process.env.COMMUNITY_PINNED_POSTS_MAX = '2';
+      service = createService();
+      await service.pin('post-1', 'moderator');
+      await service.pin('post-2', 'moderator');
+
+      await expect(service.pin('post-3', 'moderator')).rejects.toThrow(
+        new ConflictException('A community can have at most 2 pinned posts'),
+      );
+
+      expect(store.posts.get('post-3')?.pinned_at).toBeNull();
+      expect(store.log.map(({ targetId }) => targetId)).toEqual([
+        'post-1',
+        'post-2',
+      ]);
+      expectRolledBackAndReleased();
+      // Another community's pins do not count against this one's cap.
+      await expect(
+        service.pin('other-post', 'other-moderator'),
+      ).resolves.toMatchObject({ pinned_by: 'other-moderator' });
+    });
+
+    it('still answers 200 for an already-pinned post when the community is at the cap', async () => {
+      process.env.COMMUNITY_PINNED_POSTS_MAX = '1';
+      service = createService();
+      const first = await service.pin('post-1', 'moderator');
+
+      await expect(service.pin('post-1', 'moderator')).resolves.toEqual(first);
+      expectCommittedAndReleased();
+    });
+
+    it('defaults the cap to 5', async () => {
+      store.addPost('post-5');
+      store.addPost('post-6');
+      for (const id of ['post-1', 'post-2', 'post-3', 'post-4', 'post-5']) {
+        await service.pin(id, 'moderator');
+      }
+
+      await expect(service.pin('post-6', 'moderator')).rejects.toThrow(
+        new ConflictException('A community can have at most 5 pinned posts'),
+      );
+    });
+
+    it('lets exactly one of two concurrent pins at the cap boundary succeed', async () => {
+      process.env.COMMUNITY_PINNED_POSTS_MAX = '2';
+      service = createService();
+      await service.pin('post-1', 'moderator');
+
+      // While the first request sits between its count and its update, a
+      // competing request pins another post of the same community.
+      let second: Promise<{ ok?: unknown; error?: unknown }> | undefined;
+      store.hooks.beforeCount = (connection) => {
+        if (connection !== 2) {
+          return Promise.resolve();
+        }
+        second = service.pin('post-3', 'creator').then(
+          (ok) => ({ ok }),
+          (error: unknown) => ({ error }),
+        );
+        // Let the competitor run as far as it can before continuing.
+        return new Promise((resolve) => setTimeout(resolve, 10));
+      };
+
+      const first = await service.pin('post-2', 'moderator');
+      const outcome = await second;
+
+      expect(first.pinned_by).toBe('moderator');
+      expect(outcome).toEqual({
+        error: new ConflictException(
+          'A community can have at most 2 pinned posts',
+        ),
+      });
+      expect(
+        [...store.posts.values()]
+          .filter((post) => post.pinned_at)
+          .map((post) => post.id)
+          .sort(),
+      ).toEqual(['post-1', 'post-2']);
+      expect(store.log.map(({ targetId }) => targetId)).toEqual([
+        'post-1',
+        'post-2',
+      ]);
+      expect(store.openConnections()).toBe(0);
+    });
+
+    it('rolls the pin back and releases when the log write fails', async () => {
+      moderationLog.record.mockRejectedValueOnce(new Error('log failed'));
+
+      await expect(service.pin('post-1', 'moderator')).rejects.toThrow(
+        'log failed',
+      );
+
+      expect(pinWrites()).toHaveLength(1);
+      expect(store.posts.get('post-1')).toMatchObject({
+        pinned_at: null,
+        pinned_by: null,
+      });
+      expectRolledBackAndReleased();
+    });
+
+    it('releases the connection when the transaction cannot start', async () => {
+      store.hooks.failBegin = true;
+
+      await expect(service.pin('post-1', 'moderator')).rejects.toThrow('no tx');
+
+      expect(lastConnection().rollback).not.toHaveBeenCalled();
+      expect(lastConnection().release).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('unpin', () => {
+    beforeEach(async () => {
+      await service.pin('post-1', 'moderator');
+      store.queries.length = 0;
+      store.log.length = 0;
+      moderationLog.record.mockClear();
+    });
+
+    it('clears both columns and logs post_unpinned inside the transaction', async () => {
+      await expect(service.unpin('post-1', 'creator')).resolves.toBeUndefined();
+
+      expect(store.queries[0].sql).toMatch(/FOR UPDATE$/);
+      expect(store.queries[0].values).toEqual(['creator', 'creator', 'post-1']);
+      expect(pinWrites()).toEqual([
+        {
+          connection: 2,
+          sql: 'UPDATE posts SET pinned_at = NULL, pinned_by = NULL WHERE id = ? AND pinned_at IS NOT NULL',
+          values: ['post-1'],
+        },
+      ]);
+      expect(store.posts.get('post-1')).toMatchObject({
+        pinned_at: null,
+        pinned_by: null,
+      });
+      expect(moderationLog.record).toHaveBeenCalledTimes(1);
+      expect(moderationLog.record).toHaveBeenCalledWith(lastConnection(), {
+        actorId: 'creator',
+        communityId: 'community-1',
+        action: 'post_unpinned',
+        targetType: 'post',
+        targetId: 'post-1',
+      });
+      expectCommittedAndReleased();
+    });
+
+    it('is idempotent: unpinning an unpinned post succeeds and logs nothing', async () => {
+      await service.unpin('post-1', 'moderator');
+      await expect(
+        service.unpin('post-1', 'moderator'),
+      ).resolves.toBeUndefined();
+      expectCommittedAndReleased();
+      await expect(
+        service.unpin('post-2', 'moderator'),
+      ).resolves.toBeUndefined();
+      expectCommittedAndReleased();
+
+      expect(store.log).toEqual([
+        { connection: 2, action: 'post_unpinned', targetId: 'post-1' },
+      ]);
+    });
+
+    it.each([
+      ['the post author', 'author'],
+      ['any other member', 'stranger'],
+      ['a moderator of a different community', 'other-moderator'],
+    ])('returns 403 to %s and keeps the pin', async (_who, actor) => {
+      await expect(service.unpin('post-1', actor)).rejects.toThrow(
+        new ForbiddenException(
+          'Only the community creator and moderators can pin or unpin posts',
+        ),
+      );
+
+      expect(pinWrites()).toEqual([]);
+      expect(store.posts.get('post-1')?.pinned_by).toBe('moderator');
+      expectRolledBackAndReleased();
+    });
+
+    it('returns 404 for an unknown post', async () => {
+      await expect(service.unpin('missing', 'moderator')).rejects.toThrow(
+        new NotFoundException('Post not found'),
+      );
+      expectRolledBackAndReleased();
+    });
+
+    it('rolls the unpin back when the log write fails', async () => {
+      moderationLog.record.mockRejectedValueOnce(new Error('log failed'));
+
+      await expect(service.unpin('post-1', 'moderator')).rejects.toThrow(
+        'log failed',
+      );
+
+      expect(store.posts.get('post-1')?.pinned_by).toBe('moderator');
+      expectRolledBackAndReleased();
+    });
   });
 });

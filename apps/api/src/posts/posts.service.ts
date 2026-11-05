@@ -1,4 +1,5 @@
 import {
+  ConflictException,
   ForbiddenException,
   Inject,
   Injectable,
@@ -6,7 +7,12 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
+import type {
+  Pool,
+  PoolConnection,
+  ResultSetHeader,
+  RowDataPacket,
+} from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import {
   canModerateCommunitySql,
@@ -14,6 +20,7 @@ import {
 } from '../common/community-moderation';
 import { activeCommunitySql } from '../common/community-visibility';
 import { readPositiveInteger } from '../common/read-positive-integer';
+import { CommunityModerationLogService } from '../communities/community-moderation-log.service';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreatePostDto } from './dto/create-post.dto';
@@ -27,6 +34,20 @@ interface PostRow extends RowDataPacket {
   author_id: string;
   community_id: string;
   created_at: Date | string;
+  pinned_at: Date | string | null;
+  pinned_by: string | null;
+}
+
+// Every column of a post DTO, in DTO order.
+const POST_COLUMNS =
+  'id, title, content, type, author_id, community_id, created_at, pinned_at, pinned_by';
+
+interface PinnablePostRow extends RowDataPacket {
+  id: string;
+  community_id: string;
+  pinned_at: Date | string | null;
+  removed_at: Date | string | null;
+  can_moderate: number | string | boolean;
 }
 
 interface RemovablePostRow extends RowDataPacket {
@@ -45,6 +66,9 @@ export interface PostDto {
   author_id: string;
   community_id: string;
   created_at: string;
+  pinned_at: string | null;
+  // NULL on a pinned post once the pinning moderator's account is deleted.
+  pinned_by: string | null;
 }
 
 export interface PostListDto {
@@ -64,11 +88,17 @@ export class PostsService {
     'NOTIFICATION_FANOUT_MAX',
     5000,
   );
+  // The most posts one community may have pinned at once.
+  private readonly pinnedPostsMax = readPositiveInteger(
+    'COMMUNITY_PINNED_POSTS_MAX',
+    5,
+  );
 
   constructor(
     @Inject(MYSQL_POOL) private readonly pool: Pool,
     private readonly notifications: NotificationsService,
     private readonly ruleAcceptance: CommunityRuleAcceptanceService,
+    private readonly moderationLog: CommunityModerationLogService,
   ) {}
 
   async findAll(query: ListPostsDto): Promise<PostListDto> {
@@ -82,8 +112,15 @@ export class PostsService {
     const values: (string | number)[] = query.community_id
       ? [query.community_id]
       : [];
+    // Pins float only within one community's listing: one community's
+    // announcement has no claim on the global feed. The leading
+    // (pinned_at IS NULL) term cannot be read from an index, so this is a
+    // filesort over the community's posts (see the README).
+    const order = query.community_id
+      ? 'ORDER BY (pinned_at IS NULL), pinned_at DESC, created_at DESC, id DESC'
+      : 'ORDER BY created_at DESC, id DESC';
     const [posts] = await this.pool.execute<PostRow[]>(
-      `SELECT id, title, content, type, author_id, community_id, created_at FROM posts${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+      `SELECT ${POST_COLUMNS} FROM posts${where} ${order} LIMIT ? OFFSET ?`,
       [...values, limit, offset],
     );
     const [countRows] = await this.pool.execute<
@@ -139,7 +176,7 @@ export class PostsService {
       );
 
       const [posts] = await connection.execute<PostRow[]>(
-        'SELECT id, title, content, type, author_id, community_id, created_at FROM posts WHERE id = ? LIMIT 1',
+        `SELECT ${POST_COLUMNS} FROM posts WHERE id = ? LIMIT 1`,
         [id],
       );
       const post = posts[0];
@@ -180,7 +217,7 @@ export class PostsService {
 
   async findOne(id: string): Promise<PostDto> {
     const [posts] = await this.pool.execute<PostRow[]>(
-      `SELECT id, title, content, type, author_id, community_id, created_at FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} LIMIT 1`,
+      `SELECT ${POST_COLUMNS} FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} LIMIT 1`,
       [id],
     );
     const post = posts[0];
@@ -251,6 +288,146 @@ export class PostsService {
     }
   }
 
+  // Pinning is a moderation power, not an authorship one: only the post's
+  // community creator or a moderator of that community may pin or unpin. The
+  // post's author may not, unlike editing and deleting, where the author may
+  // act. Idempotent: pinning a pinned post changes nothing and never refreshes
+  // pinned_at, which is the pinned set's ordering key.
+  async pin(id: string, actorId: string): Promise<PostDto> {
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+
+      const post = await this.lockPostForModeration(connection, id, actorId);
+      if (post.pinned_at === null) {
+        if (post.removed_at !== null) {
+          throw new ConflictException('A removed post cannot be pinned');
+        }
+        // Serialises pins within the community, so two concurrent pins at the
+        // cap boundary cannot both pass the count. The count is a locking
+        // read so it sees a pin committed while this transaction waited,
+        // rather than the snapshot of the read above.
+        await connection.execute<RowDataPacket[]>(
+          'SELECT id FROM communities WHERE id = ? LIMIT 1 FOR UPDATE',
+          [post.community_id],
+        );
+        const [counts] = await connection.execute<
+          (RowDataPacket & { pinned: number | string })[]
+        >(
+          'SELECT COUNT(*) AS pinned FROM posts WHERE community_id = ? AND pinned_at IS NOT NULL FOR SHARE',
+          [post.community_id],
+        );
+        if (Number(counts[0]?.pinned ?? 0) >= this.pinnedPostsMax) {
+          throw new ConflictException(
+            `A community can have at most ${this.pinnedPostsMax} pinned posts`,
+          );
+        }
+
+        const [result] = await connection.execute<ResultSetHeader>(
+          'UPDATE posts SET pinned_at = UTC_TIMESTAMP(), pinned_by = ? WHERE id = ? AND pinned_at IS NULL',
+          [actorId, id],
+        );
+        // affectedRows 0 means the post is already pinned: nothing changed,
+        // so nothing is logged and the re-read below returns it unchanged.
+        if (result.affectedRows === 1) {
+          await this.moderationLog.record(connection, {
+            actorId,
+            communityId: post.community_id,
+            action: 'post_pinned',
+            targetType: 'post',
+            targetId: id,
+          });
+        }
+      }
+
+      const [posts] = await connection.execute<PostRow[]>(
+        `SELECT ${POST_COLUMNS} FROM posts WHERE id = ? LIMIT 1`,
+        [id],
+      );
+      const pinned = posts[0];
+      if (!pinned) {
+        throw new Error('Pinned post could not be retrieved');
+      }
+
+      await connection.commit();
+      return this.toDto(pinned);
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  // Same authorisation as pin. Idempotent: unpinning an unpinned post
+  // succeeds and logs nothing.
+  async unpin(id: string, actorId: string): Promise<void> {
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+
+      const post = await this.lockPostForModeration(connection, id, actorId);
+      const [result] = await connection.execute<ResultSetHeader>(
+        'UPDATE posts SET pinned_at = NULL, pinned_by = NULL WHERE id = ? AND pinned_at IS NOT NULL',
+        [id],
+      );
+      if (result.affectedRows === 1) {
+        await this.moderationLog.record(connection, {
+          actorId,
+          communityId: post.community_id,
+          action: 'post_unpinned',
+          targetType: 'post',
+          targetId: id,
+        });
+      }
+
+      await connection.commit();
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  // Locks the post row and decides moderation rights from it: 404 for an
+  // unknown post or one in a deleted community, 403 unless the actor created
+  // or moderates the post's community. Authorship is deliberately not enough.
+  private async lockPostForModeration(
+    connection: PoolConnection,
+    id: string,
+    actorId: string,
+  ): Promise<PinnablePostRow> {
+    const [posts] = await connection.execute<PinnablePostRow[]>(
+      `SELECT posts.id, posts.community_id, posts.pinned_at, posts.removed_at,
+         ${canModerateCommunitySql('posts.community_id')} AS can_moderate
+       FROM posts
+       WHERE posts.id = ? AND ${activeCommunitySql('posts.community_id')}
+       LIMIT 1 FOR UPDATE`,
+      [actorId, actorId, id],
+    );
+    const post = posts[0];
+    if (!post) {
+      throw new NotFoundException('Post not found');
+    }
+    if (!isSqlTrue(post.can_moderate)) {
+      throw new ForbiddenException(
+        'Only the community creator and moderators can pin or unpin posts',
+      );
+    }
+    return post;
+  }
+
   private toDto(post: PostRow): PostDto {
     return {
       id: post.id,
@@ -260,6 +437,8 @@ export class PostsService {
       author_id: post.author_id,
       community_id: post.community_id,
       created_at: new Date(post.created_at).toISOString(),
+      pinned_at: post.pinned_at ? new Date(post.pinned_at).toISOString() : null,
+      pinned_by: post.pinned_by ?? null,
     };
   }
 }

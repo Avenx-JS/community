@@ -10,6 +10,8 @@ import {
   type RowDataPacket,
 } from 'mysql2/promise';
 import { CommentsService } from '../comments/comments.service';
+import { activeCommunitySql } from '../common/community-visibility';
+import type { CommunityModerationLogService } from '../communities/community-moderation-log.service';
 import type { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import type { NotificationsService } from '../notifications/notifications.service';
 import { PostsService } from '../posts/posts.service';
@@ -235,6 +237,7 @@ integration('content listing indexes (MySQL)', () => {
       recording,
       {} as NotificationsService,
       {} as CommunityRuleAcceptanceService,
+      {} as CommunityModerationLogService,
     );
     comments = new CommentsService(
       recording,
@@ -349,14 +352,26 @@ integration('content listing indexes (MySQL)', () => {
     }
   });
 
-  it("lists a community's posts on idx_posts_community_created without a filesort", async () => {
-    const { sql, values } = await listingIssuedBy(() =>
-      posts.findAll({ community_id: 'c1', page: 2, limit: 20 }),
+  // PostsService.findAll no longer issues this shape for one community: since
+  // migration 026 it floats pinned posts first, a measured filesort recorded
+  // in post-pinning.mysql.spec.ts. The newest-first shape stays index-ordered
+  // and is what the two-query alternative there would use for unpinned posts.
+  it("pages one community's posts newest-first on idx_posts_community_created without a filesort", async () => {
+    const result = await plan(
+      `SELECT id, title, content, type, author_id, community_id, created_at FROM posts WHERE community_id = ? AND ${activeCommunitySql('posts.community_id')} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+      ['c1', 20, 20],
     );
-    expect(sql).toContain('ORDER BY created_at DESC, id DESC');
-    const result = await plan(sql, values);
     expect(result.key).toBe('idx_posts_community_created');
     expect(result.extra).not.toContain('Using filesort');
+  });
+
+  it('pages the unfiltered post feed exactly as the service issues it', async () => {
+    const { sql } = await listingIssuedBy(() =>
+      posts.findAll({ page: 2, limit: 20 }),
+    );
+    expect(sql).toMatch(
+      / ORDER BY created_at DESC, id DESC LIMIT \? OFFSET \?$/,
+    );
   });
 
   it("reads a post's thread on idx_comments_post_created without a filesort", async () => {

@@ -47,7 +47,10 @@ export class PostsController {
   @Get()
   @ApiOperation({
     summary: 'List posts',
-    description: 'Newest first, then by ID descending.',
+    description:
+      'Newest first, then by ID descending. With community_id, that ' +
+      "community's pinned posts come first, most recently pinned first; the " +
+      'unfiltered listing does not float pinned posts.',
   })
   @ApiOkResponse({ type: PostListResponse })
   @ApiErrorResponses({ 400: 'Invalid query parameters.' })
@@ -98,6 +101,55 @@ export class PostsController {
     @Req() request: AuthenticatedRequest,
   ): Promise<void> {
     return this.postsService.remove(id, request.user.id);
+  }
+
+  @Post(':id/pin')
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Pin a post to the top of its community',
+    description:
+      "Only the post's community creator and moderators may pin; the post's " +
+      'author may not (unlike deletion). Idempotent: pinning a pinned post ' +
+      'returns it unchanged and keeps its original pinned_at.',
+  })
+  @ApiAuthenticated({
+    forbidden: 'The caller does not moderate this community.',
+  })
+  @ApiRouteParam('id', 'id', 'Post ID.')
+  @ApiOkResponse({ type: PostResponse })
+  @ApiErrorResponses({
+    400: 'Invalid post ID.',
+    404: 'Post not found.',
+    409: 'The community already has the maximum number of pinned posts, or the post was removed by a moderator.',
+  })
+  pin(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.postsService.pin(id, request.user.id);
+  }
+
+  @Delete(':id/pin')
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary: 'Unpin a post',
+    description:
+      "Only the post's community creator and moderators may unpin. " +
+      'Idempotent: unpinning a post that is not pinned also returns 204.',
+  })
+  @ApiAuthenticated({
+    forbidden: 'The caller does not moderate this community.',
+  })
+  @ApiRouteParam('id', 'id', 'Post ID.')
+  @ApiNoContentResponse({ description: 'The post is not pinned.' })
+  @ApiErrorResponses({ 400: 'Invalid post ID.', 404: 'Post not found.' })
+  unpin(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<void> {
+    return this.postsService.unpin(id, request.user.id);
   }
 
   @Get(':postId/comments')

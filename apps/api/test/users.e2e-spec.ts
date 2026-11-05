@@ -227,7 +227,7 @@ describe('User profile endpoints (e2e)', () => {
       }
       if (
         sql.startsWith(
-          'SELECT id, title, content, type, author_id, community_id, created_at FROM posts WHERE EXISTS',
+          'SELECT id, title, content, type, author_id, community_id, created_at, pinned_at, pinned_by FROM posts WHERE EXISTS',
         )
       ) {
         return Promise.resolve([tables.posts, []]);

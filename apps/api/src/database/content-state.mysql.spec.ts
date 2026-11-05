@@ -10,6 +10,7 @@ import {
   type RowDataPacket,
 } from 'mysql2/promise';
 import { CommentsService } from '../comments/comments.service';
+import type { CommunityModerationLogService } from '../communities/community-moderation-log.service';
 import type { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import type { NotificationsService } from '../notifications/notifications.service';
 import { PostsService } from '../posts/posts.service';
@@ -173,6 +174,7 @@ integration('post and comment content state (MySQL)', () => {
       pool,
       {} as NotificationsService,
       {} as CommunityRuleAcceptanceService,
+      {} as CommunityModerationLogService,
     );
     comments = new CommentsService(
       pool,

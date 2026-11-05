@@ -147,7 +147,7 @@ only query plans change.
 | Index | Columns | Query it serves |
 | --- | --- | --- |
 | `idx_votes_target` | `votes (target_type, target_id, value)` | `VotesService.vote`'s `SUM(value) … WHERE target_type = ? AND target_id = ?` |
-| `idx_posts_community_created` | `posts (community_id, created_at, id)` | `GET /posts?community_id=…` |
+| `idx_posts_community_created` | `posts (community_id, created_at, id)` | One community's posts, newest first (`GET /posts?community_id=…` before pinning; see [Pins in listings](#pins-in-listings)) |
 | `idx_posts_author_created` | `posts (author_id, created_at, id)` | One author's posts, newest first |
 | `idx_comments_author_created` | `comments (author_id, created_at, id)` | One author's comments, newest first |
 | `idx_comments_parent_created` | `comments (parent_id, created_at, id)` | Paginated replies of one comment |
@@ -2358,7 +2358,9 @@ only `description`), never their values.
 them writes an entry yet.
 
 **Writers are wired up by the endpoint issues.** `PATCH` and
-`DELETE /communities/:name` are the first writers. Each moderation endpoint calls `CommunityModerationLogService.record` as
+`DELETE /communities/:name` were the first writers; `POST` and
+`DELETE /posts/:id/pin` write `post_pinned` and `post_unpinned`, only when the
+pin state actually changes. Each moderation endpoint calls `CommunityModerationLogService.record` as
 part of its own work; the existing rules-publish and moderator-management
 routes are retrofitted separately. `record` has the same two overloads as
 `AuditLogService.record`: pass the caller's `PoolConnection` so the action and
@@ -3033,7 +3035,9 @@ credentials that may create a scratch database.
 "sort" }`. It accepts optional `community_id`, one-based `page` (default `1`),
 `limit` from `1` to `100` (default `20`), and `sort=new` (the only supported
 sort order). Posts are ordered by `created_at` descending, then `id` descending
-to keep pagination stable. An empty page is returned with HTTP `200`.
+to keep pagination stable. **With `community_id`, that community's pinned
+posts come first** (see [Pinning posts](#pinning-posts)); the unfiltered
+listing never floats pins. An empty page is returned with HTTP `200`.
 
 `POST /posts` requires a bearer token and accepts `title` (1-300 characters),
 `type` (`text`, `link`, or `media`), non-empty `content` (up to 16,383
@@ -3059,9 +3063,132 @@ Post responses use this DTO:
   "type": "text",
   "author_id": "user-id",
   "community_id": "community-id",
-  "created_at": "2026-10-22T08:00:00.000Z"
+  "created_at": "2026-10-22T08:00:00.000Z",
+  "pinned_at": null,
+  "pinned_by": null
 }
 ```
+
+`pinned_at` and `pinned_by` are present on every post response and are `null`
+on a post that is not pinned.
+
+### Pinning posts
+
+Moderators can keep announcements, welcome threads, megathreads and event
+posts at the top of their community's listing. Migration
+`026_add_post_pinning` stores the pin on the post itself: `pinned_at` (when)
+and `pinned_by` (who), the same nullable-timestamp-plus-actor shape as the
+lock and removal columns. A separate pins table was rejected: a post belongs
+to exactly one community, so being pinned in several places is meaningless.
+
+#### `POST /posts/:id/pin`
+
+Bearer token required, no body. Pins the post and returns `200` with the post
+DTO, `pinned_at` taken from the database clock (`UTC_TIMESTAMP()`) and
+`pinned_by` from the token.
+
+**Only the post's community creator and that community's moderators may pin.**
+The post's author may not, unless they also moderate the community. This is
+the opposite of the rule for deleting (and, later, editing) a post, where the
+author may act: pinning lifts one post above everyone else's in a shared feed,
+which is a moderation power, not an authorship one. A moderator of a
+different community is refused like any other member.
+
+| Status | When |
+| --- | --- |
+| `200` | Pinned, or already pinned (unchanged) |
+| `400` | Malformed post ID |
+| `401` | Missing, invalid or expired token |
+| `403` | The caller does not create or moderate the post's community, or the account is restricted |
+| `404` | Unknown post, or a post in a deleted community |
+| `409` | The community is at its pin cap, or the post was removed by a moderator |
+
+**Idempotent, and `pinned_at` is never refreshed.** Pinning a pinned post
+returns `200` with the post unchanged and writes no log entry. `pinned_at` is
+also the order of the pinned set, so refreshing it would silently move a post
+to the top of the pins. The `UPDATE` is guarded by `AND pinned_at IS NULL`;
+`affectedRows = 0` is treated as "already pinned".
+
+**Cap.** A community may have at most `COMMUNITY_PINNED_POSTS_MAX` pinned posts
+at once (default `5`, read once at startup through `readPositiveInteger`).
+Pinning beyond it returns `409` naming the limit and pins nothing; unpin one
+first. Without a cap, pinning every post would turn emphasis into feed
+control. The count is taken inside the pin transaction after locking the
+community row (`SELECT … FROM communities … FOR UPDATE`), and is itself a
+locking read (`FOR SHARE`), so two concurrent pins at the boundary are
+serialised and exactly one succeeds. A repeat pin of an already-pinned post
+is not counted and still returns `200` at the cap.
+
+The whole request runs in one transaction on one connection: the post row is
+read `FOR UPDATE` together with `canModerateCommunitySql` (authorisation is
+decided in the service through `isSqlTrue`), then the cap is checked, the row
+updated and the `post_pinned` entry written to the [community moderation
+log](#community-moderation-log). A failure to write the entry rolls the pin
+back. The connection is released on every path.
+
+#### `DELETE /posts/:id/pin`
+
+Bearer token required. Same authorisation and the same locking read as
+pinning. Clears both columns and returns `204`, writing a `post_unpinned`
+entry in the same transaction. Unpinning a post that is not pinned also
+returns `204` and writes nothing, matching the idempotent
+`DELETE /communities/:name/subscribe`. An unknown post is `404`. The pin is
+modelled as a sub-resource the post either has or does not (`POST`/`DELETE` on
+`/pin`, like `/subscribe`), not as a separate `/unpin` action.
+
+#### Pins in listings
+
+**Behaviour change:** `GET /posts?community_id=…` now orders by
+
+```sql
+ORDER BY (pinned_at IS NULL), pinned_at DESC, created_at DESC, id DESC
+```
+
+so the community's pinned posts come first, most recently pinned first, then
+every other post newest first. The order is total, so pagination stays stable
+even when a page boundary falls inside the pinned set. `total` counts pinned
+and unpinned posts alike.
+
+The unfiltered `GET /posts` keeps exactly its previous order
+(`created_at DESC, id DESC`) and does not float pins: one community's
+announcement has no claim on the global feed. `sort` still accepts only
+`new`; pinning is not a sort option.
+
+**Filesort trade-off.** The leading `(pinned_at IS NULL)` term cannot be read
+from an index, so a single community's listing is a filesort over that
+community's posts (found through a `community_id` index) instead of the
+index-ordered read `idx_posts_community_created` gave before. A materially
+better plan needs two queries: the community's pins (at most the cap, via
+`idx_posts_community_pinned`), then the page of unpinned posts on
+`idx_posts_community_created` with the number of pins subtracted from the
+offset. The single query ships for now because it is simpler and the sort is
+bounded by one community's size; revisit if that plan becomes a problem.
+`post-pinning.mysql.spec.ts` asserts the actual plan (a `ref` lookup on a
+`community_id` index, `Using filesort`) so the decision is measured, not
+assumed, and a plan change fails the suite.
+
+#### Schema
+
+| Column | Meaning |
+| --- | --- |
+| `pinned_at` | When the post was pinned; `NULL` when not pinned. Orders the pinned set |
+| `pinned_by` | Who pinned it. `ON DELETE SET NULL`, so a pin survives deletion of the moderator's account |
+
+`chk_posts_pin` forbids `pinned_by` without `pinned_at`. **Readers must
+tolerate a `NULL` `pinned_by` on a pinned post**; the API returns it as
+`pinned_by: null`. `idx_posts_community_pinned (community_id, pinned_at)`
+serves the cap's per-community count and the "pinned posts of this community"
+read. The migration is not safely re-runnable after partial application; its
+header lists what to inspect before completing it by hand.
+
+**Rate limiting.** The global write buckets apply (60 per IP and 120 per
+account per minute). Pinning is a rare moderator action and has no dedicated
+bucket.
+
+**No notification.** The post's author is not told that their post was
+pinned: a pin is not an action against the author, and `notifications.type`
+is an `ENUM` whose new value would need its own migration. A
+`post_pinned` notification is a possible follow-up.
 
 ### Post content state
 

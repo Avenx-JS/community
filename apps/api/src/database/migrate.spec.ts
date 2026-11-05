@@ -90,6 +90,9 @@ describe('migration ordering and application', () => {
     expect(position('025_add_community_suspension')).toBe(
       position('024_add_community_subscriptions_community_index') + 1,
     );
+    expect(position('026_add_post_pinning')).toBe(
+      position('025_add_community_suspension') + 1,
+    );
     expect(new Set(versions).size).toBe(versions.length);
   });
 

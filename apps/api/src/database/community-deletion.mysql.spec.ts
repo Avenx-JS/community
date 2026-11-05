@@ -168,7 +168,12 @@ integration('community deletion (MySQL)', () => {
       ruleAcceptance,
       new CommunityModerationLogService(pool),
     );
-    posts = new PostsService(pool, {} as NotificationsService, ruleAcceptance);
+    posts = new PostsService(
+      pool,
+      {} as NotificationsService,
+      ruleAcceptance,
+      new CommunityModerationLogService(pool),
+    );
   });
 
   afterAll(async () => {

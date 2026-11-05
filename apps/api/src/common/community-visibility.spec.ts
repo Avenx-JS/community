@@ -61,7 +61,7 @@ function services(pool: Pool) {
     preferences: new NotificationPreferencesService(pool),
     rules: new CommunityRulesService(pool, ruleAcceptance),
     moderationLog,
-    posts: new PostsService(pool, notifications, ruleAcceptance),
+    posts: new PostsService(pool, notifications, ruleAcceptance, moderationLog),
     comments: new CommentsService(pool, notifications, ruleAcceptance),
     votes: new VotesService(pool, ruleAcceptance),
     stats: new CommunityStatsService(pool),

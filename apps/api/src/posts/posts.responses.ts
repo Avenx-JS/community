@@ -26,6 +26,25 @@ export class PostResponse implements PostDto {
 
   @ApiProperty({ format: 'date-time' })
   created_at!: string;
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description:
+      'When a community moderator pinned the post; null when not pinned. ' +
+      "Orders the pinned posts at the top of the post's community listing.",
+  })
+  pinned_at!: string | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'User ID of the moderator who pinned the post. Null when not pinned, ' +
+      "and also on a pinned post once that moderator's account is deleted.",
+  })
+  pinned_by!: string | null;
 }
 
 export class PostListResponse implements PostListDto {
