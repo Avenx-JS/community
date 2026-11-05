@@ -1,6 +1,10 @@
 -- Creates account restriction history and lookup indexes.
+-- The lift rule (chk_user_restrictions_lift) names lifted_by, whose foreign
+-- key is ON DELETE SET NULL, so MySQL 8 refuses it as a CHECK; the trigger
+-- pair at the end enforces it with the CHECK error.
 -- Not safely re-runnable: if the table exists but this version is unrecorded,
--- verify its definition before recording this migration manually.
+-- verify its definition and its triggers (SHOW TRIGGERS) before recording
+-- this migration manually.
 CREATE TABLE user_restrictions (
     id VARCHAR(36) PRIMARY KEY,
     user_id VARCHAR(36) NOT NULL,
@@ -21,12 +25,26 @@ CREATE TABLE user_restrictions (
         (type = 'suspension' AND expires_at IS NOT NULL) OR
         (type = 'ban' AND expires_at IS NULL)
     ),
-    CONSTRAINT chk_user_restrictions_lift CHECK (
-        (lifted_at IS NULL AND lifted_by IS NULL AND lift_reason IS NULL) OR
-        lifted_at IS NOT NULL
-    ),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
     FOREIGN KEY (lifted_by) REFERENCES users(id) ON DELETE SET NULL,
     FOREIGN KEY (report_id) REFERENCES user_reports(id) ON DELETE SET NULL
 );
+
+-- chk_user_restrictions_lift (003_create_user_restrictions): enforced by triggers, see the README.
+DELIMITER $$
+CREATE TRIGGER trg_user_restrictions_lift_insert BEFORE INSERT ON user_restrictions FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.lifted_at IS NULL AND NEW.lifted_by IS NULL AND NEW.lift_reason IS NULL) OR NEW.lifted_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_user_restrictions_lift'' is violated.';
+  END IF;
+END$$
+CREATE TRIGGER trg_user_restrictions_lift_update BEFORE UPDATE ON user_restrictions FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.lifted_at IS NULL AND NEW.lifted_by IS NULL AND NEW.lift_reason IS NULL) OR NEW.lifted_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_user_restrictions_lift'' is violated.';
+  END IF;
+END$$
+DELIMITER ;

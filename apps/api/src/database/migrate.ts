@@ -1,3 +1,4 @@
+import { runSqlScript } from './sql-script';
 import { readdir, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createConnection } from 'mysql2/promise';
@@ -109,7 +110,7 @@ export async function runMigrations(
     }
 
     try {
-      await connection.query(migration.sql);
+      await runSqlScript(connection, migration.sql);
     } catch (error) {
       log(`Failed ${migration.version}; version was not recorded`);
       throw error;

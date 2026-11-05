@@ -20,6 +20,7 @@ import {
   runMigrations,
   type MigrationConnection,
 } from './migrate';
+import { runSqlScript } from './sql-script';
 
 const migrations = resolve(__dirname, '../../../../data/migrations');
 const VERSION = '018_add_content_listing_indexes';
@@ -173,10 +174,12 @@ integration('content listing indexes (MySQL)', () => {
       ...credentials,
       multipleStatements: true,
     });
-    await connection.query(
+    await runSqlScript(
+      connection,
       `CREATE DATABASE ${fresh}; USE ${fresh}; ${snapshot}`,
     );
-    await connection.query(
+    await runSqlScript(
+      connection,
       `CREATE DATABASE ${database}; USE ${database}; ${preceding}`,
     );
 
@@ -294,9 +297,17 @@ integration('content listing indexes (MySQL)', () => {
       }));
       const byName = (a: RowDataPacket, b: RowDataPacket) =>
         String(a.name).localeCompare(String(b.name));
+      // MySQL drops the index it created implicitly for a foreign key once
+      // another index leads with that column (see the next tests).
+      const superseded = (index: RowDataPacket) =>
+        index.name === index.columns &&
+        added.some((a) => a.columns.split(',')[0] === index.columns);
 
       expect([...migrated].sort(byName)).toEqual(
-        [...indexesBefore[table], ...added].sort(byName),
+        [
+          ...indexesBefore[table].filter((index) => !superseded(index)),
+          ...added,
+        ].sort(byName),
       );
       await expect(indexes(fresh, table)).resolves.toEqual(migrated);
     },
@@ -319,22 +330,29 @@ integration('content listing indexes (MySQL)', () => {
     },
   );
 
+  // Measured on MySQL 8.0.46: an index MySQL created implicitly for a
+  // foreign key is dropped when a composite leading with the same column is
+  // added, on a migrated and a fresh installation alike. The foreign key is
+  // then backed by the composite ("each led by an index" above).
   it.each([
     ['posts', ['author_id', 'community_id']],
     ['comments', ['author_id', 'parent_id', 'post_id']],
   ])(
-    'keeps the implicit single-column foreign-key indexes on %s',
+    'replaces the implicit single-column foreign-key indexes on %s with the composites',
     async (table, columns) => {
       for (const schema of [database, fresh]) {
-        const single = (await indexes(schema, table)).map(
-          (index) => index.columns as string,
-        );
+        const all = await indexes(schema, table);
         for (const column of columns) {
-          expect({ schema, column, present: single.includes(column) }).toEqual({
+          expect({
             schema,
             column,
-            present: true,
-          });
+            single: all.some((index) => index.columns === column),
+            composite: all.some(
+              (index) =>
+                String(index.columns).startsWith(`${column},`) &&
+                index.name !== column,
+            ),
+          }).toEqual({ schema, column, single: false, composite: true });
         }
       }
     },

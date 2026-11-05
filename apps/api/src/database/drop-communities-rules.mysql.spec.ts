@@ -8,6 +8,7 @@ import {
   type RowDataPacket,
 } from 'mysql2/promise';
 import { hashCommunityRules } from '../communities/community-rules-hash';
+import { runSqlScript } from './sql-script';
 
 const migrations = resolve(__dirname, '../../../../data/migrations');
 const migration = (file: string) =>
@@ -17,7 +18,7 @@ const migration = (file: string) =>
 // exactly what operators are told to run (drop-communities-rules.spec.ts
 // keeps it identical to 014's guard). It must return zero before 014 runs.
 const readme = readFileSync(resolve(__dirname, '../../README.md'), 'utf8');
-const VERIFICATION_SQL = /```sql\n([\s\S]*?)```/.exec(
+const VERIFICATION_SQL = /```sql\r?\n([\s\S]*?)```/.exec(
   readme.slice(readme.indexOf('**Pre-drop verification.**')),
 )![1];
 
@@ -51,7 +52,9 @@ integration('dropping communities.rules (MySQL)', () => {
       password: process.env.MYSQL_PASSWORD,
       multipleStatements: true,
     });
-    await connection.query(`CREATE DATABASE ${database}; USE ${database};
+    await runSqlScript(
+      connection,
+      `CREATE DATABASE ${database}; USE ${database};
       CREATE TABLE users (id VARCHAR(36) PRIMARY KEY);
       CREATE TABLE communities (
         id VARCHAR(36) PRIMARY KEY,
@@ -70,7 +73,8 @@ integration('dropping communities.rules (MySQL)', () => {
       INSERT INTO users (id) VALUES ('creator'), ('member');
       INSERT INTO communities (id, creator_id, rules) VALUES
         ('early', 'creator', 'Be kind.'),
-        ('blank', 'creator', '  ');`);
+        ('blank', 'creator', '  ');`,
+    );
     await connection.query(
       migration('009_create_community_rule_documents.sql'),
     );

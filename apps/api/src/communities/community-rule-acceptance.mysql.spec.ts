@@ -10,6 +10,7 @@ import {
   type RowDataPacket,
 } from 'mysql2/promise';
 import { CommunityRuleAcceptanceService } from './community-rule-acceptance.service';
+import { runSqlScript } from '../database/sql-script';
 
 const migrations = resolve(__dirname, '../../../../data/migrations');
 
@@ -54,7 +55,9 @@ integration('community rule acceptances (MySQL)', () => {
       ...credentials,
       multipleStatements: true,
     });
-    await admin.query(`CREATE DATABASE ${database}; USE ${database};
+    await runSqlScript(
+      admin,
+      `CREATE DATABASE ${database}; USE ${database};
       CREATE TABLE users (id VARCHAR(36) PRIMARY KEY);
       CREATE TABLE communities (
         id VARCHAR(36) PRIMARY KEY,
@@ -78,7 +81,8 @@ integration('community rule acceptances (MySQL)', () => {
         ('without-rules', 'creator-2', NULL);
       INSERT INTO community_subscriptions (user_id, community_id) VALUES
         ('member-a', 'with-rules'), ('member-b', 'with-rules'),
-        ('member-a', 'without-rules');`);
+        ('member-a', 'without-rules');`,
+    );
     for (const file of [
       '009_create_community_rule_documents.sql',
       '012_create_community_rule_acceptances.sql',

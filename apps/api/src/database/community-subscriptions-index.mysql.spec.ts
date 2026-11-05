@@ -18,6 +18,7 @@ import {
   runMigrations,
   type MigrationConnection,
 } from './migrate';
+import { runSqlScript } from './sql-script';
 
 const migrations = resolve(__dirname, '../../../../data/migrations');
 const VERSION = '024_add_community_subscriptions_community_index';
@@ -105,10 +106,12 @@ integration('community subscriptions index (MySQL)', () => {
       ...credentials,
       multipleStatements: true,
     });
-    await connection.query(
+    await runSqlScript(
+      connection,
       `CREATE DATABASE ${fresh}; USE ${fresh}; ${snapshot}`,
     );
-    await connection.query(
+    await runSqlScript(
+      connection,
       `CREATE DATABASE ${database}; USE ${database}; ${preceding}`,
     );
     firstRun = await migrate();
@@ -163,14 +166,18 @@ integration('community subscriptions index (MySQL)', () => {
     expect(secondRun).toEqual([]);
   });
 
-  it('creates the same indexes as the snapshot, keeping the foreign-key index', async () => {
+  // MySQL drops the implicit community_id foreign-key index once the
+  // composite leads with community_id; the composite then backs the key
+  // (measured on MySQL 8.0.46, as for migration 018).
+  it('creates the same indexes as the snapshot, the composite backing the foreign key', async () => {
     const migrated = await indexes(database);
     expect(migrated).toEqual(await indexes(fresh));
-    expect(migrated).toEqual(
-      expect.arrayContaining([
-        { name: INDEX, columns: 'community_id,created_at,user_id' },
-        { name: 'community_id', columns: 'community_id' },
-      ]),
+    expect(migrated).toContainEqual({
+      name: INDEX,
+      columns: 'community_id,created_at,user_id',
+    });
+    expect(migrated.map((index) => String(index.columns))).not.toContain(
+      'community_id',
     );
   });
 

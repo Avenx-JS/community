@@ -19,6 +19,7 @@ import {
   runMigrations,
   type MigrationConnection,
 } from './migrate';
+import { removeTriggerRules, runSqlScript } from './sql-script';
 
 const migrations = resolve(__dirname, '../../../../data/migrations');
 const VERSION = '017_add_post_and_comment_content_state';
@@ -31,10 +32,17 @@ const snapshot = readFileSync(
   'utf8',
 ).replace(/^CREATE DATABASE[^;]*;\s*USE community;/, '');
 
-// The snapshot with 017 undone: every line naming a content-state column and
+// The snapshot with 017 undone: its four trigger pairs, every line naming a
+// content-state column and
 // the 017 version removed, then the trailing comma that leaves before ");".
 // Only posts and comments use these column names.
-const preceding = snapshot
+const preceding = removeTriggerRules(
+  snapshot,
+  'chk_posts_lock',
+  'chk_posts_removal',
+  'chk_comments_lock',
+  'chk_comments_removal',
+)
   .replace(STATE_COLUMN, '')
   .replace(/,(\s*\r?\n\);)/g, '$1')
   .replace(/,\r?\n\s*\('017_add_post_and_comment_content_state'\)/, '');
@@ -122,14 +130,16 @@ integration('post and comment content state (MySQL)', () => {
        ORDER BY k.constraint_name`,
       [schema, table],
     ),
-    checks: await rows(
-      `SELECT c.constraint_name AS name, c.check_clause AS clause
-       FROM information_schema.check_constraints c
-       JOIN information_schema.table_constraints t
-         ON t.constraint_schema = c.constraint_schema
-        AND t.constraint_name = c.constraint_name
-       WHERE t.table_schema = ? AND t.table_name = ?
-       ORDER BY c.constraint_name`,
+    // The lock and removal rules are triggers, not CHECKs: MySQL 8 forbids a
+    // CHECK on a column whose foreign key is ON DELETE SET NULL. Compared by
+    // name, not ACTION_ORDER: rebuilding history puts later migrations'
+    // triggers first, and independent BEFORE checks do not depend on order.
+    triggers: await rows(
+      `SELECT trigger_name AS name, action_timing AS timing,
+              event_manipulation AS event, action_statement AS statement
+       FROM information_schema.triggers
+       WHERE event_object_schema = ? AND event_object_table = ?
+       ORDER BY trigger_name`,
       [schema, table],
     ),
   });
@@ -142,10 +152,12 @@ integration('post and comment content state (MySQL)', () => {
       ...credentials,
       multipleStatements: true,
     });
-    await connection.query(
+    await runSqlScript(
+      connection,
       `CREATE DATABASE ${fresh}; USE ${fresh}; ${snapshot}`,
     );
-    await connection.query(
+    await runSqlScript(
+      connection,
       `CREATE DATABASE ${database}; USE ${database}; ${preceding}`,
     );
 
@@ -254,7 +266,12 @@ integration('post and comment content state (MySQL)', () => {
           { name: `idx_${table}_removed_at`, columns: 'removed_at' },
         ]),
       );
-      expect(migrated.foreignKeys).toEqual([
+      // 017's own keys; posts also has fk_posts_pinned_by from 026.
+      expect(
+        migrated.foreignKeys.filter((key) =>
+          /_(locked|removed)_by$/.test(String(key.name)),
+        ),
+      ).toEqual([
         {
           name: `fk_${table}_locked_by`,
           column_name: 'locked_by',
@@ -266,10 +283,19 @@ integration('post and comment content state (MySQL)', () => {
           on_delete: 'SET NULL',
         },
       ]);
-      expect(migrated.checks.map((check) => check.name as string)).toEqual([
-        `chk_${table}_lock`,
-        `chk_${table}_removal`,
+      expect(
+        migrated.triggers
+          .map((trigger) => trigger.name as string)
+          .filter((name) => /_(lock|removal)_/.test(name)),
+      ).toEqual([
+        `trg_${table}_lock_insert`,
+        `trg_${table}_lock_update`,
+        `trg_${table}_removal_insert`,
+        `trg_${table}_removal_update`,
       ]);
+      expect(
+        migrated.triggers.every((trigger) => trigger.timing === 'BEFORE'),
+      ).toBe(true);
 
       await expect(shape(fresh, table)).resolves.toEqual(migrated);
     },

@@ -16,6 +16,7 @@ import {
   MODERATOR_COUNT_SQL,
   POST_STATS_SQL,
 } from '../communities/community-stats.service';
+import { runSqlScript } from './sql-script';
 
 // The full-install snapshot without its database selection.
 const snapshot = readFileSync(
@@ -65,7 +66,8 @@ integration('community stats (MySQL)', () => {
       ...credentials,
       multipleStatements: true,
     });
-    await connection.query(
+    await runSqlScript(
+      connection,
       `CREATE DATABASE ${database}; USE ${database}; ${snapshot}`,
     );
 
@@ -124,9 +126,15 @@ integration('community stats (MySQL)', () => {
     expect(plan.u.key).toBe('PRIMARY');
   });
 
-  it("counts moderators from community_moderators' primary key", async () => {
+  // Either index of community_moderators answers the count from the index
+  // alone (the secondary one carries the primary-key columns); with three
+  // rows MySQL 8.0.46 picks the secondary one. planOf rules out a scan.
+  it('counts moderators from a community_moderators index alone', async () => {
     const plan = await planOf(MODERATOR_COUNT_SQL);
-    expect(plan.m.key).toBe('PRIMARY');
+    expect(['PRIMARY', 'idx_community_moderators_user_id']).toContain(
+      plan.m.key,
+    );
+    expect(String(plan.m.Extra)).toContain('Using index');
     expect(plan.u.key).toBe('PRIMARY');
   });
 
@@ -136,9 +144,15 @@ integration('community stats (MySQL)', () => {
     expect(String(plan.posts.Extra)).toContain('Using index');
   });
 
+  // The posts side needs only community_id and id, so any community_id-led
+  // index covers it; since 026 MySQL prefers the narrower
+  // idx_posts_community_pinned (community_id, pinned_at, + id).
   it('joins comments through the community posts on the listing indexes', async () => {
     const plan = await planOf(COMMENT_STATS_SQL);
-    expect(plan.p.key).toBe('idx_posts_community_created');
+    expect(String(plan.p.key)).toMatch(
+      /^idx_posts_community_(created|pinned)$/,
+    );
+    expect(String(plan.p.Extra)).toContain('Using index');
     expect(plan.c.key).toBe('idx_comments_post_created');
   });
 

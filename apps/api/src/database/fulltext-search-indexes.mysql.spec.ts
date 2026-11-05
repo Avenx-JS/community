@@ -17,6 +17,7 @@ import {
   runMigrations,
   type MigrationConnection,
 } from './migrate';
+import { runSqlScript } from './sql-script';
 
 const migrations = resolve(__dirname, '../../../../data/migrations');
 
@@ -118,10 +119,12 @@ integration('full-text search indexes (MySQL)', () => {
       ...credentials,
       multipleStatements: true,
     });
-    await connection.query(
+    await runSqlScript(
+      connection,
       `CREATE DATABASE ${fresh}; USE ${fresh}; ${snapshot}`,
     );
-    await connection.query(
+    await runSqlScript(
+      connection,
       `CREATE DATABASE ${database}; USE ${database}; ${preceding}`,
     );
 
@@ -239,7 +242,11 @@ integration('full-text search indexes (MySQL)', () => {
     await expect(ids(COMMENTS_MATCH, 'the')).resolves.toEqual([]);
   });
 
-  it('returns a word present in every row in boolean mode, unlike natural-language mode', async () => {
+  // Boolean mode returns every row containing the word, whatever its
+  // relevance. (Whether natural-language mode drops a word that occurs in
+  // every row depends on engine and version: MyISAM's 50% threshold does,
+  // InnoDB on MySQL 8.0.46 was measured not to, so that is not asserted.)
+  it('returns a word present in every row in boolean mode', async () => {
     await expect(ids(POSTS_MATCH, 'community')).resolves.toEqual([
       'p1',
       'p2',
@@ -256,15 +263,6 @@ integration('full-text search indexes (MySQL)', () => {
       'c3',
       'c4',
     ]);
-
-    // The failure boolean mode avoids: a word in every row has zero inverse
-    // document frequency, so natural-language mode drops every row.
-    await expect(
-      ids(
-        'SELECT id FROM posts WHERE MATCH (title, content) AGAINST (? IN NATURAL LANGUAGE MODE)',
-        'community',
-      ),
-    ).resolves.toEqual([]);
   });
 
   it('makes newly inserted rows matchable immediately', async () => {

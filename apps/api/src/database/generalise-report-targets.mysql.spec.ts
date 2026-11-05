@@ -20,6 +20,7 @@ import {
   runMigrations,
   type MigrationConnection,
 } from './migrate';
+import { runSqlScript } from './sql-script';
 
 const migrations = resolve(__dirname, '../../../../data/migrations');
 const migration = (file: string) =>
@@ -128,10 +129,13 @@ integration('generalised report targets (MySQL)', () => {
       ...credentials,
       multipleStatements: true,
     });
-    await connection.query(
+    await runSqlScript(
+      connection,
       `CREATE DATABASE ${fresh}; USE ${fresh}; ${snapshot}`,
     );
-    await connection.query(`CREATE DATABASE ${database}; USE ${database};
+    await runSqlScript(
+      connection,
+      `CREATE DATABASE ${database}; USE ${database};
       CREATE TABLE users (
         id VARCHAR(36) PRIMARY KEY,
         username VARCHAR(50) NOT NULL UNIQUE
@@ -145,8 +149,9 @@ integration('generalised report targets (MySQL)', () => {
         id VARCHAR(36) PRIMARY KEY,
         author_id VARCHAR(36) NOT NULL,
         FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE
-      );`);
-    await connection.query(migration('002_create_user_reports.sql'));
+      );`,
+    );
+    await runSqlScript(connection, migration('002_create_user_reports.sql'));
     await connection.query(migration('008_add_report_analytics_indexes.sql'));
 
     // Every other migration is already recorded, so the runner applies 016
@@ -294,9 +299,21 @@ integration('generalised report targets (MySQL)', () => {
       { name: 'reviewed_by', on_delete: 'SET NULL' },
       { name: 'target_author_id', on_delete: 'SET NULL' },
     ]);
+    // chk_user_reports_not_self names reporter_id and reported_user_id, whose
+    // foreign keys have referential actions, so MySQL 8 refuses it as a
+    // CHECK: it is a trigger pair (see migration 002 and the README).
     expect(migrated.checks.map((check) => check.name as string)).toEqual([
       'chk_user_reports_context',
-      'chk_user_reports_not_self',
+    ]);
+    const [triggers] = await connection.query<RowDataPacket[]>(
+      `SELECT trigger_name AS name FROM information_schema.triggers
+       WHERE event_object_schema = ? AND event_object_table = 'user_reports'
+       ORDER BY trigger_name`,
+      [database],
+    );
+    expect(triggers.map((row) => row.name as string)).toEqual([
+      'trg_user_reports_not_self_insert',
+      'trg_user_reports_not_self_update',
     ]);
 
     await expect(shape(fresh)).resolves.toEqual(migrated);

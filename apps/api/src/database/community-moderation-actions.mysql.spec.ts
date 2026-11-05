@@ -17,6 +17,7 @@ import {
   runMigrations,
   type MigrationConnection,
 } from './migrate';
+import { runSqlScript } from './sql-script';
 
 const migrations = resolve(__dirname, '../../../../data/migrations');
 const VERSION = '021_create_community_moderation_actions';
@@ -127,18 +128,22 @@ integration('community moderation actions (MySQL)', () => {
       ...credentials,
       multipleStatements: true,
     });
-    await connection.query(
+    await runSqlScript(
+      connection,
       `CREATE DATABASE ${fresh}; USE ${fresh}; ${snapshot}`,
     );
-    await connection.query(
+    await runSqlScript(
+      connection,
       `CREATE DATABASE ${database}; USE ${database}; ${preceding}`,
     );
     firstRun = await migrate();
     secondRun = await migrate();
 
-    // c1 is busy enough that a scan is never the cheaper plan: 3000 entries
-    // by three moderators over 16 actions, with created_at repeating in
-    // pairs so the id tiebreaker decides real orders.
+    // c1 is busy enough to page through: 3000 entries by three moderators
+    // over 16 actions, with created_at repeating in pairs so the id
+    // tiebreaker decides real orders. c4 holds 9000 more, so c1 is a quarter
+    // of the table and a scan is never the cheaper plan for its listing (with
+    // c1 alone in the table, MySQL rightly scans).
     await connection.query(`
       SET SESSION cte_max_recursion_depth = 10000;
       INSERT INTO users (id, username, email, password_hash) VALUES
@@ -150,7 +155,7 @@ integration('community moderation actions (MySQL)', () => {
       UPDATE users SET role = 'admin' WHERE id = 'admin';
       INSERT INTO communities (id, creator_id, name) VALUES
         ('c1', 'creator', 'busy'), ('c2', 'creator', 'quiet'),
-        ('c3', 'creator', 'doomed');
+        ('c3', 'creator', 'doomed'), ('c4', 'creator', 'noise');
       INSERT INTO community_subscriptions (user_id, community_id) VALUES
         ('mod-1', 'c1'), ('mod-2', 'c1'), ('member', 'c1'), ('admin', 'c1');
       INSERT INTO community_moderators (community_id, user_id, assigned_by)
@@ -174,6 +179,14 @@ integration('community moderation actions (MySQL)', () => {
       INSERT INTO community_moderation_actions
         (id, community_id, actor_id, actor_username, action, target_type, target_id)
         VALUES ('doomed-1', 'c3', 'creator', 'creator', 'post_locked', 'post', 'p');
+      INSERT INTO community_moderation_actions
+        (id, community_id, actor_id, actor_username, action, target_type,
+         target_id, created_at)
+        WITH RECURSIVE seq (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 9000)
+        SELECT CONCAT('noise-', n), 'c4', 'creator', 'creator', 'post_locked',
+               'post', CONCAT('noise-post-', n),
+               TIMESTAMP('2026-01-01 00:00:00') + INTERVAL n MINUTE
+        FROM seq;
       ANALYZE TABLE community_moderation_actions;`);
 
     // Same options as DatabaseModule, so mysql2's default flags apply.

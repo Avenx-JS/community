@@ -16,6 +16,7 @@ import {
   COMMUNITY_POST_RECIPIENT_COUNT_SQL,
 } from '../notifications/notifications.service';
 import { COMMUNITY_NEW_POST_RECIPIENTS_SQL } from './community-notification-recipients';
+import { runSqlScript } from '../database/sql-script';
 
 const repository = resolve(__dirname, '../../../..');
 
@@ -66,14 +67,17 @@ integration('community new-post recipient contract (MySQL)', () => {
       password: process.env.MYSQL_PASSWORD,
       multipleStatements: true,
     });
-    await connection.query(`CREATE DATABASE ${database}; USE ${database};
+    await runSqlScript(
+      connection,
+      `CREATE DATABASE ${database}; USE ${database};
       CREATE TABLE users (id VARCHAR(36) PRIMARY KEY);
       CREATE TABLE communities (id VARCHAR(36) PRIMARY KEY);
       CREATE TABLE community_subscriptions (
         user_id VARCHAR(36) NOT NULL,
         community_id VARCHAR(36) NOT NULL,
         PRIMARY KEY (user_id, community_id)
-      );`);
+      );`,
+    );
     for (const migration of [
       '010_create_notifications.sql',
       '011_create_community_notification_preferences.sql',

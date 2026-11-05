@@ -9,7 +9,7 @@ const normalise = (sql: string) => sql.replace(/\s+/g, ' ').trim();
 function readmeVerificationQuery(): string {
   const readme = read('../../README.md');
   const section = readme.slice(readme.indexOf('**Pre-drop verification.**'));
-  const query = /```sql\n([\s\S]*?)```/.exec(section)?.[1];
+  const query = /```sql\r?\n([\s\S]*?)```/.exec(section)?.[1];
   if (!query) {
     throw new Error('Pre-drop verification query not found in README.md');
   }

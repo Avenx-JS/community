@@ -64,12 +64,7 @@ CREATE TABLE communities (
     suspension_reason TEXT NULL,
     INDEX idx_communities_creator_id (creator_id),
     CONSTRAINT fk_communities_deleted_by FOREIGN KEY (deleted_by) REFERENCES users(id) ON DELETE SET NULL,
-    CONSTRAINT chk_communities_deletion CHECK ((deleted_at IS NULL AND deleted_by IS NULL) OR deleted_at IS NOT NULL),
     CONSTRAINT fk_communities_suspended_by FOREIGN KEY (suspended_by) REFERENCES users(id) ON DELETE SET NULL,
-    CONSTRAINT chk_communities_suspension CHECK (
-        (suspended_at IS NULL AND suspended_by IS NULL AND suspension_reason IS NULL)
-        OR suspended_at IS NOT NULL
-    ),
     FOREIGN KEY (creator_id) REFERENCES users(id) ON DELETE CASCADE
 );
 CREATE INDEX idx_communities_deleted_at ON communities (deleted_at);
@@ -201,9 +196,6 @@ CREATE TABLE posts (
     pinned_at TIMESTAMP NULL DEFAULT NULL,
     pinned_by VARCHAR(36) NULL,
     INDEX idx_posts_removed_at (removed_at),
-    CONSTRAINT chk_posts_lock CHECK ((locked_at IS NULL AND locked_by IS NULL) OR locked_at IS NOT NULL),
-    CONSTRAINT chk_posts_removal CHECK ((removed_at IS NULL AND removed_by IS NULL AND removal_reason IS NULL) OR removed_at IS NOT NULL),
-    CONSTRAINT chk_posts_pin CHECK ((pinned_at IS NULL AND pinned_by IS NULL) OR pinned_at IS NOT NULL),
     FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE,
     CONSTRAINT fk_posts_locked_by FOREIGN KEY (locked_by) REFERENCES users(id) ON DELETE SET NULL,
@@ -229,8 +221,6 @@ CREATE TABLE comments (
     removed_by VARCHAR(36) NULL,
     removal_reason TEXT NULL,
     INDEX idx_comments_removed_at (removed_at),
-    CONSTRAINT chk_comments_lock CHECK ((locked_at IS NULL AND locked_by IS NULL) OR locked_at IS NOT NULL),
-    CONSTRAINT chk_comments_removal CHECK ((removed_at IS NULL AND removed_by IS NULL AND removal_reason IS NULL) OR removed_at IS NOT NULL),
     FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE,
     FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (parent_id) REFERENCES comments(id) ON DELETE CASCADE,
@@ -280,7 +270,6 @@ CREATE TABLE user_reports (
     INDEX idx_user_reports_reviewed (reviewed_at, status, resolution, created_at),
     INDEX idx_user_reports_target (target_type, target_id, status),
     INDEX idx_user_reports_target_type_created (target_type, created_at),
-    CONSTRAINT chk_user_reports_not_self CHECK (reporter_id IS NULL OR reporter_id <> reported_user_id),
     CONSTRAINT chk_user_reports_context CHECK (
         (context_type IS NULL AND context_id IS NULL) OR
         (context_type IS NOT NULL AND context_id IS NOT NULL)
@@ -314,10 +303,6 @@ CREATE TABLE user_restrictions (
     CONSTRAINT chk_user_restrictions_expiry CHECK (
         (type = 'suspension' AND expires_at IS NOT NULL) OR
         (type = 'ban' AND expires_at IS NULL)
-    ),
-    CONSTRAINT chk_user_restrictions_lift CHECK (
-        (lifted_at IS NULL AND lifted_by IS NULL AND lift_reason IS NULL) OR
-        lifted_at IS NOT NULL
     ),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
@@ -378,6 +363,173 @@ CREATE TABLE notifications (
     FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE SET NULL,
     FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE
 );
+
+-- CHECK-style rules on columns whose foreign key is ON DELETE SET NULL or
+-- CASCADE. MySQL 8 forbids CHECK constraints on such columns (error 3823),
+-- so each rule is a BEFORE INSERT and a BEFORE UPDATE trigger that fails
+-- with the CHECK error (3819, ER_CHECK_CONSTRAINT_VIOLATED). Created in
+-- migration order, which is the order MySQL runs them in.
+-- chk_user_reports_not_self (002_create_user_reports): enforced by triggers, see the README.
+DELIMITER $$
+CREATE TRIGGER trg_user_reports_not_self_insert BEFORE INSERT ON user_reports FOR EACH ROW
+BEGIN
+  IF NOT (NEW.reporter_id IS NULL OR NEW.reporter_id <> NEW.reported_user_id) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_user_reports_not_self'' is violated.';
+  END IF;
+END$$
+CREATE TRIGGER trg_user_reports_not_self_update BEFORE UPDATE ON user_reports FOR EACH ROW
+BEGIN
+  IF NOT (NEW.reporter_id IS NULL OR NEW.reporter_id <> NEW.reported_user_id) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_user_reports_not_self'' is violated.';
+  END IF;
+END$$
+DELIMITER ;
+
+-- chk_user_restrictions_lift (003_create_user_restrictions): enforced by triggers, see the README.
+DELIMITER $$
+CREATE TRIGGER trg_user_restrictions_lift_insert BEFORE INSERT ON user_restrictions FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.lifted_at IS NULL AND NEW.lifted_by IS NULL AND NEW.lift_reason IS NULL) OR NEW.lifted_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_user_restrictions_lift'' is violated.';
+  END IF;
+END$$
+CREATE TRIGGER trg_user_restrictions_lift_update BEFORE UPDATE ON user_restrictions FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.lifted_at IS NULL AND NEW.lifted_by IS NULL AND NEW.lift_reason IS NULL) OR NEW.lifted_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_user_restrictions_lift'' is violated.';
+  END IF;
+END$$
+DELIMITER ;
+
+-- chk_posts_lock (017_add_post_and_comment_content_state): enforced by triggers, see the README.
+DELIMITER $$
+CREATE TRIGGER trg_posts_lock_insert BEFORE INSERT ON posts FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.locked_at IS NULL AND NEW.locked_by IS NULL) OR NEW.locked_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_posts_lock'' is violated.';
+  END IF;
+END$$
+CREATE TRIGGER trg_posts_lock_update BEFORE UPDATE ON posts FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.locked_at IS NULL AND NEW.locked_by IS NULL) OR NEW.locked_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_posts_lock'' is violated.';
+  END IF;
+END$$
+DELIMITER ;
+
+-- chk_posts_removal (017_add_post_and_comment_content_state): enforced by triggers, see the README.
+DELIMITER $$
+CREATE TRIGGER trg_posts_removal_insert BEFORE INSERT ON posts FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.removed_at IS NULL AND NEW.removed_by IS NULL AND NEW.removal_reason IS NULL) OR NEW.removed_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_posts_removal'' is violated.';
+  END IF;
+END$$
+CREATE TRIGGER trg_posts_removal_update BEFORE UPDATE ON posts FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.removed_at IS NULL AND NEW.removed_by IS NULL AND NEW.removal_reason IS NULL) OR NEW.removed_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_posts_removal'' is violated.';
+  END IF;
+END$$
+DELIMITER ;
+
+-- chk_comments_lock (017_add_post_and_comment_content_state): enforced by triggers, see the README.
+DELIMITER $$
+CREATE TRIGGER trg_comments_lock_insert BEFORE INSERT ON comments FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.locked_at IS NULL AND NEW.locked_by IS NULL) OR NEW.locked_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_comments_lock'' is violated.';
+  END IF;
+END$$
+CREATE TRIGGER trg_comments_lock_update BEFORE UPDATE ON comments FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.locked_at IS NULL AND NEW.locked_by IS NULL) OR NEW.locked_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_comments_lock'' is violated.';
+  END IF;
+END$$
+DELIMITER ;
+
+-- chk_comments_removal (017_add_post_and_comment_content_state): enforced by triggers, see the README.
+DELIMITER $$
+CREATE TRIGGER trg_comments_removal_insert BEFORE INSERT ON comments FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.removed_at IS NULL AND NEW.removed_by IS NULL AND NEW.removal_reason IS NULL) OR NEW.removed_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_comments_removal'' is violated.';
+  END IF;
+END$$
+CREATE TRIGGER trg_comments_removal_update BEFORE UPDATE ON comments FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.removed_at IS NULL AND NEW.removed_by IS NULL AND NEW.removal_reason IS NULL) OR NEW.removed_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_comments_removal'' is violated.';
+  END IF;
+END$$
+DELIMITER ;
+
+-- chk_communities_deletion (022_add_community_deletion): enforced by triggers, see the README.
+DELIMITER $$
+CREATE TRIGGER trg_communities_deletion_insert BEFORE INSERT ON communities FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.deleted_at IS NULL AND NEW.deleted_by IS NULL) OR NEW.deleted_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_communities_deletion'' is violated.';
+  END IF;
+END$$
+CREATE TRIGGER trg_communities_deletion_update BEFORE UPDATE ON communities FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.deleted_at IS NULL AND NEW.deleted_by IS NULL) OR NEW.deleted_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_communities_deletion'' is violated.';
+  END IF;
+END$$
+DELIMITER ;
+
+-- chk_communities_suspension (025_add_community_suspension): enforced by triggers, see the README.
+DELIMITER $$
+CREATE TRIGGER trg_communities_suspension_insert BEFORE INSERT ON communities FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.suspended_at IS NULL AND NEW.suspended_by IS NULL AND NEW.suspension_reason IS NULL) OR NEW.suspended_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_communities_suspension'' is violated.';
+  END IF;
+END$$
+CREATE TRIGGER trg_communities_suspension_update BEFORE UPDATE ON communities FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.suspended_at IS NULL AND NEW.suspended_by IS NULL AND NEW.suspension_reason IS NULL) OR NEW.suspended_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_communities_suspension'' is violated.';
+  END IF;
+END$$
+DELIMITER ;
+
+-- chk_posts_pin (026_add_post_pinning): enforced by triggers, see the README.
+DELIMITER $$
+CREATE TRIGGER trg_posts_pin_insert BEFORE INSERT ON posts FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.pinned_at IS NULL AND NEW.pinned_by IS NULL) OR NEW.pinned_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_posts_pin'' is violated.';
+  END IF;
+END$$
+CREATE TRIGGER trg_posts_pin_update BEFORE UPDATE ON posts FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.pinned_at IS NULL AND NEW.pinned_by IS NULL) OR NEW.pinned_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_posts_pin'' is violated.';
+  END IF;
+END$$
+DELIMITER ;
 
 CREATE TABLE schema_migrations (
     version VARCHAR(64) PRIMARY KEY,

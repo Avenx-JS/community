@@ -19,6 +19,7 @@ import {
   runMigrations,
   type MigrationConnection,
 } from './migrate';
+import { removeTriggerRules, runSqlScript } from './sql-script';
 
 const migrations = resolve(__dirname, '../../../../data/migrations');
 const VERSION = '022_add_community_deletion';
@@ -29,16 +30,15 @@ const snapshot = readFileSync(
   'utf8',
 ).replace(/^CREATE DATABASE[^;]*;\s*USE community;/, '');
 
-// The snapshot with 022 undone: the communities columns, constraints, index
-// and version. users.deleted_at (migration 020) is not followed by
-// deleted_by, so it is untouched.
-const preceding = snapshot
+// The snapshot with 022 undone: the communities columns, foreign key, trigger
+// pair, index and version. users.deleted_at (migration 020) is not followed
+// by deleted_by, so it is untouched.
+const preceding = removeTriggerRules(snapshot, 'chk_communities_deletion')
   .replace(
     / {4}deleted_at TIMESTAMP NULL DEFAULT NULL,\r?\n {4}deleted_by VARCHAR\(36\) NULL,\r?\n/,
     '',
   )
   .replace(/ {4}CONSTRAINT fk_communities_deleted_by[^\n]*\n/, '')
-  .replace(/ {4}CONSTRAINT chk_communities_deletion[^\n]*\n/, '')
   .replace(/CREATE INDEX idx_communities_deleted_at[^\n]*\n/, '')
   .replace(/,\r?\n\s*\('022_add_community_deletion'\)/, '');
 
@@ -132,10 +132,12 @@ integration('community deletion (MySQL)', () => {
       ...credentials,
       multipleStatements: true,
     });
-    await connection.query(
+    await runSqlScript(
+      connection,
       `CREATE DATABASE ${fresh}; USE ${fresh}; ${snapshot}`,
     );
-    await connection.query(
+    await runSqlScript(
+      connection,
       `CREATE DATABASE ${database}; USE ${database}; ${preceding}`,
     );
     await connection.query(`
@@ -192,15 +194,25 @@ integration('community deletion (MySQL)', () => {
     ).toEqual([]);
   });
 
-  it('matches the snapshot, with the foreign key, check and index', async () => {
+  it('matches the snapshot, with the foreign key, trigger pair and index', async () => {
     const migrated = await schema(database);
     expect(migrated).toEqual(await schema(fresh));
-    expect(migrated.constraints).toEqual(
-      expect.arrayContaining([
-        { name: 'fk_communities_deleted_by', type: 'FOREIGN KEY' },
-        { name: 'chk_communities_deletion', type: 'CHECK' },
-      ]),
+    expect(migrated.constraints).toContainEqual({
+      name: 'fk_communities_deleted_by',
+      type: 'FOREIGN KEY',
+    });
+    // MySQL 8 refuses a CHECK on deleted_by (ON DELETE SET NULL), so the
+    // rule is a BEFORE INSERT and BEFORE UPDATE trigger.
+    const [triggers] = await connection.query<RowDataPacket[]>(
+      `SELECT trigger_name AS name FROM information_schema.triggers
+       WHERE event_object_schema = ? AND trigger_name LIKE 'trg\\_communities\\_deletion\\_%'
+       ORDER BY trigger_name`,
+      [database],
     );
+    expect(triggers.map((row) => row.name as string)).toEqual([
+      'trg_communities_deletion_insert',
+      'trg_communities_deletion_update',
+    ]);
     expect(migrated.foreignKeys).toEqual(
       expect.arrayContaining([
         { column_name: 'deleted_by', on_delete: 'SET NULL' },

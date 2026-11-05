@@ -16,6 +16,7 @@ import {
   runMigrations,
   type MigrationConnection,
 } from './migrate';
+import { removeTriggerRules, runSqlScript } from './sql-script';
 
 const migrations = resolve(__dirname, '../../../../data/migrations');
 const VERSION = '025_add_community_suspension';
@@ -28,17 +29,13 @@ const snapshot = readFileSync(
   'utf8',
 ).replace(/^CREATE DATABASE[^;]*;\s*USE community;/, '');
 
-// The snapshot with 025 undone: the suspension columns, constraints and
-// index, the appended enum members, and the version.
-const preceding = snapshot
+// The snapshot with 025 undone: the suspension columns, foreign key, trigger
+// pair and index, the appended enum members, and the version.
+const preceding = removeTriggerRules(snapshot, 'chk_communities_suspension')
   .replace(/ {4}suspended_at TIMESTAMP NULL DEFAULT NULL,\r?\n/, '')
   .replace(/ {4}suspended_by VARCHAR\(36\) NULL,\r?\n/, '')
   .replace(/ {4}suspension_reason TEXT NULL,\r?\n/, '')
   .replace(/ {4}CONSTRAINT fk_communities_suspended_by[^\n]*\n/, '')
-  .replace(
-    / {4}CONSTRAINT chk_communities_suspension CHECK \([\s\S]*?\n {4}\),\r?\n/,
-    '',
-  )
   .replace(/CREATE INDEX idx_communities_suspended_at[^\n]*\n/, '')
   .replace(
     /'user_role_changed',\r?\n\s*'community_suspended',\r?\n\s*'community_restored',\r?\n\s*'community_updated'/,
@@ -119,6 +116,16 @@ integration('community suspension (MySQL)', () => {
        ORDER BY table_name, constraint_name`,
       [name],
     ),
+    // chk_communities_suspension is a trigger pair; compared by name, since
+    // the rebuilt history need not create triggers in snapshot order.
+    triggers: await rows(
+      `SELECT trigger_name AS name, action_timing AS timing,
+              event_manipulation AS event, action_statement AS statement
+       FROM information_schema.triggers
+       WHERE event_object_schema = ? AND event_object_table = 'communities'
+       ORDER BY trigger_name`,
+      [name],
+    ),
   });
 
   const expectCheckViolation = (sql: string) =>
@@ -137,10 +144,12 @@ integration('community suspension (MySQL)', () => {
       ...credentials,
       multipleStatements: true,
     });
-    await connection.query(
+    await runSqlScript(
+      connection,
       `CREATE DATABASE ${fresh}; USE ${fresh}; ${snapshot}`,
     );
-    await connection.query(
+    await runSqlScript(
+      connection,
       `CREATE DATABASE ${database}; USE ${database}; ${preceding}`,
     );
     await connection.query(`

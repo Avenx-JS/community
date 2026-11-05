@@ -64,6 +64,48 @@ running migrations, not the API runtime database user. Migration credentials
 are read from the environment and are never printed; do not place passwords in
 the command line or migration files.
 
+#### Rules enforced by triggers
+
+MySQL 8 refuses a `CHECK` constraint that names a column whose foreign key
+has a referential action (`ON DELETE SET NULL` or `CASCADE`; error 3823).
+The "actor only with a timestamp" rules on the `_by` columns, and the
+self-report rule on `user_reports`, name exactly such columns, so each is a
+pair of `BEFORE INSERT` and `BEFORE UPDATE` triggers instead of a `CHECK`:
+
+| Rule | Table | Migration |
+| --- | --- | --- |
+| `chk_user_reports_not_self` | `user_reports` | `002_create_user_reports` |
+| `chk_user_restrictions_lift` | `user_restrictions` | `003_create_user_restrictions` |
+| `chk_posts_lock`, `chk_posts_removal` | `posts` | `017_add_post_and_comment_content_state` |
+| `chk_comments_lock`, `chk_comments_removal` | `comments` | `017_add_post_and_comment_content_state` |
+| `chk_communities_deletion` | `communities` | `022_add_community_deletion` |
+| `chk_communities_suspension` | `communities` | `025_add_community_suspension` |
+| `chk_posts_pin` | `posts` | `026_add_post_pinning` |
+
+Each trigger is named after its rule (`trg_posts_pin_insert`,
+`trg_posts_pin_update`) and raises exactly what the `CHECK` would have: error
+3819 (`ER_CHECK_CONSTRAINT_VIOLATED`) with MySQL's own message, `Check
+constraint 'chk_posts_pin' is violated.` Its condition is `IF NOT (<the CHECK
+expression>)`, which keeps `CHECK` semantics for `NULL`. The foreign keys keep
+their `ON DELETE SET NULL`: a referential action does not fire triggers, and
+nulling an actor never breaks a rule. Rules on columns without a referential
+action (`chk_user_reports_context`, `chk_user_restrictions_expiry`) stay
+ordinary `CHECK` constraints. `src/database/check-trigger-rules.ts` is the
+list of rules; `check-trigger-rules.spec.ts` keeps the migrations and the
+snapshot in step with it and fails if a `CHECK` on such a column is added.
+
+**`DELIMITER`.** Trigger bodies contain semicolons, so the SQL files switch
+the delimiter around them (`DELIMITER $$ … DELIMITER ;`), as the `mysql` client
+and MySQL Workbench expect. `npm run migrate` and the MySQL test suites split
+scripts the same way (`src/database/sql-script.ts`). Load `data/community.sql`
+with the `mysql` client (`mysql -u … community < data/community.sql`) or an
+editor that honours `DELIMITER`.
+
+**Privileges.** Creating triggers needs the `TRIGGER` privilege. With binary
+logging enabled (the MySQL 8 default) it also needs `SUPER` or
+`SET_USER_ID`, or the server setting `log_bin_trust_function_creators = 1`.
+Grant these to the migration operator, not to the API runtime user.
+
 #### Search indexes
 
 Migration `015_add_fulltext_search_indexes` adds MySQL native `FULLTEXT`
@@ -91,11 +133,12 @@ single MySQL instance. `LIKE '%…%'` everywhere has the scan problem above and
 no word boundaries, relevance or multi-word handling. Trigram or
 generated-column prefix indexes serve prefix search, not word search.
 
-**Query in boolean mode.** Natural-language mode filters by relevance: on
-InnoDB a word that occurs in every row has zero inverse document frequency and
-returns nothing (MyISAM's counterpart is its 50%-of-rows threshold). On a new
-installation with few rows that silently empties searches for common words.
-Boolean mode returns every row containing the word.
+**Query in boolean mode.** Natural-language mode filters by relevance, so
+whether a word that occurs in (nearly) every row is returned depends on the
+engine and version: MyISAM drops it at its 50%-of-rows threshold, while InnoDB
+on MySQL 8.0.46 was measured to still return it. Boolean mode returns every
+row containing the word by definition, so search does not depend on that
+behaviour.
 
 **Server-configuration limitations.** These are server settings, not schema,
 so no migration can change them:
@@ -167,18 +210,17 @@ scanned the whole table to recompute the score. Its leading
 pair matches the `WHERE`, and `value` is included so the sum is computed from
 the index alone, without reading a row.
 
-**Do not drop the implicit foreign-key indexes.** The composites make the
-single-column indexes MySQL created for `posts(author_id)`,
+**The composites replace the implicit foreign-key indexes.** MySQL creates a
+single-column index for a foreign key that has none, and drops that implicit
+index by itself as soon as another index leads with the same column. Adding
+the composites therefore removes the implicit indexes on `posts(author_id)`,
 `posts(community_id)`, `comments(post_id)`, `comments(author_id)` and
-`comments(parent_id)` redundant as access paths, but each still supports a
-foreign key. Whether MySQL accepts a composite as a foreign key's supporting
-index depends on creation order and server version, and dropping one can fail
-the `ALTER` or leave the constraint without the index it requires. Keeping them
-costs some write throughput on `posts` and `comments` and nothing else. For the
-same reason `data/community.sql` creates the composites with `CREATE INDEX`
-after each table rather than inline: declared inside `CREATE TABLE`, a
-composite would back the foreign key and the single-column index would never
-be created, so fresh and migrated installations would differ.
+`comments(parent_id)`, and each foreign key is then backed by its composite
+(measured on MySQL 8.0.46; `content-listing-indexes.mysql.spec.ts` asserts
+it). Do not drop a composite that is the only index leading with a foreign-key
+column: MySQL refuses to, because the constraint needs it. Fresh and migrated
+installations end in the same state, since `data/community.sql` also creates
+the composites with `CREATE INDEX` after each table.
 
 **Migration cost.** On populated `posts`, `comments` or `votes` tables, index
 creation locks or copies the table. Consider running each statement as online

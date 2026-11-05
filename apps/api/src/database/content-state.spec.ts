@@ -1,8 +1,11 @@
 import { describe, expect, it } from '@jest/globals';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { checkTriggerRule, checkTriggerSql } from './check-trigger-rules';
+import { removeTriggerRules } from './sql-script';
 
-const read = (path: string) => readFileSync(resolve(__dirname, path), 'utf8');
+const read = (path: string) =>
+  readFileSync(resolve(__dirname, path), 'utf8').replace(/\r\n/g, '\n');
 const normalise = (sql: string) => sql.replace(/\s+/g, ' ').trim();
 
 const COLUMNS = [
@@ -14,18 +17,30 @@ const COLUMNS = [
   'removal_reason TEXT NULL',
 ];
 
+// The lock and removal rules are trigger pairs, not CHECKs: MySQL 8 refuses
+// a CHECK on locked_by or removed_by, whose foreign keys are ON DELETE SET
+// NULL (see check-trigger-rules.ts).
+const rules = (table: string) =>
+  [`chk_${table}_lock`, `chk_${table}_removal`].map(checkTriggerRule);
+
 const constraints = (table: string) => [
   `CONSTRAINT fk_${table}_locked_by FOREIGN KEY (locked_by) REFERENCES users(id) ON DELETE SET NULL`,
   `CONSTRAINT fk_${table}_removed_by FOREIGN KEY (removed_by) REFERENCES users(id) ON DELETE SET NULL`,
-  `CONSTRAINT chk_${table}_lock CHECK ((locked_at IS NULL AND locked_by IS NULL) OR locked_at IS NOT NULL)`,
-  `CONSTRAINT chk_${table}_removal CHECK ((removed_at IS NULL AND removed_by IS NULL AND removal_reason IS NULL) OR removed_at IS NOT NULL)`,
 ];
 
 describe('migration 017 (post and comment content state)', () => {
   const migration = read(
     '../../../../data/migrations/017_add_post_and_comment_content_state.sql',
   );
-  const sql = normalise(migration.replace(/^--.*$/gm, ''));
+  // The statements besides the four trigger pairs.
+  const sql = normalise(
+    removeTriggerRules(
+      migration,
+      ...['posts', 'comments'].flatMap((table) =>
+        rules(table).map((rule) => rule.name),
+      ),
+    ).replace(/^--.*$/gm, ''),
+  );
   const snapshot = read('../../../../data/community.sql');
 
   // The comma-separated clauses of the migration's ALTER TABLE on a table.
@@ -46,8 +61,11 @@ describe('migration 017 (post and comment content state)', () => {
     );
 
   it.each(['posts', 'comments'])(
-    'adds exactly the six nullable columns and four constraints to %s',
+    'adds exactly the six nullable columns, two foreign keys and two trigger pairs to %s',
     (table) => {
+      for (const rule of rules(table)) {
+        expect(migration).toContain(checkTriggerSql(rule));
+      }
       expect(alterClauses(table)).toEqual([
         ...COLUMNS.map((column) => `COLUMN ${column}`),
         ...constraints(table),
@@ -91,6 +109,10 @@ describe('migration 017 (post and comment content state)', () => {
       }
       for (const constraint of constraints(table)) {
         expect(body).toContain(constraint);
+      }
+      for (const rule of rules(table)) {
+        expect(body).not.toContain(rule.name);
+        expect(snapshot).toContain(checkTriggerSql(rule));
       }
       expect(body).toContain(`INDEX idx_${table}_removed_at (removed_at)`);
       expect(body).not.toMatch(/edited_by/);

@@ -19,6 +19,7 @@ import {
   runMigrations,
   type MigrationConnection,
 } from './migrate';
+import { removeTriggerRules, runSqlScript } from './sql-script';
 
 const migrations = resolve(__dirname, '../../../../data/migrations');
 const VERSION = '026_add_post_pinning';
@@ -29,9 +30,10 @@ const snapshot = readFileSync(
   'utf8',
 ).replace(/^CREATE DATABASE[^;]*;\s*USE community;/, '');
 
-// The snapshot with 026 undone: every line naming pinned_at or pinned_by
-// (columns, check and foreign key), the index, and the version.
-const preceding = snapshot
+// The snapshot with 026 undone: the chk_posts_pin trigger pair, every line
+// naming pinned_at or pinned_by (columns and foreign key), the index, and the
+// version.
+const preceding = removeTriggerRules(snapshot, 'chk_posts_pin')
   .replace(/^.*\bpinned_(at|by)\b.*\r?\n/gm, '')
   .replace(/,(\s*\r?\n\);)/g, '$1')
   .replace(/,\r?\n\s*\('026_add_post_pinning'\)/, '');
@@ -111,14 +113,14 @@ integration('post pinning (MySQL)', () => {
        ORDER BY constraint_name`,
       [name],
     ),
-    checks: await rows(
-      `SELECT c.constraint_name AS name, c.check_clause AS clause
-       FROM information_schema.check_constraints c
-       JOIN information_schema.table_constraints t
-         ON t.constraint_schema = c.constraint_schema
-        AND t.constraint_name = c.constraint_name
-       WHERE c.constraint_schema = ? AND t.table_name = 'posts'
-       ORDER BY c.constraint_name`,
+    // By name, not ACTION_ORDER: the rebuilt history creates 026's pair
+    // before 017's, a fresh install after; independent checks ignore order.
+    triggers: await rows(
+      `SELECT trigger_name AS name, action_timing AS timing,
+              event_manipulation AS event, action_statement AS statement
+       FROM information_schema.triggers
+       WHERE event_object_schema = ? AND event_object_table = 'posts'
+       ORDER BY trigger_name`,
       [name],
     ),
   });
@@ -153,10 +155,12 @@ integration('post pinning (MySQL)', () => {
       ...credentials,
       multipleStatements: true,
     });
-    await connection.query(
+    await runSqlScript(
+      connection,
       `CREATE DATABASE ${fresh}; USE ${fresh}; ${snapshot}`,
     );
-    await connection.query(
+    await runSqlScript(
+      connection,
       `CREATE DATABASE ${database}; USE ${database}; ${preceding}`,
     );
 
@@ -233,7 +237,7 @@ integration('post pinning (MySQL)', () => {
   });
 
   it('adds both columns, the foreign key, the check and the index', async () => {
-    const { columns, indexes, constraints, checks } = await schema(database);
+    const { columns, indexes, constraints, triggers } = await schema(database);
     expect(
       columns.filter((column) => /^pinned_/.test(String(column.name))),
     ).toEqual([
@@ -244,15 +248,27 @@ integration('post pinning (MySQL)', () => {
       name: 'idx_posts_community_pinned',
       columns: 'community_id,pinned_at',
     });
-    expect(constraints).toEqual(
-      expect.arrayContaining([
-        { name: 'fk_posts_pinned_by', type: 'FOREIGN KEY' },
-        { name: 'chk_posts_pin', type: 'CHECK' },
-      ]),
-    );
-    expect(checks.map((check) => String(check.name))).toContain(
+    expect(constraints).toContainEqual({
+      name: 'fk_posts_pinned_by',
+      type: 'FOREIGN KEY',
+    });
+    // MySQL 8 refuses a CHECK on pinned_by (its foreign key is ON DELETE SET
+    // NULL), so chk_posts_pin is a BEFORE INSERT and BEFORE UPDATE trigger.
+    expect(constraints.map((c) => String(c.name))).not.toContain(
       'chk_posts_pin',
     );
+    expect(
+      triggers
+        .filter((t) => String(t.name).startsWith('trg_posts_pin_'))
+        .map((t) => ({
+          name: String(t.name),
+          timing: String(t.timing),
+          event: String(t.event),
+        })),
+    ).toEqual([
+      { name: 'trg_posts_pin_insert', timing: 'BEFORE', event: 'INSERT' },
+      { name: 'trg_posts_pin_update', timing: 'BEFORE', event: 'UPDATE' },
+    ]);
     const [rule] = await rows(
       `SELECT delete_rule FROM information_schema.referential_constraints
        WHERE constraint_schema = ? AND constraint_name = 'fk_posts_pinned_by'`,
@@ -416,9 +432,8 @@ integration('post pinning (MySQL)', () => {
     expect(sql).toContain(
       'ORDER BY (pinned_at IS NULL), pinned_at DESC, created_at DESC, id DESC',
     );
-    const plan = (await rows(`EXPLAIN ${sql}`, values)).filter(
-      (row) => row.table === 'posts',
-    );
+    const explained = await rows(`EXPLAIN ${sql}`, values);
+    const plan = explained.filter((row) => row.table === 'posts');
     expect(plan).toHaveLength(1);
     // The community filter is an index lookup on a community_id-led index,
     // never a scan of every post; the order cannot come from that index.
@@ -426,7 +441,12 @@ integration('post pinning (MySQL)', () => {
     expect(String(plan[0].key)).toMatch(
       /^(community_id|idx_posts_community_(created|pinned))$/,
     );
-    expect(String(plan[0].Extra)).toContain('Using filesort');
+    // The deleted-community EXISTS becomes a semi-join led by the const
+    // communities row, so MySQL reports the filesort on that first row
+    // rather than on posts (measured on MySQL 8.0.46).
+    expect(
+      explained.some((row) => String(row.Extra).includes('Using filesort')),
+    ).toBe(true);
   });
 
   it('keeps a pin when the pinning moderator is deleted, rendering pinned_by null', async () => {

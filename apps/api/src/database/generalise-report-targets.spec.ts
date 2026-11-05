@@ -1,6 +1,7 @@
 import { describe, expect, it } from '@jest/globals';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { checkTriggerRule, checkTriggerSql } from './check-trigger-rules';
 
 const read = (path: string) => readFileSync(resolve(__dirname, path), 'utf8');
 const normalise = (sql: string) => sql.replace(/\s+/g, ' ').trim();
@@ -94,8 +95,11 @@ describe('migration 016 (generalise report targets)', () => {
       'CONSTRAINT fk_user_reports_target_author FOREIGN KEY (target_author_id) REFERENCES users(id) ON DELETE SET NULL',
     );
     expect(table).not.toMatch(/CASCADE/);
-    expect(table).toContain(
-      'CONSTRAINT chk_user_reports_not_self CHECK (reporter_id IS NULL OR reporter_id <> reported_user_id)',
+    // reporter_id and reported_user_id have referential actions, so MySQL 8
+    // refuses the self-report rule as a CHECK; it is a trigger pair.
+    expect(table).not.toContain('chk_user_reports_not_self');
+    expect(snapshot.replace(/\r\n/g, '\n')).toContain(
+      checkTriggerSql(checkTriggerRule('chk_user_reports_not_self')),
     );
     expect(table).toContain('CONSTRAINT chk_user_reports_context CHECK');
     expect(normalise(snapshot)).toContain(

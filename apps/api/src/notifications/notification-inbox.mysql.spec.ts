@@ -18,6 +18,7 @@ import {
   MARK_READ_SQL,
   UNREAD_COUNT_SQL,
 } from './notification-inbox.service';
+import { runSqlScript } from '../database/sql-script';
 
 const migration = resolve(
   __dirname,
@@ -57,9 +58,12 @@ integration('notification inbox query plans (MySQL)', () => {
       password: process.env.MYSQL_PASSWORD,
       multipleStatements: true,
     });
-    await connection.query(`CREATE DATABASE ${database}; USE ${database};
+    await runSqlScript(
+      connection,
+      `CREATE DATABASE ${database}; USE ${database};
       CREATE TABLE users (id VARCHAR(36) PRIMARY KEY);
-      CREATE TABLE communities (id VARCHAR(36) PRIMARY KEY);`);
+      CREATE TABLE communities (id VARCHAR(36) PRIMARY KEY);`,
+    );
     await connection.query(readFileSync(migration, 'utf8'));
 
     // Enough rows across many recipients that the optimizer prefers an index.

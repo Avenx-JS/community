@@ -11,6 +11,7 @@ import {
 } from 'mysql2/promise';
 import { AdminAuditLogService } from '../admin/admin-audit-log.service';
 import { ListAdminActionsDto } from '../admin/dto/list-admin-actions.dto';
+import { runSqlScript } from './sql-script';
 
 // The full-install snapshot without its database selection.
 const snapshot = readFileSync(
@@ -49,7 +50,8 @@ integration('audit entry lookup (MySQL)', () => {
       ...credentials,
       multipleStatements: true,
     });
-    await connection.query(
+    await runSqlScript(
+      connection,
       `CREATE DATABASE ${database}; USE ${database}; ${snapshot}`,
     );
 
