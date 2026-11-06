@@ -371,23 +371,11 @@ describe('Vote routes on posts and comments (e2e)', () => {
     await user1.put('/posts/post-1/vote', { value: 1 }).expect(200);
   });
 
-  it('produces the same row and score through PUT /posts/:id/vote and the deprecated POST /votes', async () => {
-    const viaPost = await user1
-      .post('/votes', { target_type: 'post', target_id: 'post-1', value: 1 })
-      .expect(201);
-    const rowAfterPost = { ...stored()[0] };
-
-    const viaPut = await user1
-      .put('/posts/post-1/vote', { value: 1 })
-      .expect(200);
-    expect(viaPut.body).toEqual(viaPost.body);
-    expect(stored()).toEqual([rowAfterPost]);
-
+  // Removed: votes are cast through the target's own route.
+  it('no longer serves POST /votes', async () => {
     await user1
-      .post('/votes', { target_type: 'post', target_id: 'post-1', value: -1 })
-      .expect(201);
-    const flipped = await user1.get('/posts/post-1/vote').expect(200);
-    expect(flipped.body).toEqual({ value: -1, score: -1 });
-    expect(stored()).toHaveLength(1);
+      .post('/votes', { target_type: 'post', target_id: 'post-1', value: 1 })
+      .expect(404);
+    expect(stored()).toEqual([]);
   });
 });

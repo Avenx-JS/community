@@ -12,7 +12,7 @@ type TargetType = 'post' | 'comment';
 
 // withdraw() and state(), the service behind DELETE and GET …/vote, and the
 // shared vote() path PUT …/vote delegates to. votes.service.spec.ts covers
-// vote() as POST /votes uses it and is left unchanged.
+// vote() and its upsert.
 describe('VotesService vote routes', () => {
   let service: VotesService;
   let queries: Array<{ sql: string; values: unknown[]; on: 'pool' | 'tx' }>;

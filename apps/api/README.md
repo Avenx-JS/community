@@ -2382,7 +2382,7 @@ of these behaves as if the community did not exist:
 | `GET`, `PATCH`, `DELETE /posts/:id`; `POST /posts/:id/remove`, `/restore`        | `404` for its posts                        |
 | `GET` and `POST /posts/:postId/comments`                                               | `404` for its posts                        |
 | `PATCH`, `DELETE /comments/:id`; `POST /comments/:id/remove`, `/restore` | `404` for comments on its posts            |
-| `POST /votes`; `PUT`, `DELETE` and `GET /posts/:id/vote` and `/comments/:id/vote`     | `404` for its posts and their comments     |
+| `PUT`, `DELETE` and `GET /posts/:id/vote` and `/comments/:id/vote`                     | `404` for its posts and their comments     |
 
 Content queries apply the shared `activeCommunitySql` predicate
 (`src/common/community-visibility.ts`); community lookups add
@@ -3111,7 +3111,7 @@ check. A guard would repeat those lookups outside that transaction.
 | `POST /communities/:name/subscribe` | the route parameter                              | on the pool, before the insert                            |
 | `POST /posts`                       | `community_id` in the body                       | inside the post's transaction                             |
 | `POST /posts/:postId/comments`      | the post (top-level comments and replies alike)  | inside the comment's transaction                          |
-| `POST /votes`, `PUT /posts/:id/vote`, `PUT /comments/:id/vote` | the post, or for a comment, `comments` → `posts` | inside the vote's transaction, after the target is locked |
+| `PUT /posts/:id/vote`, `PUT /comments/:id/vote` | the post, or for a comment, `comments` → `posts` | inside the vote's transaction, after the target is locked |
 
 **Exempt paths, each deliberately:**
 
@@ -3459,7 +3459,7 @@ the tree route and both flat routes answer `404`, and author feeds omit them.
 Reviewers read the full thread through the tree route.
 
 **Writes on removed content answer `409`:** voting on a removed post or comment,
-or on a comment whose post is removed (`PUT …/vote`, `POST /votes`);
+or on a comment whose post is removed (`PUT …/vote`);
 commenting on a removed post or replying to a removed comment; editing it (see
 [Editing posts and comments](#editing-posts-and-comments)); locking it. In
 comment creation these checks run after the `404`s and the rule gate and before
@@ -4152,15 +4152,16 @@ aggregate cheap, so the counter stays the named escalation if measurement shows
 the per-page aggregate is too slow. `vote-routes.mysql.spec.ts` asserts the
 plans so that a regression fails a test rather than going unnoticed.
 
-### `POST /votes` (deprecated)
+### `POST /votes` was removed
 
-`POST /votes` with `{ "target_type", "target_id", "value" }` still works
-exactly as before: it answers `201` with the same `VoteResponse` and runs the
-same `VotesService.vote` path, so it and `PUT /posts/:id/vote` produce the
-same row and score. It is published API, so it is marked `deprecated` in the
-OpenAPI document only, and will be removed in a future change. New clients
-should use the per-target routes, which can be documented, authorised and
-rate-limited per resource.
+**Breaking change.** `POST /votes` with `{ "target_type", "target_id",
+"value" }` no longer exists and answers `404`. It put the target in the body,
+so one route covered two resources and could not be documented, authorised or
+rate-limited per resource. Clients send the same vote as
+`PUT /posts/:id/vote` or `PUT /comments/:id/vote` with `{ "value" }`: the same
+`VotesService.vote` path, the same row and score, but `200` instead of `201`
+(the vote is a singleton set by `PUT`). It was removed outright rather than
+kept as deprecated, so the API has exactly one way to vote.
 
 ### Rate limiting
 
@@ -4591,7 +4592,7 @@ the commit without revisiting the [transaction policy](#writing-notifications).
 
 `NotificationsController` and `NotificationInboxService` serve the read side
 of the inbox under `/notifications`, not `/me/notifications`: like
-`POST /reports` and `POST /votes`, the authenticated user's own resource lives
+`POST /reports`, the authenticated user's own resource lives
 at the resource root and its owner comes from the token. Nothing in the API
 uses a `/me` namespace.
 

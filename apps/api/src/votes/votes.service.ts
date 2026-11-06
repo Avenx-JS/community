@@ -15,7 +15,6 @@ import type {
 import { MYSQL_POOL } from '../auth/auth.service';
 import { activeCommunitySql } from '../common/community-visibility';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
-import { CreateVoteDto } from './dto/create-vote.dto';
 
 interface VoteRow extends RowDataPacket {
   id: string;
@@ -47,7 +46,15 @@ export interface VoteScoreDto {
   score: number;
 }
 
-type VoteTarget = CreateVoteDto['target_type'];
+// The one vote path's input. PUT /posts/:id/vote and PUT /comments/:id/vote
+// build it from the route (target) and CastVoteDto (value).
+export interface VoteInput {
+  target_type: 'post' | 'comment';
+  target_id: string;
+  value: -1 | 1;
+}
+
+type VoteTarget = VoteInput['target_type'];
 interface VoteTargetState {
   communityId: string;
   removed: boolean;
@@ -68,7 +75,7 @@ export class VotesService {
     private readonly ruleAcceptance: CommunityRuleAcceptanceService,
   ) {}
 
-  async vote(input: CreateVoteDto, userId: string): Promise<VoteResponseDto> {
+  async vote(input: VoteInput, userId: string): Promise<VoteResponseDto> {
     const connection = await this.pool.getConnection();
     let transactionStarted = false;
 

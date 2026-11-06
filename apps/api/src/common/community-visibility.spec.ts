@@ -190,12 +190,12 @@ const lookups: Array<
   ],
   ['DELETE /comments/:id', (s) => s.comments.remove('c', 'u'), CONTENT],
   [
-    'POST /votes on a post',
+    'PUT /posts/:id/vote',
     (s) => s.votes.vote({ target_type: 'post', target_id: 'p', value: 1 }, 'u'),
     CONTENT,
   ],
   [
-    'POST /votes on a comment',
+    'PUT /comments/:id/vote',
     (s) =>
       s.votes.vote({ target_type: 'comment', target_id: 'c', value: 1 }, 'u'),
     CONTENT,

@@ -211,13 +211,14 @@ describe('OpenAPI document', () => {
       'link',
       'media',
     ]);
-    expect(property(document, 'CreateVoteDto', 'value')).toMatchObject({
+    expect(property(document, 'CastVoteDto', 'value')).toMatchObject({
       type: 'integer',
       enum: [-1, 1],
     });
-    expect(schema(document, 'CreateVoteDto').required).toEqual(
-      expect.arrayContaining(['target_type', 'target_id', 'value']),
-    );
+    expect(schema(document, 'CastVoteDto').required).toEqual(['value']);
+    // POST /votes was removed; votes are cast through the target's route.
+    expect(document.paths['/votes']).toBeUndefined();
+    expect(document.components?.schemas?.CreateVoteDto).toBeUndefined();
 
     const listUsers = document.paths['/admin/users'].get!;
     expect(queryParameter(listUsers, 'page')).toMatchObject({
