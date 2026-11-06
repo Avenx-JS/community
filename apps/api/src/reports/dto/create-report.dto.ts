@@ -12,8 +12,8 @@ import {
   ValidatorConstraintInterface,
 } from 'class-validator';
 import { PlainTextConstraint } from '../../common/safe-text.constraint';
-import { REPORT_REASONS } from '../report.constants';
-import type { ReportReason } from '../report.constants';
+import { REPORT_REASONS, REPORT_TARGET_TYPES } from '../report.constants';
+import type { ReportReason, ReportTargetType } from '../report.constants';
 
 @ValidatorConstraint({ name: 'reportContextPair', async: false })
 class ReportContextPairConstraint implements ValidatorConstraintInterface {
@@ -31,15 +31,43 @@ class ReportContextPairConstraint implements ValidatorConstraintInterface {
   }
 }
 
+// For a content or community target the target is itself the evidence.
+@ValidatorConstraint({ name: 'reportContextTarget', async: false })
+class ReportContextTargetConstraint implements ValidatorConstraintInterface {
+  validate(_value: unknown, args: ValidationArguments): boolean {
+    const input = args.object as CreateReportDto;
+    return (
+      input.target_type === 'user' ||
+      (input.context_type === undefined && input.context_id === undefined)
+    );
+  }
+
+  defaultMessage(): string {
+    return 'context_type and context_id are only allowed when target_type is user';
+  }
+}
+
 export class CreateReportDto {
+  /** What is being reported; decides how target is read. */
+  @IsIn(REPORT_TARGET_TYPES)
+  target_type!: ReportTargetType;
+
+  /**
+   * A username for user, a community name for community, an ID for post and
+   * comment. The format for the given target_type is checked after this
+   * combined pattern: username 3-50 letters, digits or underscores; community
+   * name 1-50, also allowing hyphens; ID 1-36, also allowing hyphens.
+   */
   @Transform(({ value }: { value: unknown }) =>
     typeof value === 'string' ? value.trim() : value,
   )
   @IsString()
-  @Length(3, 50)
-  @Matches(/^[a-zA-Z0-9_]+$/)
+  @Length(1, 50)
+  @Matches(/^[A-Za-z0-9_-]+$/)
+  // On a required field, so they run even when both context fields are absent.
   @Validate(ReportContextPairConstraint)
-  username!: string;
+  @Validate(ReportContextTargetConstraint)
+  target!: string;
 
   @IsIn(REPORT_REASONS)
   reason!: ReportReason;
@@ -53,12 +81,15 @@ export class CreateReportDto {
   @Validate(PlainTextConstraint)
   description?: string;
 
-  /** Provide together with context_id. */
+  /** Only for a user target. Provide together with context_id. */
   @IsOptional()
   @IsIn(['post', 'comment'])
   context_type?: 'post' | 'comment';
 
-  /** Post or comment by the reported user; provide with context_type. */
+  /**
+   * Only for a user target: a post or comment by the reported user. Provide
+   * together with context_type.
+   */
   @IsOptional()
   @IsString()
   @Length(1, 36)

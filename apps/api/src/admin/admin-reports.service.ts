@@ -12,6 +12,7 @@ import type {
   ReportContextType,
   ReportReason,
   ReportStatus,
+  ReportTargetType,
 } from '../reports/report.constants';
 import { AuditLogService } from './audit-log.service';
 import { ListReportsDto } from './dto/list-reports.dto';
@@ -20,7 +21,10 @@ import { UpdateReportStatusDto } from './dto/update-report-status.dto';
 interface ReportListRow extends RowDataPacket {
   id: string;
   reporter_username: string | null;
-  reported_username: string;
+  reported_username: string | null;
+  target_type: ReportTargetType;
+  target_id: string;
+  target_label: string | null;
   reason: ReportReason;
   status: ReportStatus;
   resolution: string | null;
@@ -34,13 +38,13 @@ export interface AdminReportDetailRecord extends ReportListRow {
   description: string | null;
   resolution_note: string | null;
   reviewed_by_username: string | null;
-  reported_user_id: string;
+  reported_user_id: string | null;
 }
 
 interface ReportTransitionRow extends RowDataPacket {
   id: string;
   reporter_id: string | null;
-  reported_user_id: string;
+  reported_user_id: string | null;
   status: ReportStatus;
 }
 
@@ -48,6 +52,12 @@ interface ReportContextRow extends RowDataPacket {
   title: string | null;
   content: string | null;
   author_username: string | null;
+}
+
+interface ReportTargetContentRow extends RowDataPacket {
+  title: string | null;
+  content: string | null;
+  removed_at: Date | string | null;
 }
 
 interface ReportCountsRow extends RowDataPacket {
@@ -63,7 +73,10 @@ interface ResolutionCountRow extends RowDataPacket {
 export interface AdminReportListItem {
   id: string;
   reporter_username: string | null;
-  reported_username: string;
+  reported_username: string | null;
+  target_type: ReportTargetType;
+  target_id: string;
+  target_label: string | null;
   reason: ReportReason;
   status: ReportStatus;
   resolution: string | null;
@@ -80,6 +93,7 @@ export interface AdminReportList {
   filters: {
     status: ReportStatus | null;
     reason: ReportReason | null;
+    target_type: ReportTargetType | null;
     reported_username: string | null;
     reporter_username: string | null;
     from: string | null;
@@ -100,6 +114,11 @@ export interface AdminReportDetail extends AdminReportListItem {
     content_excerpt: string | null;
     author_username: string | null;
   } | null;
+  target_content: {
+    title: string | null;
+    content: string | null;
+    removed: boolean;
+  } | null;
   open_reports_against_user: number;
   total_reports_against_user: number;
   prior_resolutions_against_user: Array<{
@@ -107,6 +126,25 @@ export interface AdminReportDetail extends AdminReportListItem {
     total: number;
   }>;
 }
+
+// Left joins throughout: user_reports.target_id has no foreign key, so a report
+// outlives its target, and a community report has no reported account. The
+// CASE picks the label by type; qualifying each join by type as well means a
+// report only looks up its own kind of target.
+const REPORT_TARGET_LABEL_SQL = `CASE ur.target_type
+           WHEN 'user' THEN target_user.username
+           WHEN 'post' THEN target_post.title
+           WHEN 'comment' THEN LEFT(target_comment.content, 100)
+           WHEN 'community' THEN target_community.name
+         END AS target_label`;
+const REPORT_TARGET_JOINS_SQL = `LEFT JOIN users target_user
+         ON ur.target_type = 'user' AND target_user.id = ur.target_id
+       LEFT JOIN posts target_post
+         ON ur.target_type = 'post' AND target_post.id = ur.target_id
+       LEFT JOIN comments target_comment
+         ON ur.target_type = 'comment' AND target_comment.id = ur.target_id
+       LEFT JOIN communities target_community
+         ON ur.target_type = 'community' AND target_community.id = ur.target_id`;
 
 function toIsoString(value: Date | string | null): string | null {
   return value === null ? null : new Date(value).toISOString();
@@ -124,6 +162,9 @@ function toListItem(report: ReportListRow): AdminReportListItem {
     id: report.id,
     reporter_username: report.reporter_username,
     reported_username: report.reported_username,
+    target_type: report.target_type,
+    target_id: report.target_id,
+    target_label: report.target_label,
     reason: report.reason,
     status: report.status,
     resolution: report.resolution,
@@ -136,6 +177,7 @@ function toListItem(report: ReportListRow): AdminReportListItem {
 export function toAdminReportDetailDto(
   report: AdminReportDetailRecord,
   context: AdminReportDetail['context'],
+  targetContent: AdminReportDetail['target_content'],
   counts: { open: number; total: number },
   resolutions: Array<{ resolution: string | null; total: number }>,
 ): AdminReportDetail {
@@ -145,6 +187,7 @@ export function toAdminReportDetailDto(
     resolution_note: report.resolution_note,
     reviewed_by_username: report.reviewed_by_username,
     context,
+    target_content: targetContent,
     open_reports_against_user: counts.open,
     total_reports_against_user: counts.total,
     prior_resolutions_against_user: resolutions,
@@ -194,16 +237,22 @@ export class AdminReportsService {
       );
       values.push(toUtcSqlDate(query.to));
     }
+    if (query.target_type) {
+      filters.push('ur.target_type = ?');
+      values.push(query.target_type);
+    }
     const where = filters.length > 0 ? ` WHERE ${filters.join(' AND ')}` : '';
     const order = query.sort === 'oldest' ? 'ASC' : 'DESC';
 
     const [reports] = await this.pool.execute<ReportListRow[]>(
       `SELECT ur.id, reporter_user.username AS reporter_username,
-         reported_user.username AS reported_username, ur.reason, ur.status,
+         reported_user.username AS reported_username, ur.target_type, ur.target_id,
+         ${REPORT_TARGET_LABEL_SQL}, ur.reason, ur.status,
          ur.resolution, ur.context_type, ur.context_id, ur.created_at, ur.reviewed_at
        FROM user_reports ur
        LEFT JOIN users reporter_user ON reporter_user.id = ur.reporter_id
-       INNER JOIN users reported_user ON reported_user.id = ur.reported_user_id${where}
+       LEFT JOIN users reported_user ON reported_user.id = ur.reported_user_id
+       ${REPORT_TARGET_JOINS_SQL}${where}
        ORDER BY ur.created_at ${order}, ur.id ${order} LIMIT ? OFFSET ?`,
       [...values, limit, offset],
     );
@@ -213,7 +262,7 @@ export class AdminReportsService {
       `SELECT COUNT(*) AS total
        FROM user_reports ur
        LEFT JOIN users reporter_user ON reporter_user.id = ur.reporter_id
-       INNER JOIN users reported_user ON reported_user.id = ur.reported_user_id${where}`,
+       LEFT JOIN users reported_user ON reported_user.id = ur.reported_user_id${where}`,
       values,
     );
 
@@ -225,6 +274,7 @@ export class AdminReportsService {
       filters: {
         status: query.status ?? null,
         reason: query.reason ?? null,
+        target_type: query.target_type ?? null,
         reported_username: query.reported_username ?? null,
         reporter_username: query.reporter_username ?? null,
         from: query.from ?? null,
@@ -238,13 +288,15 @@ export class AdminReportsService {
     const [reports] = await this.pool.execute<AdminReportDetailRecord[]>(
       `SELECT ur.id, reporter_user.username AS reporter_username,
          ur.reported_user_id, reported_user.username AS reported_username,
+         ur.target_type, ur.target_id, ${REPORT_TARGET_LABEL_SQL},
          ur.reason, ur.status, ur.resolution, ur.context_type, ur.context_id,
          ur.description, ur.resolution_note, ur.created_at, ur.reviewed_at,
          reviewer_user.username AS reviewed_by_username
        FROM user_reports ur
        LEFT JOIN users reporter_user ON reporter_user.id = ur.reporter_id
-       INNER JOIN users reported_user ON reported_user.id = ur.reported_user_id
+       LEFT JOIN users reported_user ON reported_user.id = ur.reported_user_id
        LEFT JOIN users reviewer_user ON reviewer_user.id = ur.reviewed_by
+       ${REPORT_TARGET_JOINS_SQL}
        WHERE ur.id = ? LIMIT 1`,
       [id],
     );
@@ -256,6 +308,20 @@ export class AdminReportsService {
       report.context_type,
       report.context_id,
     );
+    const targetContent = await this.loadTargetContent(
+      report.target_type,
+      report.target_id,
+    );
+    // A community report concerns no account, so there is nothing to count.
+    if (report.reported_user_id === null) {
+      return toAdminReportDetailDto(
+        report,
+        context,
+        targetContent,
+        { open: 0, total: 0 },
+        [],
+      );
+    }
     const [counts] = await this.pool.execute<ReportCountsRow[]>(
       `SELECT
          SUM(status IN ('open', 'under_review')) AS open_reports_against_user,
@@ -276,6 +342,7 @@ export class AdminReportsService {
     return toAdminReportDetailDto(
       report,
       context,
+      targetContent,
       {
         open: Number(totals?.open_reports_against_user ?? 0),
         total: Number(totals?.total_reports_against_user ?? 0),
@@ -331,7 +398,7 @@ export class AdminReportsService {
          SET status = ?, resolution = ?, resolution_note = ?,
              reviewed_by = ?, reviewed_at = UTC_TIMESTAMP()
          WHERE id = ? AND status IN (${sourceStatuses.map(() => '?').join(', ')})
-           AND reported_user_id <> ?
+           AND (reported_user_id IS NULL OR reported_user_id <> ?)
            AND (reporter_id IS NULL OR reporter_id <> ?)`,
         [
           input.status,
@@ -407,6 +474,31 @@ export class AdminReportsService {
     }
 
     return this.findOne(id);
+  }
+
+  // In full, unlike the context excerpt: this is the thing being judged. Removed
+  // content stays readable here, because removal keeps the row.
+  private async loadTargetContent(
+    targetType: ReportTargetType,
+    targetId: string,
+  ): Promise<AdminReportDetail['target_content']> {
+    if (targetType !== 'post' && targetType !== 'comment') {
+      return null;
+    }
+    const [rows] = await this.pool.execute<ReportTargetContentRow[]>(
+      targetType === 'post'
+        ? 'SELECT title, content, removed_at FROM posts WHERE id = ? LIMIT 1'
+        : 'SELECT NULL AS title, content, removed_at FROM comments WHERE id = ? LIMIT 1',
+      [targetId],
+    );
+    const row = rows[0];
+    return row
+      ? {
+          title: row.title,
+          content: row.content,
+          removed: row.removed_at !== null,
+        }
+      : null;
   }
 
   private async loadContext(

@@ -142,13 +142,19 @@ integration('generalised report targets (MySQL)', () => {
       );
       CREATE TABLE posts (
         id VARCHAR(36) PRIMARY KEY,
+        title VARCHAR(300) NULL,
         author_id VARCHAR(36) NOT NULL,
         FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE
       );
       CREATE TABLE comments (
         id VARCHAR(36) PRIMARY KEY,
+        content TEXT NULL,
         author_id VARCHAR(36) NOT NULL,
         FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+      CREATE TABLE communities (
+        id VARCHAR(36) PRIMARY KEY,
+        name VARCHAR(50) NOT NULL
       );`,
     );
     await runSqlScript(connection, migration('002_create_user_reports.sql'));
@@ -205,7 +211,14 @@ integration('generalised report targets (MySQL)', () => {
   });
 
   it('applies 016 to a database at 015 once, and skips it on a second run', async () => {
-    const queueBefore = await queue();
+    const shownBefore = await rows(
+      `SELECT ur.id, reporter.username AS reporter_username,
+              reported.username AS reported_username, ur.reason, ur.status
+       FROM user_reports ur
+       LEFT JOIN users reporter ON reporter.id = ur.reporter_id
+       INNER JOIN users reported ON reported.id = ur.reported_user_id
+       ORDER BY ur.created_at DESC, ur.id DESC LIMIT 100`,
+    );
 
     const first = await migrate();
     expect(first.filter((line) => !line.startsWith('Skipped'))).toEqual([
@@ -220,8 +233,26 @@ integration('generalised report targets (MySQL)', () => {
     );
     expect(Number(recorded.n)).toBe(1);
 
-    // The admin queue reads the same rows the same way.
-    await expect(queue()).resolves.toEqual(queueBefore);
+    // The admin queue shows the same reports the same way, each now as a
+    // target on its account.
+    const { items } = await queue();
+    expect(
+      items.map(
+        ({ id, reporter_username, reported_username, reason, status }) => ({
+          id,
+          reporter_username,
+          reported_username,
+          reason,
+          status,
+        }),
+      ),
+    ).toEqual(shownBefore);
+    for (const item of items) {
+      expect(item).toMatchObject({
+        target_type: 'user',
+        target_label: item.reported_username,
+      });
+    }
   }, 60_000);
 
   it('targets every existing report at its account and leaves every other value alone', async () => {
@@ -358,7 +389,8 @@ integration('generalised report targets (MySQL)', () => {
     const submit = (contextId?: string) =>
       reports.create(
         {
-          username: 'bob',
+          target_type: 'user',
+          target: 'bob',
           reason: 'spam',
           ...(contextId
             ? { context_type: 'post' as const, context_id: contextId }
@@ -383,14 +415,16 @@ integration('generalised report targets (MySQL)', () => {
     await expect(submit('post-1')).resolves.toMatchObject({ status: 'open' });
   });
 
-  it('renders a report whose target is gone, without joining the target', async () => {
+  it('renders a report whose target is gone, with a null label', async () => {
     await connection.query(`
       INSERT INTO user_reports
         (id, reporter_id, reported_user_id, reason, target_type, target_id, target_author_id)
       VALUES ('r-gone', 'alice', 'carol', 'spam', 'post', 'deleted-post', 'carol')`);
 
     const { items } = await queue();
-    expect(items.map((item) => item.id)).toContain('r-gone');
+    expect(items.find((item) => item.id === 'r-gone')).toMatchObject({
+      target_label: null,
+    });
   });
 
   it('keeps reports when an author is deleted, nulling only the account links', async () => {
@@ -442,9 +476,13 @@ integration('generalised report targets (MySQL)', () => {
       },
     ]);
 
-    // Reports without an account leave the queue rather than breaking it.
+    // A report without an account stays in the queue, as a community report
+    // must, and shows that it has none.
     const { items } = await queue();
-    expect(items.map((item) => item.id)).not.toContain('r-by-carol');
+    expect(items.find((item) => item.id === 'r-by-carol')).toMatchObject({
+      reported_username: null,
+      target_id: 'post-3',
+    });
     expect(items.map((item) => item.id)).toContain('r-comment');
   });
 });

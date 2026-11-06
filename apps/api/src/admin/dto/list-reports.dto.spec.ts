@@ -5,6 +5,15 @@ import { validate } from 'class-validator';
 import { ListReportsDto } from './list-reports.dto';
 
 describe('ListReportsDto', () => {
+  it.each(['user', 'post', 'comment', 'community'])(
+    'accepts target_type=%s',
+    async (target_type) => {
+      await expect(
+        validate(plainToInstance(ListReportsDto, { target_type })),
+      ).resolves.toHaveLength(0);
+    },
+  );
+
   it('applies pagination and sort defaults', () => {
     const dto = plainToInstance(ListReportsDto, {});
     expect(dto).toMatchObject({ page: 1, limit: 20, sort: 'new' });
@@ -17,6 +26,8 @@ describe('ListReportsDto', () => {
     { limit: '101' },
     { status: 'unknown' },
     { reason: 'unknown' },
+    { target_type: 'unknown' },
+    { target_type: 'POST' },
     { sort: 'random' },
     { reported_username: 'bad-name' },
     { reporter_username: 'x' },

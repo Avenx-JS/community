@@ -4,10 +4,12 @@ import {
   REPORT_REASONS,
   REPORT_RESOLUTIONS,
   REPORT_STATUSES,
+  REPORT_TARGET_TYPES,
   type ReportContextType,
   type ReportReason,
   type ReportResolution,
   type ReportStatus,
+  type ReportTargetType,
 } from '../reports/report.constants';
 import type { PlatformRole } from '../users/users.service';
 import type {
@@ -222,8 +224,30 @@ export class AdminReportListItemResponse implements AdminReportListItem {
   })
   reporter_username!: string | null;
 
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'The account the report concerns: the account itself, or the author of ' +
+      'the content. Null for a community report, or when the account was ' +
+      'hard-deleted.',
+  })
+  reported_username!: string | null;
+
+  @ApiProperty({ enum: REPORT_TARGET_TYPES })
+  target_type!: ReportTargetType;
+
   @ApiProperty()
-  reported_username!: string;
+  target_id!: string;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'The username, community name, post title or comment excerpt. Null when ' +
+      'the target no longer exists.',
+  })
+  target_label!: string | null;
 
   @ApiProperty({ enum: REPORT_REASONS })
   reason!: ReportReason;
@@ -250,6 +274,9 @@ export class AdminReportFiltersResponse {
 
   @ApiProperty({ enum: REPORT_REASONS, nullable: true })
   reason!: ReportReason | null;
+
+  @ApiProperty({ enum: REPORT_TARGET_TYPES, nullable: true })
+  target_type!: ReportTargetType | null;
 
   @ApiProperty({ type: String, nullable: true })
   reported_username!: string | null;
@@ -304,6 +331,22 @@ export class AdminReportContextResponse {
   author_username!: string | null;
 }
 
+// The content a post or comment report is about, in full.
+export class AdminReportTargetContentResponse {
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description: 'The post title; null for a comment.',
+  })
+  title!: string | null;
+
+  @ApiProperty({ type: String, nullable: true })
+  content!: string | null;
+
+  @ApiProperty({ description: 'Whether a moderator has removed the content.' })
+  removed!: boolean;
+}
+
 export class AdminPriorResolutionResponse {
   @ApiProperty({ enum: REPORT_RESOLUTIONS, nullable: true })
   resolution!: string | null;
@@ -327,6 +370,14 @@ export class AdminReportDetailResponse
 
   @ApiProperty({ type: AdminReportContextResponse, nullable: true })
   context!: AdminReportContextResponse | null;
+
+  @ApiProperty({
+    type: AdminReportTargetContentResponse,
+    nullable: true,
+    description:
+      'Null for a user or community report, or when the content no longer exists.',
+  })
+  target_content!: AdminReportTargetContentResponse | null;
 
   @ApiProperty({ type: 'integer' })
   open_reports_against_user!: number;

@@ -15,7 +15,10 @@ import type { PlatformRole } from '../src/users/users.service';
 interface ReportFixture {
   id: string;
   reporter_username: string | null;
-  reported_username: string;
+  reported_username: string | null;
+  target_type: string;
+  target_id: string;
+  target_label: string | null;
   reason: string;
   status: string;
   resolution: string | null;
@@ -50,6 +53,7 @@ describe('Admin reports API (e2e)', () => {
   let roles: Map<string, PlatformRole>;
   let poolCalls: Array<{ sql: string; values: unknown[] }>;
   let detailHasContext: boolean;
+  let targetContents: Map<string, Record<string, unknown>>;
   let auditRows: unknown[][];
   let transactionCounts: {
     commits: number;
@@ -75,6 +79,9 @@ describe('Admin reports API (e2e)', () => {
       id: `report-${String(index + 1).padStart(2, '0')}`,
       reporter_username: index === 0 ? null : `reporter_${index}`,
       reported_username: index % 2 === 0 ? 'target_user' : 'other_target',
+      target_type: 'user',
+      target_id: index % 2 === 0 ? 'target-id' : 'other-target-id',
+      target_label: index % 2 === 0 ? 'target_user' : 'other_target',
       reason: index % 2 === 0 ? 'spam' : 'harassment',
       status: index < 12 ? 'open' : 'resolved',
       resolution: index < 12 ? null : 'no_action',
@@ -90,6 +97,7 @@ describe('Admin reports API (e2e)', () => {
     ]);
     poolCalls = [];
     detailHasContext = false;
+    targetContents = new Map();
     auditRows = [];
     transactionCounts = { commits: 0, rollbacks: 0, releases: 0 };
     failAuditInsert = false;
@@ -148,6 +156,10 @@ describe('Admin reports API (e2e)', () => {
           String(values[parameter++]).replace(' ', 'T') + 'Z',
         );
         result = result.filter((row) => new Date(row.created_at) < to);
+      }
+      if (where.includes('ur.target_type = ?')) {
+        const value = values[parameter++];
+        result = result.filter((row) => row.target_type === value);
       }
       return result;
     };
@@ -212,7 +224,9 @@ describe('Admin reports API (e2e)', () => {
                 {
                   ...report,
                   reporter_id: report.reporter_username ? 'reporter-id' : null,
-                  reported_user_id: 'target-id',
+                  reported_user_id: report.reported_username
+                    ? 'target-id'
+                    : null,
                   description: 'Accusation detail',
                   resolution_note: report.resolution_note,
                   reviewed_by_username: report.reviewed_at ? 'admin' : null,
@@ -221,6 +235,13 @@ describe('Admin reports API (e2e)', () => {
             : [],
           [],
         ] as [unknown, unknown]);
+      }
+      if (/^SELECT (title|NULL AS title), content, removed_at/.test(sql)) {
+        const content = targetContents.get(values[0] as string);
+        return Promise.resolve([content ? [content] : [], []] as [
+          unknown,
+          unknown,
+        ]);
       }
       if (sql.startsWith('SELECT context.title')) {
         return Promise.resolve([
@@ -290,7 +311,9 @@ describe('Admin reports API (e2e)', () => {
                     reporter_id: report.reporter_username
                       ? 'reporter-id'
                       : null,
-                    reported_user_id: 'target-id',
+                    reported_user_id: report.reported_username
+                      ? 'target-id'
+                      : null,
                     status: report.status,
                   },
                 ]
@@ -629,6 +652,186 @@ describe('Admin reports API (e2e)', () => {
       commits: 0,
       rollbacks: 1,
       releases: 1,
+    });
+  });
+
+  describe('report targets', () => {
+    const fixture = (overrides: Partial<ReportFixture>): ReportFixture => ({
+      id: 'report-post',
+      reporter_username: 'someone',
+      reported_username: 'target_user',
+      target_type: 'post',
+      target_id: 'post-1',
+      target_label: 'A post title',
+      reason: 'spam',
+      status: 'open',
+      resolution: null,
+      context_type: null,
+      context_id: null,
+      created_at: '2026-06-01T00:00:00.000Z',
+      reviewed_at: null,
+      resolution_note: null,
+      ...overrides,
+    });
+    const listed = async (query: string) =>
+      (await adminRequest(`/admin/reports${query}`).expect(200))
+        .body as AdminListResponse;
+
+    beforeEach(() => {
+      reports.push(
+        fixture({}),
+        fixture({
+          id: 'report-comment',
+          target_type: 'comment',
+          target_id: 'comment-1',
+          target_label: 'A comment excerpt',
+        }),
+        fixture({
+          id: 'report-community',
+          reported_username: null,
+          target_type: 'community',
+          target_id: 'community-1',
+          target_label: 'a-community',
+        }),
+      );
+      targetContents.set('post-1', {
+        title: 'A post title',
+        content: 'The full post body',
+        removed_at: new Date('2026-06-02T00:00:00.000Z'),
+      });
+      targetContents.set('comment-1', {
+        title: null,
+        content: 'The full comment body',
+        removed_at: null,
+      });
+    });
+
+    it('filters on target_type, with a matching total and echoed filter', async () => {
+      const body = await listed('?target_type=post');
+      expect(body.items.map((item) => item.id)).toEqual(['report-post']);
+      expect(body.total).toBe(1);
+      expect(body.filters.target_type).toBe('post');
+    });
+
+    it('returns every target type in one ordered stream without the filter', async () => {
+      const body = await listed('?limit=100');
+      expect(body.total).toBe(28);
+      expect(new Set(body.items.map((item) => item.target_type))).toEqual(
+        new Set(['user', 'post', 'comment', 'community']),
+      );
+      const order = body.items.map((item) => item.created_at);
+      expect(order).toEqual([...order].sort().reverse());
+      expect(body.filters.target_type).toBeNull();
+    });
+
+    it('rejects an unknown target_type with 400', async () => {
+      await adminRequest('/admin/reports?target_type=account').expect(400);
+    });
+
+    it('lists the target and its label, with a null account for a community', async () => {
+      const body = await listed('?target_type=community');
+      expect(body.items[0]).toMatchObject({
+        target_type: 'community',
+        target_id: 'community-1',
+        target_label: 'a-community',
+        reported_username: null,
+      });
+    });
+
+    it('matches content reports on reported_username, never community ones', async () => {
+      const body = await listed('?reported_username=target_user&limit=100');
+      const ids = body.items.map((item) => item.id);
+      expect(ids).toContain('report-post');
+      expect(ids).toContain('report-comment');
+      expect(ids).not.toContain('report-community');
+    });
+
+    it('returns enough of a content target to judge it', async () => {
+      const post = await adminRequest('/admin/reports/report-post').expect(200);
+      expect(post.body).toMatchObject({
+        target_type: 'post',
+        target_id: 'post-1',
+        target_label: 'A post title',
+        target_content: {
+          title: 'A post title',
+          content: 'The full post body',
+          removed: true,
+        },
+      });
+      const comment = await adminRequest(
+        '/admin/reports/report-comment',
+      ).expect(200);
+      expect(comment.body).toMatchObject({
+        target_content: {
+          title: null,
+          content: 'The full comment body',
+          removed: false,
+        },
+      });
+    });
+
+    it('returns no content and no account counts for a community', async () => {
+      const response = await adminRequest(
+        '/admin/reports/report-community',
+      ).expect(200);
+      expect(response.body).toMatchObject({
+        reported_username: null,
+        target_content: null,
+        open_reports_against_user: 0,
+        total_reports_against_user: 0,
+        prior_resolutions_against_user: [],
+      });
+    });
+
+    it('keeps a report whose target is then deleted, with a null label', async () => {
+      const post = reports.find((report) => report.id === 'report-post')!;
+      post.target_label = null;
+      targetContents.delete('post-1');
+
+      const body = await listed('?target_type=post');
+      expect(body.items[0]).toMatchObject({
+        id: 'report-post',
+        target_id: 'post-1',
+        target_label: null,
+      });
+      const detail = await adminRequest('/admin/reports/report-post').expect(
+        200,
+      );
+      expect(detail.body).toMatchObject({
+        target_label: null,
+        target_content: null,
+      });
+    });
+
+    it.each(['report-post', 'report-comment', 'report-community'])(
+      'transitions %s, telling the reporter { status } only',
+      async (id) => {
+        await adminPatch(`/admin/reports/${id}`)
+          .send({
+            status: 'resolved',
+            resolution: 'no_action',
+            resolution_note: 'Internal note',
+          })
+          .expect(200);
+        expect(notificationRows).toHaveLength(1);
+        const text = JSON.stringify(notificationRows[0]);
+        expect(JSON.parse(String(notificationRows[0].metadata))).toEqual({
+          status: 'resolved',
+        });
+        expect(text).not.toMatch(/Internal note|no_action|admin-id/);
+      },
+    );
+
+    it('serialises no email, password hash, token or session', async () => {
+      const bodies = [
+        (await adminRequest('/admin/reports?limit=100').expect(200)).text,
+        (await adminRequest('/admin/reports/report-post').expect(200)).text,
+        (await adminRequest('/admin/reports/report-community').expect(200))
+          .text,
+      ];
+      for (const text of bodies) {
+        expect(text).not.toMatch(/email|password_hash|session|token/i);
+      }
     });
   });
 

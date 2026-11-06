@@ -891,7 +891,8 @@ envelope. Optional query parameters:
 | ------------------- | -------------------------------------------------------------------------------------------- |
 | `status`            | `open`, `under_review`, `resolved`, `rejected`                                               |
 | `reason`            | `spam`, `harassment`, `hate_speech`, `sexual_content`, `self_harm`, `impersonation`, `other` |
-| `reported_username` | Exact username, 3–50 letters, digits, or underscores                                         |
+| `target_type`       | `user`, `post`, `comment`, `community`; omit it for every type in one ordered stream          |
+| `reported_username` | Exact username, 3–50 letters, digits, or underscores. Does not match community reports       |
 | `reporter_username` | Exact username, 3–50 letters, digits, or underscores                                         |
 | `from` / `to`       | ISO 8601 timestamps; UTC half-open range `created_at >= from AND created_at < to`            |
 | `page`              | Integer 1–10000; defaults to `1`                                                             |
@@ -902,21 +903,35 @@ When both dates are supplied, `from` is inclusive and `to` is exclusive. A
 report exactly at `to` is not included. This half-open UTC convention should
 also be used for report metrics and other date-range analytics.
 
-List items include report and queue fields, `has_context`, timestamps, and the
-reporter/reported usernames. A deleted reporter is shown as `null`. The queue
-reads reports through the account they concern (`reported_user_id`), so the
-reported username is always present: since migration 016 a report whose
-account was deleted is kept with `reported_user_id` set to `NULL` and is left
-out of the queue, its counts and the detail route, rather than deleted.
-Free-text descriptions are returned only by the detail route. An empty page
-returns `200` with an empty `items` array.
+List items include report and queue fields, `has_context`, timestamps, the
+reporter/reported usernames and the target. A deleted reporter is shown as
+`null`. Free-text descriptions are returned only by the detail route. An empty
+page returns `200` with an empty `items` array.
 
-The queue never joins a report's target (`target_type`/`target_id`, see
-[Reports](#reports)). A report whose target has since been removed still
-renders, and so must every future reader: treat the target as possibly
-missing. Today the queue holds only `user` targets, and its request and
-response shapes are unchanged; surfacing post, comment and community targets
-is separate work.
+**The target.** Every item carries `target_type`, `target_id` and a resolved,
+human-readable `target_label`:
+
+| `target_type` | `target_label` |
+| --- | --- |
+| `user` | The username |
+| `post` | The post's title |
+| `comment` | The first 100 characters of the comment |
+| `community` | The community's name |
+
+**`target_label` is `null` when the target no longer exists.** `target_id` has no
+foreign key, so a report outlives its target. The label comes from a left join
+per target kind, so a missing target never hides a report or fails the request.
+Removed content and deleted or suspended communities still have a label, because
+their rows remain. Every reader of `target_id` must treat the target as possibly
+missing.
+
+**`reported_username` can be `null`.** It names the account a report concerns,
+which a community report does not have, so the `reported_username` filter never
+matches one. It also matches content reports, through the content's author. A
+report whose account was hard-deleted has `reported_user_id` set to `NULL` too,
+and it now appears in the queue with `reported_username: null` rather than being
+left out: a community report looks the same in the data, and hiding either would
+lose a report.
 
 ```json
 {
@@ -925,6 +940,9 @@ is separate work.
       "id": "report-id",
       "reporter_username": null,
       "reported_username": "target_user",
+      "target_type": "user",
+      "target_id": "target-user-id",
+      "target_label": "target_user",
       "reason": "spam",
       "status": "open",
       "resolution": null,
@@ -939,6 +957,7 @@ is separate work.
   "filters": {
     "status": null,
     "reason": null,
+    "target_type": null,
     "reported_username": null,
     "reporter_username": null,
     "from": null,
@@ -956,11 +975,21 @@ when no context was filed; a deleted referenced post/comment returns
 `exists: false` and null detail fields. Deleted reporter and reviewer usernames
 are also `null`. Unknown report IDs return `404`; malformed IDs return `400`.
 
+`target_content` holds what a reviewer needs to judge a `post` or `comment`
+report: `title` (`null` for a comment), the full `content`, not an excerpt, and
+`removed`. It stays readable after moderation removed the content, because removal
+keeps the row. It is `null` for a `user` or `community` report, and when the
+content no longer exists. The `*_against_user` aggregates are `0` and empty for a
+report with no account.
+
 ```json
 {
   "id": "report-id",
   "reporter_username": null,
   "reported_username": "target_user",
+  "target_type": "post",
+  "target_id": "post-id",
+  "target_label": "Post title",
   "reason": "spam",
   "status": "open",
   "resolution": null,
@@ -977,6 +1006,11 @@ are also `null`. Unknown report IDs return `404`; malformed IDs return `400`.
     "title": "Post title",
     "content_excerpt": "Post content excerpt",
     "author_username": "target_user"
+  },
+  "target_content": {
+    "title": "Post title",
+    "content": "The full post content",
+    "removed": false
   },
   "open_reports_against_user": 2,
   "total_reports_against_user": 4,
@@ -1150,7 +1184,8 @@ token, or session value. The global API write rate limits apply.
 
 ### User reports
 
-The `user_reports` table stores account reports and moderation lifecycle data.
+The `user_reports` table stores reports, about an account, a post, a comment or a
+community, and their moderation lifecycle data.
 `reason` is one of `spam`, `harassment`, `hate_speech`, `sexual_content`,
 `self_harm`, `impersonation`, or `other`. `status` describes queue state
 (`open`, `under_review`, `resolved`, or `rejected`) and defaults to `open`;
@@ -1895,41 +1930,87 @@ their longest configured window has elapsed.
 
 ## Reports
 
-`POST /reports` requires a bearer token and creates a report about another
-account. The reporter is always derived from the token. The JSON body accepts:
+`POST /reports` requires a bearer token and creates a report about an account, a
+post, a comment or a community. The reporter is always derived from the token.
 
-- `username`: target username (3–50 letters, digits, or underscores).
+**Breaking change: `username` is no longer accepted.** It is replaced by
+`target_type` and `target`, so a body that still sends `username` gets `400`.
+Update clients to send `{ "target_type": "user", "target": "<username>" }`. There
+is no alias: the body runs under `forbidNonWhitelisted`, so supporting both would
+mean two validation paths and two resolution paths in the endpoint most exposed to
+abuse traffic.
+
+The JSON body accepts:
+
+- `target_type`: `user`, `post`, `comment` or `community`.
+- `target`: what is being reported, read according to `target_type`. Each resource
+  is addressed the way the rest of the API addresses it:
+
+  | `target_type` | `target` is | Format |
+  | --- | --- | --- |
+  | `user` | A username | 3–50 letters, digits or underscores |
+  | `community` | A community name | 1–50 letters, digits, underscores or hyphens |
+  | `post`, `comment` | An ID | 1–36 letters, digits, underscores or hyphens |
+
+  A target that does not match its type's format returns `400`.
 - `reason`: one of `spam`, `harassment`, `hate_speech`, `sexual_content`,
   `self_harm`, `impersonation`, or `other`.
 - `description`: optional plain text, trimmed and limited to 2,000 characters.
-- `context_type` and `context_id`: optional pair. The type is `post` or
-  `comment`; the identifier is 1–36 letters, digits, underscores, or hyphens.
-  The referenced content must exist and have been authored by the reported
-  account.
+- `context_type` and `context_id`: optional pair, **only for a `user` target**, as
+  supporting evidence. The type is `post` or `comment`; the identifier is 1–36
+  letters, digits, underscores, or hyphens. The referenced content must exist and
+  have been authored by the reported account. For any other target the target is
+  itself the evidence, so supplying context returns `400`, and so does supplying
+  only one of the pair.
 
-Unknown accounts or missing context return `404`. Reporting yourself or
-pointing to content by another account returns `400`. An active duplicate
-report returns `409`; after the earlier report is resolved or rejected,
-another report may be filed. A duplicate is an active report by the same
-reporter with the same target (`target_type`, `target_id`) and the same
-evidence (`context_type`, `context_id`). Reporting the same account again with
-different evidence, or none, is a new report. Keying on the target rather than
-on `reported_user_id` means reports about two posts by one author can never
-collide.
-No action is taken against the reported account by submitting a report.
-Reports against suspended or banned accounts are accepted.
+| Status | When |
+| --- | --- |
+| `400` | Invalid body, including an unknown property; a target that does not match its type; context on a non-user target; context by another account; reporting your own account, post or comment; a creator reporting their own community |
+| `404` | The target or the context does not exist |
+| `409` | You already have an active report about this target |
+
+**Removed and deleted targets remain reportable.** A post or comment removed by
+moderation, and a deleted or suspended community or anything in one, can all still
+be reported. The opposite instinct is strong, but a report is a request to review
+something the reporter saw, and refusing it because a moderator already acted would
+discard information about the same actor.
+
+**Rule acceptance is not required, and must not be.** A user has to be able to
+report the content that made them decline a community's rules, so this route never
+consults rule acceptance, for any target type. This is the most important exemption
+in the system. `ReportsService` does not even depend on the acceptance service, and
+the tests pin it.
+
+**Duplicates.** An active duplicate report returns `409`; after the earlier report is
+resolved or rejected, another report may be filed. A duplicate is an active report
+by the same reporter with the same target (`target_type`, `target_id`) and the same
+evidence (`context_type`, `context_id`). Only a `user` target has evidence, so
+reporting the same account again with different evidence is a new report, while a
+post, comment or community has one active report per reporter. Keying on the target
+rather than on `reported_user_id` means reports about two posts by one author can
+never collide. The check runs in a transaction that locks the reporter's row, so of
+two concurrent submissions exactly one succeeds.
+
+No action is taken against the reported account by submitting a report. Reports
+against suspended or banned accounts are accepted.
 
 Success returns `201` with only the report receipt:
 
 ```json
 {
   "id": "report-id",
+  "target_type": "user",
+  "target": "target_user",
   "reported_username": "target_user",
   "reason": "spam",
   "status": "open",
   "created_at": "2026-10-25T10:00:00.000Z"
 }
 ```
+
+`target` is echoed as submitted. `reported_username` is set only for a `user` target
+and `null` otherwise: naming a post's author could reveal the author of removed
+content, and a deleted author's placeholder username contains their ID.
 
 The response does not disclose the target's internal ID, email, report history,
 or moderation outcome. `reporter_id`, status, resolution fields, and all other
@@ -1940,9 +2021,7 @@ plain text and must be encoded by clients when rendered.
 
 Since migration `016_generalise_report_targets`, a report names one
 polymorphic target: `target_type` is `user`, `post`, `comment` or `community`,
-and `target_id` is that row's ID. `POST /reports` writes only `user` targets,
-with `target_id` equal to the reported account. Content and community
-submissions are separate work; the schema is ready for them.
+and `target_id` is that row's ID.
 
 One table with one target column was chosen over one table per target kind,
 which would make the admin queue `UNION` several near-identical tables to show
@@ -1953,8 +2032,7 @@ statistics by.
 **No foreign key on `target_id`.** It is polymorphic, like `votes.target_id`,
 `admin_actions.target_id` and `notifications.subject_id`. A report must outlive
 the content it names, so the moderation decision stays auditable. Readers must
-therefore not join the target to show a report, and must tolerate a target that
-no longer exists.
+therefore tolerate a target that no longer exists: left join it, never inner join.
 
 **`reported_user_id` is kept, and is now nullable.** It names the account the
 report concerns. Account filters (`reported_username`), the
@@ -1983,11 +2061,11 @@ needs no separate evidence pointer.
 `reported_user_id`. Because a content target stores its author in
 `reported_user_id`, the same constraint refuses reporting your own post or
 comment. For a community target `reported_user_id` is `NULL`, so the check
-passes, which is correct.
+passes, and the service itself refuses a creator reporting their own community.
 
 `target_type` defaults to `'user'` only so the column could be added `NOT
-NULL` to a populated table. Every writer sets it explicitly, and the default
-should be dropped once content and community submissions exist.
+NULL` to a populated table. Every writer sets it explicitly, so the default can
+now be dropped in a later migration.
 `idx_user_reports_target (target_type, target_id, status)` serves the
 duplicate check and per-target lookups.
 `idx_user_reports_target_type_created (target_type, created_at)` serves
@@ -2000,7 +2078,8 @@ misnomer is kept on purpose.
 
 Report creation has additional fixed-window limits of 20 per IP per hour and
 10 per authenticated account per hour, in addition to the generic write
-limits. Override them with positive-integer `API_REPORT_CREATE_IP_MAX`,
+limits. The endpoint can now be aimed at more kinds of target, which makes the
+per-account limit matter more: do not loosen it. Override them with positive-integer `API_REPORT_CREATE_IP_MAX`,
 `API_REPORT_CREATE_IP_WINDOW_SECONDS`, `API_REPORT_CREATE_ACCOUNT_MAX`, and
 `API_REPORT_CREATE_ACCOUNT_WINDOW_SECONDS`. Account counters use only the
 validated bearer-token user ID. Exceeding a limit returns `429` and

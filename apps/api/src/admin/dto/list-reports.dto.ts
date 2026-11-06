@@ -13,10 +13,12 @@ import {
 import {
   REPORT_REASONS,
   REPORT_STATUSES,
+  REPORT_TARGET_TYPES,
 } from '../../reports/report.constants';
 import type {
   ReportReason,
   ReportStatus,
+  ReportTargetType,
 } from '../../reports/report.constants';
 
 export class ListReportsDto {
@@ -28,6 +30,14 @@ export class ListReportsDto {
   @IsIn(REPORT_REASONS)
   reason?: ReportReason;
 
+  @IsOptional()
+  @IsIn(REPORT_TARGET_TYPES)
+  target_type?: ReportTargetType;
+
+  /**
+   * Matches user reports and reports of the account's posts and comments. Never
+   * matches a community report, which concerns no account.
+   */
   @IsOptional()
   @IsString()
   @Matches(/^[a-zA-Z0-9_]{3,50}$/)

@@ -19,12 +19,13 @@ describe('AdminReportsService', () => {
   let count = 0;
   let detailRow: Record<string, unknown> | undefined;
   let contextRow: Record<string, unknown> | undefined;
+  let targetContentRow: Record<string, unknown> | undefined;
   let resolutionRows: Array<Record<string, unknown>>;
   let transitionRow:
     | {
         id: string;
         reporter_id: string | null;
-        reported_user_id: string;
+        reported_user_id: string | null;
         status: 'open' | 'under_review' | 'resolved' | 'rejected';
       }
     | undefined;
@@ -42,6 +43,7 @@ describe('AdminReportsService', () => {
     count = 0;
     detailRow = undefined;
     contextRow = undefined;
+    targetContentRow = undefined;
     resolutionRows = [];
     transitionRow = {
       id: 'report-1',
@@ -78,6 +80,12 @@ describe('AdminReportsService', () => {
           sql.includes('context.content AS content')
         ) {
           return Promise.resolve([contextRow ? [contextRow] : [], []]);
+        }
+        if (/^SELECT (title|NULL AS title), content, removed_at/.test(sql)) {
+          return Promise.resolve([
+            targetContentRow ? [targetContentRow] : [],
+            [],
+          ]);
         }
         if (sql.includes('AS open_reports_against_user')) {
           return Promise.resolve([
@@ -208,19 +216,225 @@ describe('AdminReportsService', () => {
     expect(list.sql).toContain('created_at DESC, ur.id DESC');
   });
 
-  // Migration 016 added target_type/target_id. The queue still reads user
-  // reports through reported_user_id and never joins the polymorphic target,
-  // so a report whose target no longer exists still renders.
-  it('reads the queue through the reported account, never the report target', async () => {
-    await service.findAll({} as ListReportsDto);
-    const [list, countQuery] = calls;
+  describe('report targets', () => {
+    // A community report has no reported account, and target_id has no foreign
+    // key, so an inner join on either would lose a report.
+    it('reads the queue with left joins only, in both the page and its count', async () => {
+      await service.findAll({} as ListReportsDto);
+      const [list, countQuery] = calls;
 
-    for (const { sql } of [list, countQuery]) {
+      for (const { sql } of [list, countQuery]) {
+        expect(sql).not.toContain('INNER JOIN');
+        expect(sql).toContain(
+          'LEFT JOIN users reported_user ON reported_user.id = ur.reported_user_id',
+        );
+      }
+      for (const [alias, table, type] of [
+        ['target_user', 'users', 'user'],
+        ['target_post', 'posts', 'post'],
+        ['target_comment', 'comments', 'comment'],
+        ['target_community', 'communities', 'community'],
+      ]) {
+        expect(list.sql).toContain(`LEFT JOIN ${table} ${alias}`);
+        expect(list.sql).toContain(
+          `ON ur.target_type = '${type}' AND ${alias}.id = ur.target_id`,
+        );
+      }
+    });
+
+    it('applies target_type to the page and its count, and reports the filter', async () => {
+      const result = await service.findAll({
+        target_type: 'post',
+        reason: 'spam',
+      } as ListReportsDto);
+      const [list, countQuery] = calls;
+      for (const { sql } of [list, countQuery]) {
+        expect(sql).toContain('ur.target_type = ?');
+      }
+      expect(countQuery.values).toEqual(['spam', 'post']);
+      expect(list.values.slice(0, 2)).toEqual(['spam', 'post']);
+      expect(result.filters.target_type).toBe('post');
+    });
+
+    it('applies no target filter by default', async () => {
+      const result = await service.findAll({} as ListReportsDto);
+      expect(calls[1].sql).not.toContain('ur.target_type = ?');
+      expect(result.filters.target_type).toBeNull();
+    });
+
+    it('still reads reported_username through the reported account, for content reports too', async () => {
+      await service.findAll({
+        reported_username: 'content_author',
+        target_type: 'comment',
+      } as ListReportsDto);
+      expect(calls[0].sql).toContain('reported_user.username = ?');
+      expect(calls[1].values).toEqual(['content_author', 'comment']);
+    });
+
+    it.each([
+      ['user', 'someone', 'someone'],
+      ['post', 'p-1', 'A post title'],
+      ['comment', 'm-1', 'A comment excerpt'],
+      ['community', 'c-1', 'a-community'],
+      ['post', 'gone', null],
+    ])(
+      'passes through the label of a %s target (%s)',
+      async (target_type, target_id, target_label) => {
+        listRows = [
+          {
+            id: 'r1',
+            reporter_username: 'reporter',
+            reported_username: target_type === 'community' ? null : 'someone',
+            target_type,
+            target_id,
+            target_label,
+            reason: 'spam',
+            status: 'open',
+            resolution: null,
+            context_type: null,
+            context_id: null,
+            created_at: '2026-10-25T10:00:00Z',
+            reviewed_at: null,
+          },
+        ];
+        count = 1;
+        const { items } = await service.findAll({} as ListReportsDto);
+        expect(items[0]).toMatchObject({
+          target_type,
+          target_id,
+          target_label,
+        });
+      },
+    );
+
+    it('builds the label per kind, excerpting a comment', async () => {
+      await service.findAll({} as ListReportsDto);
+      const { sql } = calls[0];
+      expect(sql).toContain("WHEN 'user' THEN target_user.username");
+      expect(sql).toContain("WHEN 'post' THEN target_post.title");
       expect(sql).toContain(
-        'INNER JOIN users reported_user ON reported_user.id = ur.reported_user_id',
+        "WHEN 'comment' THEN LEFT(target_comment.content, 100)",
       );
-      expect(sql).not.toMatch(/target_(type|id|author_id)/);
-    }
+      expect(sql).toContain("WHEN 'community' THEN target_community.name");
+    });
+
+    const detail = (overrides: Record<string, unknown>) => ({
+      id: 'report-1',
+      reporter_username: 'reporter',
+      reported_user_id: 'author-id',
+      reported_username: 'author',
+      target_type: 'post',
+      target_id: 'p-1',
+      target_label: 'A title',
+      reason: 'spam',
+      status: 'open',
+      resolution: null,
+      context_type: null,
+      context_id: null,
+      created_at: '2026-10-25T10:00:00Z',
+      reviewed_at: null,
+      description: null,
+      resolution_note: null,
+      reviewed_by_username: null,
+      ...overrides,
+    });
+
+    it('returns a post target in full, and whether it was removed', async () => {
+      detailRow = detail({});
+      targetContentRow = {
+        title: 'A title',
+        content: 'y'.repeat(2000),
+        removed_at: '2026-10-26T00:00:00Z',
+      };
+      const result = await service.findOne('report-1');
+      expect(result.target_content).toEqual({
+        title: 'A title',
+        content: 'y'.repeat(2000),
+        removed: true,
+      });
+    });
+
+    it('returns a comment target with no title', async () => {
+      detailRow = detail({ target_type: 'comment', target_id: 'm-1' });
+      targetContentRow = { title: null, content: 'Body', removed_at: null };
+      const result = await service.findOne('report-1');
+      expect(result.target_content).toEqual({
+        title: null,
+        content: 'Body',
+        removed: false,
+      });
+      expect(
+        calls.some(({ sql }) => sql.includes('FROM comments WHERE id = ?')),
+      ).toBe(true);
+    });
+
+    it('returns a null label and no content for a missing target, without throwing', async () => {
+      detailRow = detail({ target_label: null });
+      const result = await service.findOne('report-1');
+      expect(result.target_label).toBeNull();
+      expect(result.target_content).toBeNull();
+    });
+
+    it.each(['user', 'community'])(
+      'does not look for content on a %s target',
+      async (target_type) => {
+        detailRow = detail({ target_type });
+        const result = await service.findOne('report-1');
+        expect(result.target_content).toBeNull();
+        expect(calls.some(({ sql }) => sql.includes('removed_at'))).toBe(false);
+      },
+    );
+
+    it('skips the account counts for a report with no account', async () => {
+      detailRow = detail({
+        target_type: 'community',
+        reported_user_id: null,
+        reported_username: null,
+      });
+      const result = await service.findOne('report-1');
+      expect(result).toMatchObject({
+        reported_username: null,
+        open_reports_against_user: 0,
+        total_reports_against_user: 0,
+        prior_resolutions_against_user: [],
+      });
+      expect(
+        calls.some(({ sql }) => sql.includes('reported_user_id = ?')),
+      ).toBe(false);
+    });
+
+    // Without this, the guard is NULL for a community report, the update
+    // matches no row, and the admin gets a false "changed concurrently".
+    it('keeps the transition guard true for a report with no account', async () => {
+      transitionRow = {
+        id: 'report-1',
+        reporter_id: 'reporter-id',
+        reported_user_id: null,
+        status: 'open',
+      };
+      detailRow = detail({
+        target_type: 'community',
+        reported_user_id: null,
+        reported_username: null,
+      });
+
+      await service.updateStatus(
+        'report-1',
+        { status: 'rejected' },
+        'admin-id',
+      );
+
+      const update = calls.find(({ sql }) =>
+        sql.startsWith('UPDATE user_reports'),
+      );
+      expect(update?.sql).toContain(
+        '(reported_user_id IS NULL OR reported_user_id <> ?)',
+      );
+      expect(notificationEntries).toHaveLength(1);
+      expect(notificationEntries[0].entry).toMatchObject({
+        metadata: { status: 'rejected' },
+      });
+    });
   });
 
   it('orders oldest first with an id tiebreaker and returns the filtered envelope', async () => {
@@ -263,6 +477,7 @@ describe('AdminReportsService', () => {
       filters: {
         status: null,
         reason: null,
+        target_type: null,
         reported_username: null,
         reporter_username: null,
         from: null,
