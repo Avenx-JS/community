@@ -7,6 +7,7 @@ import type {
   UserCommunityDto,
   UserCommunityRole,
 } from './user-activity.service';
+import type { BlockedUserDto } from './user-blocks.service';
 import type { OwnProfile, PlatformRole, UserProfile } from './users.service';
 
 export class UserProfileResponse implements UserProfile {
@@ -113,6 +114,34 @@ export class UserCommunityResponse implements UserCommunityDto {
       'creator, moderator, or contributor (a visible post or comment there).',
   })
   role!: UserCommunityRole;
+}
+
+export class BlockedUserResponse implements BlockedUserDto {
+  @ApiProperty({
+    description:
+      'The identifier POST and DELETE /users/me/blocked/:username take.',
+  })
+  username!: string;
+
+  @ApiProperty({ type: 'string', nullable: true, maxLength: 50 })
+  display_name!: string | null;
+
+  @ApiProperty({ format: 'date-time' })
+  blocked_at!: string;
+}
+
+export class BlockedUserListResponse implements Page<BlockedUserDto> {
+  @ApiProperty({ type: [BlockedUserResponse] })
+  items!: BlockedUserResponse[];
+
+  @ApiProperty({ type: 'integer' })
+  page!: number;
+
+  @ApiProperty({ type: 'integer' })
+  limit!: number;
+
+  @ApiProperty({ type: 'integer' })
+  total!: number;
 }
 
 export class UserCommunityListResponse implements Page<UserCommunityDto> {

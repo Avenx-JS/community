@@ -39,6 +39,10 @@ export const DELETE_PRIVATE_STATE_SQL = [
   'DELETE FROM notifications WHERE recipient_id = ?',
   // Bookmarks are private: no one else has a use for them.
   'DELETE FROM saved_posts WHERE user_id = ?',
+  // Blocks in both directions: a deleted account can no longer interact, and
+  // anonymising the row would not fire the foreign keys' cascades.
+  'DELETE FROM user_blocks WHERE blocker_id = ?',
+  'DELETE FROM user_blocks WHERE blocked_id = ?',
 ] as const;
 
 export const COMMUNITY_CREATOR_MESSAGE =

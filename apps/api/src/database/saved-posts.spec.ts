@@ -45,7 +45,7 @@ describe('migration 027 (saved posts)', () => {
       snapshot.indexOf('CREATE TABLE posts ('),
     );
     expect(snapshot).toContain(
-      "('026_add_post_pinning'), ('027_create_saved_posts');",
+      "('026_add_post_pinning'), ('027_create_saved_posts')",
     );
   });
 });

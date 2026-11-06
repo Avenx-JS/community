@@ -11,18 +11,24 @@ const migration = (version: string) =>
   read(`../../../../data/migrations/${version}.sql`);
 
 // Every CHECK constraint in a CREATE TABLE or ALTER TABLE that names a column
-// whose foreign key has a referential action: MySQL 8 refuses each one with
-// error 3823, so none may exist.
+// whose foreign key has a referential action that writes it: MySQL 8 refuses
+// each one with error 3823, so none may exist. ON DELETE CASCADE removes the
+// row without writing the column, and is accepted (user_blocks relies on it;
+// user-blocks.mysql.spec.ts applies it to a real server).
 function checksOnReferentialColumns(sql: string): string[] {
   const found: string[] = [];
   for (const [, table, body] of sql.matchAll(
     /(?:CREATE|ALTER) TABLE (\w+)([\s\S]*?)(?:\n\);|;\n)/g,
   )) {
     const columns = [
-      ...body.matchAll(
-        /FOREIGN KEY \((\w+)\) REFERENCES \w+\(\w+\) ON (?:DELETE|UPDATE) (?:SET NULL|CASCADE)/g,
-      ),
-    ].map((match) => match[1]);
+      ...body.matchAll(/FOREIGN KEY \((\w+)\) REFERENCES \w+\(\w+\)([^,\n]*)/g),
+    ]
+      .filter(([, , actions]) =>
+        /ON DELETE SET (?:NULL|DEFAULT)|ON UPDATE (?:SET (?:NULL|DEFAULT)|CASCADE)/.test(
+          actions,
+        ),
+      )
+      .map((match) => match[1]);
     for (const [, name, clause] of body.matchAll(
       /CONSTRAINT (\w+) CHECK \(([\s\S]*?)\)\s*(?:,|$)/g,
     )) {
@@ -37,6 +43,21 @@ function checksOnReferentialColumns(sql: string): string[] {
 }
 
 describe('check trigger rules', () => {
+  // The guard itself, against the actions a real MySQL 8.0 refuses and accepts.
+  it.each([
+    ['ON DELETE SET NULL', true],
+    ['ON UPDATE CASCADE', true],
+    ['ON UPDATE SET NULL', true],
+    ['ON DELETE CASCADE ON UPDATE CASCADE', true],
+    ['ON DELETE CASCADE', false],
+    ['ON DELETE RESTRICT', false],
+  ])('treats a CHECK next to %s as refused: %s', (action, refused) => {
+    const table = `CREATE TABLE t (\n  a VARCHAR(36),\n  b VARCHAR(36),\n  CONSTRAINT chk_t CHECK (a <> b),\n  FOREIGN KEY (a) REFERENCES users(id) ${action}\n);`;
+    expect(checksOnReferentialColumns(table)).toEqual(
+      refused ? ['t.chk_t'] : [],
+    );
+  });
+
   it('leaves no CHECK on a column with a foreign-key referential action', () => {
     expect(checksOnReferentialColumns(snapshot)).toEqual([]);
     for (const version of new Set(

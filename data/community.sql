@@ -255,6 +255,19 @@ CREATE TABLE saved_posts (
     FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
 );
 
+-- One user's private block of another (028_create_user_blocks).
+CREATE TABLE user_blocks (
+    blocker_id VARCHAR(36) NOT NULL,
+    blocked_id VARCHAR(36) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (blocker_id, blocked_id),
+    INDEX idx_user_blocks_blocker_created (blocker_id, created_at, blocked_id),
+    INDEX idx_user_blocks_blocked (blocked_id, blocker_id),
+    CONSTRAINT chk_user_blocks_not_self CHECK (blocker_id <> blocked_id),
+    FOREIGN KEY (blocker_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (blocked_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
 CREATE TABLE user_reports (
     id VARCHAR(36) PRIMARY KEY,
     reporter_id VARCHAR(36) NULL,
@@ -375,8 +388,8 @@ CREATE TABLE notifications (
     FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE
 );
 
--- CHECK-style rules on columns whose foreign key is ON DELETE SET NULL or
--- CASCADE. MySQL 8 forbids CHECK constraints on such columns (error 3823),
+-- CHECK-style rules on columns whose foreign key is ON DELETE SET NULL or ON
+-- UPDATE CASCADE. MySQL 8 forbids CHECK constraints on such columns (error 3823),
 -- so each rule is a BEFORE INSERT and a BEFORE UPDATE trigger that fails
 -- with the CHECK error (3819, ER_CHECK_CONSTRAINT_VIOLATED). Created in
 -- migration order, which is the order MySQL runs them in.
@@ -575,4 +588,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('024_add_community_subscriptions_community_index'),
     ('025_add_community_suspension'),
     ('026_add_post_pinning'),
-    ('027_create_saved_posts');
+    ('027_create_saved_posts'),
+    ('028_create_user_blocks');

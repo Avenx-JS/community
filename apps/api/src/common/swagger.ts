@@ -45,6 +45,7 @@ export function createOpenApiDocument(app: INestApplication): OpenAPIObject {
     .addTag('health', 'Service status.')
     .addTag('auth', 'Registration, login, token rotation, and logout.')
     .addTag('users', 'Public user profiles.')
+    .addTag('blocks', "The authenticated user's private block list.")
     .addTag('communities', 'Communities, subscriptions, and moderators.')
     .addTag('subscriptions', "The authenticated user's memberships.")
     .addTag('posts', 'Posts within communities.')

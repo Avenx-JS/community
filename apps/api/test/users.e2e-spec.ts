@@ -146,6 +146,11 @@ describe('User profile endpoints (e2e)', () => {
         { user_id: 'user-a', post_id: 'post-a' },
         { user_id: 'user-b', post_id: 'post-a' },
       ],
+      user_blocks: [
+        { blocker_id: 'user-a', blocked_id: 'user-b' },
+        { blocker_id: 'user-b', blocked_id: 'user-a' },
+        { blocker_id: 'user-b', blocked_id: 'user-suspended' },
+      ],
       posts: [
         {
           id: 'post-a',
@@ -809,6 +814,11 @@ describe('User profile endpoints (e2e)', () => {
       // Saves are private state; anonymising the row would not cascade them.
       expect(owned('saved_posts', 'user_id', 'user-a')).toEqual([]);
       expect(owned('saved_posts', 'user_id', 'user-b')).toHaveLength(1);
+      // Blocks go in both directions; anonymising would not cascade them
+      // either. A block between two other accounts survives.
+      expect(tables.user_blocks).toEqual([
+        { blocker_id: 'user-b', blocked_id: 'user-suspended' },
+      ]);
       // Other accounts' rows, including a notification A caused, survive.
       expect(
         owned('community_subscriptions', 'user_id', 'user-b'),

@@ -1,7 +1,8 @@
 // The CHECK-style rules that are enforced by triggers instead of CHECK
 // constraints. MySQL 8 refuses a CHECK constraint that names a column whose
-// foreign key has a referential action (ON DELETE SET NULL or CASCADE, error
-// 3823), and every rule here names such a column. Each rule is a BEFORE
+// foreign key has a referential action that writes it (ON DELETE SET NULL, or
+// ON UPDATE CASCADE or SET NULL, error 3823; ON DELETE CASCADE is accepted), and
+// every rule here names such a column. Each rule is a BEFORE
 // INSERT and a BEFORE UPDATE trigger that raises the CHECK error itself
 // (3819, ER_CHECK_CONSTRAINT_VIOLATED, with MySQL's own message), so callers
 // see exactly what a CHECK constraint would produce.

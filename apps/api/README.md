@@ -67,8 +67,10 @@ the command line or migration files.
 #### Rules enforced by triggers
 
 MySQL 8 refuses a `CHECK` constraint that names a column whose foreign key
-has a referential action (`ON DELETE SET NULL` or `CASCADE`; error 3823).
-The "actor only with a timestamp" rules on the `_by` columns, and the
+has a referential action that writes it (`ON DELETE SET NULL`, or `ON UPDATE
+CASCADE` or `SET NULL`; error 3823). `ON DELETE CASCADE` removes the row without
+writing the column and is accepted, so `chk_user_blocks_not_self` on
+`user_blocks` is an ordinary `CHECK`. The "actor only with a timestamp" rules on the `_by` columns, and the
 self-report rule on `user_reports`, name exactly such columns, so each is a
 pair of `BEFORE INSERT` and `BEFORE UPDATE` triggers instead of a `CHECK`:
 
@@ -1535,10 +1537,10 @@ whole operation back and the account stays fully intact):
    is reserved by RFC 2606, cannot be delivered to, and fails email validation.
    No one can register a placeholder in advance and block a deletion.
 5. The account's private state is deleted: its `community_subscriptions`,
-   `community_notification_preferences`, the `notifications` it received, and
-   its `saved_posts`. The account row is anonymised, not deleted, so the
-   `ON DELETE CASCADE` on `saved_posts.user_id` would never fire: the
-   deletion removes them explicitly.
+   `community_notification_preferences`, the `notifications` it received, its
+   `saved_posts`, and its `user_blocks` in both directions. The account row is
+   anonymised, not deleted, so the `ON DELETE CASCADE` on those foreign keys
+   would never fire: the deletion removes them explicitly.
 6. Every session and refresh token is revoked.
 
 **Kept:** posts, comments, votes, `community_rule_acceptances`,
@@ -4281,6 +4283,128 @@ caller-dependent; caches must vary on the `Authorization` header.
 
 **Rate limiting.** The global buckets apply. Saving is a cheap, private,
 self-scoped write, so there is no dedicated bucket.
+
+## Blocking users
+
+A user can record that they do not want to interact with another account. It
+is the only self-service remedy: reporting asks an administrator to agree that
+a platform-level sanction is warranted, which is the wrong threshold for "I do
+not want to interact with this person".
+
+**Nothing is enforced yet.** These routes manage the relationship and nothing
+else, so the feature has no observable effect until the enforcement work lands:
+a blocked user can still read, comment, vote and receive notifications exactly
+as before, and so can the blocker. What a block actually prevents is a separate
+decision, because it touches content reads, comment creation and notification
+generation.
+
+| Route | Success | Notes |
+| --- | --- | --- |
+| `GET /users/me/blocked` | `200`, `{ "items", "page", "limit", "total" }` | The caller's blocks |
+| `POST /users/me/blocked/:username` | `204` | Blocks the account |
+| `DELETE /users/me/blocked/:username` | `204` | Removes the block |
+
+All three require a bearer token and take no body. The blocker is always the
+token's user: no request field can set it, so one account can never read or
+change another's blocks. As with other writes and saved posts, a suspended or
+banned account gets `403`.
+
+**Addressed by username.** Every other user-addressed route and body field uses
+a username (`GET /users/:username`, `ManageModeratorDto`, `CreateReportDto`),
+and ids are internal. The listing returns usernames, so the identifier `GET`
+returns is exactly the one `POST` and `DELETE` accept, with no extra lookup.
+
+**The row is directional.** `user_blocks` (migration `028_create_user_blocks`)
+holds `blocker_id` and `blocked_id`, with the composite primary key
+`(blocker_id, blocked_id)`: one row per pair. Whether a block's effects are
+symmetric is the enforcement work's decision. A directional row keeps that open;
+a symmetric table could not say who initiated it. There is no reason column: a
+block needs no justification, and a reason field would imply someone reads it.
+`chk_user_blocks_not_self` refuses a self-block in the database as well as in
+the service. `idx_user_blocks_blocked (blocked_id, blocker_id)` serves "who has
+blocked this user", which the primary key cannot, so enforcement needs no
+migration of its own (`user-blocks.mysql.spec.ts` proves the lookup uses it).
+
+| Status | `GET` | `POST` | `DELETE` |
+| --- | --- | --- | --- |
+| `400` | Out-of-range or unknown query property | Malformed username, or your own account (`You cannot block yourself`) | Malformed username |
+| `401` | No token | No token | No token |
+| `404` | | Unknown or deleted username | Unknown or deleted username |
+| `409` | | At `USER_BLOCKS_MAX` | |
+
+**Both writes are idempotent.** Blocking is
+`INSERT … ON DUPLICATE KEY UPDATE created_at = created_at`: a repeat leaves one
+row and keeps its `created_at`, the listing's order key. Removing a block that
+does not exist returns `204`, like `DELETE /communities/:name/subscribe`.
+
+**Cap.** An account may block at most `USER_BLOCKS_MAX` accounts (default
+`1000`, read once at startup through `readPositiveInteger`). Beyond it, `POST`
+returns `409` and writes nothing; a repeat block adds no row, so it still returns
+`204` at the cap. Without a cap the table is an unbounded per-user write surface,
+and enforcement's queries scale with the list. The count is a locking read
+(`FOR SHARE`) in the same transaction as the insert, after locking the blocker's
+`users` row `FOR UPDATE`, so concurrent blocks at the cap are serialised and
+exactly one succeeds.
+
+**Locks are taken in id order.** The transaction also takes a share lock on the
+blocked account's row, so a concurrent account deletion cannot leave a new row
+behind. The insert's foreign-key checks share-lock both `users` rows, so if each
+request locked its own blocker first, A blocking B while B blocks A would
+deadlock; ordering by id prevents it.
+
+### Listing blocks
+
+`GET /users/me/blocked` takes `page` (1-10,000, default `1`) and `limit` (1-100,
+default `20`); out-of-range values and unknown query properties, a `user_id`
+included, are `400`. An account without blocks gets `200` with `items: []` and
+`total: 0`.
+
+```json
+{ "username": "someone", "display_name": "Someone", "blocked_at": "2026-11-01T08:00:00.000Z" }
+```
+
+It orders `user_blocks.created_at DESC, blocked_id DESC` (`blocked_id` is the
+tiebreaker), served by
+`idx_user_blocks_blocker_created (blocker_id, created_at, blocked_id)` in index
+order, without a filesort (`user-blocks.mysql.spec.ts` asserts the plan).
+
+**Deleted accounts are omitted.** A deleted account can no longer interact, so
+there is nothing to block, and listing it would mean showing a placeholder
+username that no route accepts. [Deleting your own
+account](#deleting-your-own-account) removes the rows in both directions,
+explicitly, because the row is anonymised and the foreign keys' `ON DELETE
+CASCADE` would never fire. The listing and its `total` also filter
+`deleted_at IS NULL` (`BLOCKED_USERS_FROM`), so a placeholder can never appear.
+
+### Privacy
+
+**A block is invisible to the blocked user. This is a hard rule, and the
+enforcement work must honour it too**, which constrains how it can make content
+disappear. Telling someone they have been blocked is itself an interaction, and
+the one most likely to escalate. There is no notification, no field on any
+profile, and no endpoint that reveals whether an account has blocked the caller.
+
+The block list is readable only by its owner. There is no administrative view of
+who has blocked whom; if moderation ever needs one, that is a separate decision.
+No audit entry is written: `admin_actions` is platform-admin-scoped, and this is
+a private user action.
+
+### Who may be blocked
+
+Anyone but yourself, including moderators, community creators and platform
+administrators. The row is recorded.
+
+**For the enforcement work: blocking must not affect moderation or
+administrative powers**, or a user could block their way out of moderation. A
+blocked moderator must still see the blocker's content and act on it, and the
+same goes for administrators. Blocking does not affect community membership, rule
+acceptance, or anything else that exists today, because nothing is enforced yet.
+
+**Rate limiting.** The global write buckets apply (60 per IP and 120 per account
+per minute), with no dedicated bucket: blocking is cheap and self-scoped. `POST`
+returning `404` for an unknown username does reveal which usernames exist, but
+`GET /users/:username` already reveals that publicly, so it adds no new
+disclosure.
 
 ## Notifications
 
