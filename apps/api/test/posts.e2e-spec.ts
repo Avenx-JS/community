@@ -24,6 +24,7 @@ import {
 } from './fakes/community-rules-store';
 import { CommunityRuleAcceptanceService } from '../src/communities/community-rule-acceptance.service';
 import { answerVoteScores, type FakeVote } from './fakes/vote-scores';
+import { answerSavedFlags, type FakeSave } from './fakes/saved-posts';
 import { REMOVED_CONTENT_REVIEWER_SQL } from '../src/common/removed-content';
 
 interface TestNotification {
@@ -67,6 +68,7 @@ describe('Post endpoints (e2e)', () => {
   let app: INestApplication<App>;
   let posts: TestPost[];
   let votes: FakeVote[];
+  let saves: FakeSave[];
   let queryCalls: Array<{ sql: string; values: unknown[] }>;
   let notifications: TestNotification[];
   let failNotificationWrite: boolean;
@@ -139,6 +141,7 @@ describe('Post endpoints (e2e)', () => {
       },
     ];
     votes = [];
+    saves = [];
     queryCalls = [];
     notifications = [];
     failNotificationWrite = false;
@@ -177,6 +180,10 @@ describe('Post endpoints (e2e)', () => {
     const pool = {
       execute: async (sql: string, values: unknown[]) => {
         queryCalls.push({ sql, values });
+        const savedAnswer = answerSavedFlags(sql, values, saves);
+        if (savedAnswer) {
+          return savedAnswer;
+        }
         const scoreAnswer = answerVoteScores(sql, values, votes);
         if (scoreAnswer) {
           return scoreAnswer;
@@ -729,6 +736,7 @@ describe('Post endpoints (e2e)', () => {
           'locked_at',
           'locked_by',
           'score',
+          'saved',
           'title',
           'type',
         ].sort(),
@@ -1249,6 +1257,7 @@ describe('Post endpoints (e2e)', () => {
           locked_by: null,
           pinned_by: userId,
           score: 0,
+          saved: false,
         });
         expect(JSON.stringify(response.body)).not.toMatch(
           /email|password_hash/,
@@ -1568,6 +1577,7 @@ describe('Post endpoints (e2e)', () => {
         locked_at: null,
         locked_by: null,
         score: 0,
+        saved: false,
       });
       expect(stored('post-1')).toMatchObject({
         title: 'Corrected',

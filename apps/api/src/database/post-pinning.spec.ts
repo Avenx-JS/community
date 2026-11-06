@@ -59,7 +59,7 @@ describe('migration 026 (post pinning)', () => {
       'CREATE INDEX idx_posts_community_pinned ON posts (community_id, pinned_at);',
     );
     expect(snapshot).toContain(
-      "('025_add_community_suspension'), ('026_add_post_pinning');",
+      "('025_add_community_suspension'), ('026_add_post_pinning')",
     );
   });
 

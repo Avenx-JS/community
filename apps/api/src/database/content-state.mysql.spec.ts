@@ -221,7 +221,8 @@ integration('post and comment content state (MySQL)', () => {
       `SELECT COUNT(*) AS total FROM posts${where}`,
     );
     return {
-      items: items.map(toPostDto),
+      // No votes and an anonymous reader: score 0, saved false.
+      items: items.map((item) => toPostDto(item, 0, false)),
       page: 1,
       limit: 100,
       total: counts[0].total,

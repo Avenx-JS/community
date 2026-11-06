@@ -40,6 +40,10 @@ import {
   UserPostListResponse,
   UserProfileResponse,
 } from './users.responses';
+import {
+  OptionalAuthGuard,
+  type OptionallyAuthenticatedRequest,
+} from '../auth/optional-auth.guard';
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
 
 @ApiTags('users')
@@ -139,6 +143,7 @@ export class UsersController {
   }
 
   @Get(':username/posts')
+  @UseGuards(OptionalAuthGuard)
   @ApiOperation({
     summary: "List a user's posts",
     description:
@@ -155,8 +160,9 @@ export class UsersController {
   listUserPosts(
     @Param('username', new SafeRouteParamPipe('username')) username: string,
     @Query() query: ListUserActivityDto,
+    @Req() request?: OptionallyAuthenticatedRequest,
   ) {
-    return this.userActivity.listPosts(username, query);
+    return this.userActivity.listPosts(username, query, request?.user?.id);
   }
 
   @Get(':username/comments')

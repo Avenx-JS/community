@@ -35,6 +35,7 @@ import {
 import { UpdatePostDto } from './dto/update-post.dto';
 import { ListPostsDto } from './dto/list-posts.dto';
 import { loadVoteScores } from '../votes/vote-scores';
+import { loadSavedFlags } from './saved-flags';
 import {
   canReviewRemovedContent,
   toRemovalState,
@@ -121,6 +122,8 @@ export interface PostDto {
   locked_by: string | null;
   // Sum of all vote values; 0 without votes.
   score: number;
+  // Caller-dependent: whether the viewer saved the post; false when anonymous.
+  saved: boolean;
 }
 
 // A post as a reviewer sees it: removal state only on removed posts.
@@ -160,7 +163,7 @@ export class PostsService {
     private readonly moderationLog: CommunityModerationLogService,
   ) {}
 
-  async findAll(query: ListPostsDto): Promise<PostListDto> {
+  async findAll(query: ListPostsDto, viewerId?: string): Promise<PostListDto> {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
     const offset = (page - 1) * limit;
@@ -190,7 +193,7 @@ export class PostsService {
     >(`SELECT COUNT(*) AS total FROM posts${where}`, values);
 
     return {
-      items: await toPostDtos(this.pool, posts),
+      items: await toPostDtos(this.pool, posts, viewerId),
       page,
       limit,
       total: countRows[0].total,
@@ -267,7 +270,7 @@ export class PostsService {
 
       await connection.commit();
       // A new post has no votes yet.
-      return toPostDto(post, 0);
+      return toPostDto(post, 0, false);
     } catch (error) {
       if (transactionStarted) {
         await connection.rollback();
@@ -292,7 +295,7 @@ export class PostsService {
     if (!post) {
       throw new NotFoundException('Post not found');
     }
-    const [dto] = await toPostDtos(this.pool, [post]);
+    const [dto] = await toPostDtos(this.pool, [post], viewerId);
     if (!post.removed_at) {
       return dto;
     }
@@ -347,7 +350,7 @@ export class PostsService {
         targetId: id,
         ...(reason === null ? {} : { metadata: { reason } }),
       });
-      return this.readReviewable(connection, id);
+      return this.readReviewable(connection, id, actorId);
     });
   }
 
@@ -375,7 +378,7 @@ export class PostsService {
         `SELECT ${POST_COLUMNS} FROM posts WHERE id = ? LIMIT 1`,
         [id],
       );
-      const [dto] = await toPostDtos(connection, [rows[0]]);
+      const [dto] = await toPostDtos(connection, [rows[0]], actorId);
       return dto;
     });
   }
@@ -383,12 +386,13 @@ export class PostsService {
   private async readReviewable(
     connection: PoolConnection,
     id: string,
+    viewerId: string,
   ): Promise<ReviewablePostDto> {
     const [rows] = await connection.execute<(PostRow & RemovalStateRow)[]>(
       `SELECT ${POST_COLUMNS}, ${REMOVAL_COLUMNS} FROM posts WHERE id = ? LIMIT 1`,
       [id],
     );
-    const [dto] = await toPostDtos(connection, [rows[0]]);
+    const [dto] = await toPostDtos(connection, [rows[0]], viewerId);
     return rows[0].removed_at ? { ...dto, ...toRemovalState(rows[0]) } : dto;
   }
 
@@ -570,7 +574,7 @@ export class PostsService {
       if (!rows[0]) {
         throw new Error('Edited post could not be retrieved');
       }
-      const [dto] = await toPostDtos(connection, [rows[0]]);
+      const [dto] = await toPostDtos(connection, [rows[0]], actorId);
 
       await connection.commit();
       return dto;
@@ -647,7 +651,7 @@ export class PostsService {
       if (!pinned) {
         throw new Error('Pinned post could not be retrieved');
       }
-      const [dto] = await toPostDtos(connection, [pinned]);
+      const [dto] = await toPostDtos(connection, [pinned], actorId);
 
       await connection.commit();
       return dto;
@@ -737,7 +741,7 @@ export class PostsService {
       if (!posts[0]) {
         throw new Error('Locked post could not be retrieved');
       }
-      const [dto] = await toPostDtos(connection, [posts[0]]);
+      const [dto] = await toPostDtos(connection, [posts[0]], actorId);
 
       await connection.commit();
       return dto;
@@ -849,21 +853,37 @@ export class PostsService {
 
 // Rows of one page rendered with their scores: one grouped vote aggregate
 // over the page's ids (loadVoteScores), never a query per row.
+// saved is caller-dependent: true only for the viewer's own saves, false
+// for an anonymous viewer. knownSaved skips the lookup when the caller
+// already knows (the saved-posts listing, whose posts are all saved).
 export async function toPostDtos(
   executor: Pick<Pool | PoolConnection, 'execute'>,
   posts: PostRow[],
+  viewerId?: string,
+  knownSaved?: boolean,
 ): Promise<PostDto[]> {
-  const scores = await loadVoteScores(
-    executor,
-    'post',
-    posts.map((post) => post.id),
+  const ids = posts.map((post) => post.id);
+  const scores = await loadVoteScores(executor, 'post', ids);
+  const saved =
+    knownSaved === undefined
+      ? await loadSavedFlags(executor, viewerId, ids)
+      : null;
+  return posts.map((post) =>
+    toPostDto(
+      post,
+      scores.get(post.id) ?? 0,
+      saved ? saved.has(post.id) : (knownSaved ?? false),
+    ),
   );
-  return posts.map((post) => toPostDto(post, scores.get(post.id) ?? 0));
 }
 
 // The one post DTO: PostsService and the author feed (GET
 // /users/:username/posts) both render rows selected with POST_COLUMNS.
-export function toPostDto(post: PostRow, score: number): PostDto {
+export function toPostDto(
+  post: PostRow,
+  score: number,
+  saved: boolean,
+): PostDto {
   return {
     id: post.id,
     title: post.title,
@@ -878,5 +898,6 @@ export function toPostDto(post: PostRow, score: number): PostDto {
     locked_at: post.locked_at ? new Date(post.locked_at).toISOString() : null,
     locked_by: post.locked_by ?? null,
     score,
+    saved,
   };
 }

@@ -135,6 +135,7 @@ describe('UserActivityService', () => {
           locked_at: null,
           locked_by: null,
           score: 0,
+          saved: false,
         },
       ]);
     });

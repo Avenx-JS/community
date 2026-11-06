@@ -10,6 +10,7 @@ import { MYSQL_POOL } from '../src/auth/auth.service';
 import { ApiRateLimitInterceptor } from '../src/common/api-rate-limit.interceptor';
 import { LISTED_COMMUNITY_ID_SQL } from '../src/communities/communities.service';
 import { answerVoteScores } from './fakes/vote-scores';
+import { answerSavedFlags } from './fakes/saved-posts';
 
 interface TestCommunity {
   id: string;
@@ -104,6 +105,10 @@ describe('GET /communities/:name/posts (e2e)', () => {
       );
     const execute = (sql: string, values: unknown[]) => {
       queryCalls.push({ sql, values });
+      const savedAnswer = answerSavedFlags(sql, values);
+      if (savedAnswer) {
+        return Promise.resolve(savedAnswer);
+      }
       const scoreAnswer = answerVoteScores(sql, values);
       if (scoreAnswer) {
         return Promise.resolve(scoreAnswer);
@@ -196,6 +201,7 @@ describe('GET /communities/:name/posts (e2e)', () => {
         'locked_at',
         'locked_by',
         'score',
+        'saved',
         'title',
         'type',
       ].sort(),

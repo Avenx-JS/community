@@ -8,6 +8,8 @@ import { VotesModule } from '../votes/votes.module';
 import { PostsService } from './posts.service';
 import { CommunityPostsController } from './community-posts.controller';
 import { PostsController } from './posts.controller';
+import { SavedPostsController } from './saved-posts.controller';
+import { SavedPostsService } from './saved-posts.service';
 
 @Module({
   imports: [
@@ -18,7 +20,11 @@ import { PostsController } from './posts.controller';
     NotificationsModule,
     VotesModule,
   ],
-  providers: [PostsService],
-  controllers: [PostsController, CommunityPostsController],
+  providers: [PostsService, SavedPostsService],
+  controllers: [
+    PostsController,
+    CommunityPostsController,
+    SavedPostsController,
+  ],
 })
 export class PostsModule {}

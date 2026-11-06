@@ -1,5 +1,10 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import type { PostDto, PostListDto } from './posts.service';
+import type { SavedPostDto, SavedPostListDto } from './saved-posts.service';
+import {
+  SAVED_POST_SORTS,
+  type SavedPostSort,
+} from './dto/list-saved-posts.dto';
 
 export class PostResponse implements PostDto {
   @ApiProperty()
@@ -80,6 +85,14 @@ export class PostResponse implements PostDto {
   })
   score!: number;
 
+  @ApiProperty({
+    description:
+      'Caller-dependent: true when the authenticated caller has saved this ' +
+      'post (POST /posts/{id}/save), false otherwise and always false for an ' +
+      'anonymous caller. Saves are private; no response carries a save count.',
+  })
+  saved!: boolean;
+
   @ApiPropertyOptional({
     enum: [true],
     description:
@@ -127,4 +140,42 @@ export class PostListResponse implements PostListDto {
 
   @ApiProperty({ enum: ['new'] })
   sort!: 'new';
+}
+
+// An item of GET /users/me/saved-posts: the one post shape, reused, with
+// the save timestamp beside it (as GET /subscriptions pairs a community with
+// subscribed_at).
+export class SavedPostResponse implements SavedPostDto {
+  @ApiProperty({
+    type: PostResponse,
+    description: 'saved is always true here.',
+  })
+  post!: PostResponse;
+
+  @ApiProperty({
+    format: 'date-time',
+    description: 'When the caller saved the post; the listing order key.',
+  })
+  saved_at!: string;
+}
+
+export class SavedPostListResponse implements SavedPostListDto {
+  @ApiProperty({ type: [SavedPostResponse] })
+  items!: SavedPostResponse[];
+
+  @ApiProperty({ type: 'integer' })
+  page!: number;
+
+  @ApiProperty({ type: 'integer' })
+  limit!: number;
+
+  @ApiProperty({
+    type: 'integer',
+    description:
+      'Saved posts that are currently listed: the same filters as items.',
+  })
+  total!: number;
+
+  @ApiProperty({ enum: SAVED_POST_SORTS })
+  sort!: SavedPostSort;
 }

@@ -37,6 +37,8 @@ export const DELETE_PRIVATE_STATE_SQL = [
   'DELETE FROM community_subscriptions WHERE user_id = ?',
   'DELETE FROM community_notification_preferences WHERE user_id = ?',
   'DELETE FROM notifications WHERE recipient_id = ?',
+  // Bookmarks are private: no one else has a use for them.
+  'DELETE FROM saved_posts WHERE user_id = ?',
 ] as const;
 
 export const COMMUNITY_CREATOR_MESSAGE =

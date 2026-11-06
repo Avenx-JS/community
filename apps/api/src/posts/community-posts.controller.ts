@@ -1,6 +1,10 @@
-import { Controller, Get, Param, Query } from '@nestjs/common';
+import { Controller, Get, Param, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ApiErrorResponses, ApiRouteParam } from '../common/openapi';
+import {
+  OptionalAuthGuard,
+  type OptionallyAuthenticatedRequest,
+} from '../auth/optional-auth.guard';
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
 import { CommunitiesService } from '../communities/communities.service';
 import { ListCommunityPostsDto } from './dto/list-community-posts.dto';
@@ -22,6 +26,7 @@ export class CommunityPostsController {
   // second copy of the query, so this route and GET /posts?community_id=
   // return identical results, pins first included.
   @Get()
+  @UseGuards(OptionalAuthGuard)
   @ApiOperation({
     summary: "List a community's posts",
     description:
@@ -38,8 +43,12 @@ export class CommunityPostsController {
   async findAll(
     @Param('name', new SafeRouteParamPipe('communityName')) name: string,
     @Query() query: ListCommunityPostsDto,
+    @Req() request?: OptionallyAuthenticatedRequest,
   ) {
     const communityId = await this.communities.resolveListedId(name);
-    return this.posts.findAll({ ...query, community_id: communityId });
+    return this.posts.findAll(
+      { ...query, community_id: communityId },
+      request?.user?.id,
+    );
   }
 }

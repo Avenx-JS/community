@@ -25,6 +25,7 @@ import {
   userPostsSql,
 } from '../src/users/user-activity.service';
 import { answerVoteScores } from './fakes/vote-scores';
+import { answerSavedFlags } from './fakes/saved-posts';
 
 type UserFixture = Record<string, string | Date | null>;
 type Row = Record<string, unknown>;
@@ -141,6 +142,10 @@ describe('User profile endpoints (e2e)', () => {
         { id: 'n-a', recipient_id: 'user-a', actor_id: 'user-b' },
         { id: 'n-b', recipient_id: 'user-b', actor_id: 'user-a' },
       ],
+      saved_posts: [
+        { user_id: 'user-a', post_id: 'post-a' },
+        { user_id: 'user-b', post_id: 'post-a' },
+      ],
       posts: [
         {
           id: 'post-a',
@@ -186,6 +191,10 @@ describe('User profile endpoints (e2e)', () => {
     // tables account deletion and the content listings touch.
     const execute = (sql: string, values: unknown[]) => {
       queryCalls.push({ sql, values });
+      const savedAnswer = answerSavedFlags(sql, values);
+      if (savedAnswer) {
+        return Promise.resolve(savedAnswer);
+      }
       const scoreAnswer = answerVoteScores(sql, values);
       if (scoreAnswer) {
         return Promise.resolve(scoreAnswer);
@@ -797,6 +806,9 @@ describe('User profile endpoints (e2e)', () => {
         owned('community_notification_preferences', 'user_id', 'user-a'),
       ).toEqual([]);
       expect(owned('notifications', 'recipient_id', 'user-a')).toEqual([]);
+      // Saves are private state; anonymising the row would not cascade them.
+      expect(owned('saved_posts', 'user_id', 'user-a')).toEqual([]);
+      expect(owned('saved_posts', 'user_id', 'user-b')).toHaveLength(1);
       // Other accounts' rows, including a notification A caused, survive.
       expect(
         owned('community_subscriptions', 'user_id', 'user-b'),
@@ -1054,6 +1066,7 @@ describe('User profile endpoints (e2e)', () => {
           'locked_at',
           'locked_by',
           'score',
+          'saved',
           'title',
           'type',
         ].sort(),

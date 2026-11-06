@@ -159,6 +159,7 @@ export class UserActivityService {
   async listPosts(
     username: string,
     query: ListUserActivityDto,
+    viewerId?: string,
   ): Promise<Page<PostDto>> {
     const userId = await this.resolve(username);
     const { page, limit, offset } = paging(query);
@@ -170,7 +171,7 @@ export class UserActivityService {
     ]);
     const total = await this.count(USER_POSTS_COUNT_SQL, [userId]);
     return {
-      items: await toPostDtos(this.pool, rows),
+      items: await toPostDtos(this.pool, rows, viewerId),
       page,
       limit,
       total,

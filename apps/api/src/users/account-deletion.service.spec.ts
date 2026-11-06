@@ -156,6 +156,7 @@ describe('AccountDeletionService', () => {
       'DELETE FROM community_subscriptions WHERE user_id = ?',
       'DELETE FROM community_notification_preferences WHERE user_id = ?',
       'DELETE FROM notifications WHERE recipient_id = ?',
+      'DELETE FROM saved_posts WHERE user_id = ?',
     ]);
     const statements = [
       LOCK_ACCOUNT_SQL,

@@ -65,17 +65,22 @@ export class PostsController {
   ) {}
 
   @Get()
+  @UseGuards(OptionalAuthGuard)
   @ApiOperation({
     summary: 'List posts',
     description:
       'Newest first, then by ID descending. With community_id, that ' +
       "community's pinned posts come first, most recently pinned first; the " +
-      'unfiltered listing does not float pinned posts.',
+      'unfiltered listing does not float pinned posts. With an optional ' +
+      'bearer token, each post\u2019s saved flag reflects the caller.',
   })
   @ApiOkResponse({ type: PostListResponse })
   @ApiErrorResponses({ 400: 'Invalid query parameters.' })
-  findAll(@Query() query: ListPostsDto) {
-    return this.postsService.findAll(query);
+  findAll(
+    @Query() query: ListPostsDto,
+    @Req() request?: OptionallyAuthenticatedRequest,
+  ) {
+    return this.postsService.findAll(query, request?.user?.id);
   }
 
   @Post()
@@ -112,9 +117,9 @@ export class PostsController {
   })
   findOne(
     @Param('id', new SafeRouteParamPipe('id')) id: string,
-    @Req() request: OptionallyAuthenticatedRequest,
+    @Req() request?: OptionallyAuthenticatedRequest,
   ) {
-    return this.postsService.findOne(id, request.user?.id);
+    return this.postsService.findOne(id, request?.user?.id);
   }
 
   @Patch(':id')
@@ -427,9 +432,9 @@ export class PostsController {
   })
   getComments(
     @Param('postId', new SafeRouteParamPipe('id')) postId: string,
-    @Req() request: OptionallyAuthenticatedRequest,
+    @Req() request?: OptionallyAuthenticatedRequest,
   ) {
-    return this.commentsService.findThread(postId, request.user?.id);
+    return this.commentsService.findThread(postId, request?.user?.id);
   }
 
   @Get(':postId/comments/top-level')

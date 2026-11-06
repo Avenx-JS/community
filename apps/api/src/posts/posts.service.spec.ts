@@ -250,6 +250,9 @@ describe('PostsService.create notifications', () => {
             ? Promise.reject(new Error('fan-out failed'))
             : Promise.resolve([{ affectedRows: recipientCount }, []]);
         }
+        if (sql.startsWith('SELECT post_id FROM saved_posts')) {
+          return Promise.resolve([[], []]);
+        }
         return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
       },
     };
@@ -280,6 +283,7 @@ describe('PostsService.create notifications', () => {
       locked_at: null,
       locked_by: null,
       score: 0,
+      saved: false,
     });
     expect(queries[1].values[0]).toBe(postId);
     const count = queries.find((query) =>
@@ -425,6 +429,9 @@ describe('PostsService.remove', () => {
         }
         if (sql.startsWith('DELETE FROM posts')) {
           return Promise.resolve([{ affectedRows: 1 }, []]);
+        }
+        if (sql.startsWith('SELECT post_id FROM saved_posts')) {
+          return Promise.resolve([[], []]);
         }
         return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
       },
@@ -805,6 +812,9 @@ function createPinStore() {
         ];
       }
       if (sql.startsWith('SELECT target_id, SUM(value) AS score')) {
+        return [[], []];
+      }
+      if (sql.startsWith('SELECT post_id FROM saved_posts')) {
         return [[], []];
       }
       throw new Error(`Unexpected SQL: ${sql}`);
@@ -1372,6 +1382,9 @@ describe('PostsService.update', () => {
         if (sql.startsWith('SELECT target_id, SUM(value) AS score')) {
           return Promise.resolve([[{ target_id: values[1], score: 4 }], []]);
         }
+        if (sql.startsWith('SELECT post_id FROM saved_posts')) {
+          return Promise.resolve([[], []]);
+        }
         return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
       },
     };
@@ -1679,6 +1692,9 @@ describe('PostsService.lock and unlock', () => {
         if (sql.startsWith('SELECT target_id, SUM(value) AS score')) {
           return Promise.resolve([[], []]);
         }
+        if (sql.startsWith('SELECT post_id FROM saved_posts')) {
+          return Promise.resolve([[], []]);
+        }
         return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
       },
     };
@@ -1933,6 +1949,9 @@ describe('PostsService moderative removal', () => {
         [{ can_review: canModerate(creatorOrMod) || isAdmin(admin) ? 1 : 0 }],
         [],
       ];
+    }
+    if (sql.startsWith('SELECT post_id FROM saved_posts')) {
+      return [[], []];
     }
     throw new Error(`Unexpected SQL: ${sql}`);
   };

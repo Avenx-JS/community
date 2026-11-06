@@ -1535,7 +1535,10 @@ whole operation back and the account stays fully intact):
    is reserved by RFC 2606, cannot be delivered to, and fails email validation.
    No one can register a placeholder in advance and block a deletion.
 5. The account's private state is deleted: its `community_subscriptions`,
-   `community_notification_preferences`, and the `notifications` it received.
+   `community_notification_preferences`, the `notifications` it received, and
+   its `saved_posts`. The account row is anonymised, not deleted, so the
+   `ON DELETE CASCADE` on `saved_posts.user_id` would never fire: the
+   deletion removes them explicitly.
 6. Every session and refresh token is revoked.
 
 **Kept:** posts, comments, votes, `community_rule_acceptances`,
@@ -3126,6 +3129,9 @@ check. A guard would repeat those lookups outside that transaction.
   participation. An author who declines new rules can still withdraw what they
   wrote under the old ones. Moderative removal (`POST …/remove`) is not
   gated either: a moderator can always remove content.
+- **`POST` and `DELETE /posts/:id/save`.** Saving is private and adds nothing
+  to a community, so it is not participation; a user must be able to bookmark
+  the rules discussion they are reading (see [Saved posts](#saved-posts)).
 - **`PATCH /posts/:id` and `PATCH /comments/:id`.** Editing existing content is
   not new participation: an author who declines new rules can still correct
   what they wrote (see [Editing posts and comments](#editing-posts-and-comments)).
@@ -3325,7 +3331,8 @@ Post responses use this DTO:
   "edited_at": null,
   "locked_at": null,
   "locked_by": null,
-  "score": 3
+  "score": 3,
+  "saved": false
 }
 ```
 
@@ -3335,7 +3342,9 @@ effective edit (see [Editing posts and comments](#editing-posts-and-comments)).
 `locked_at` and `locked_by` are `null` on an open post (see
 [Locking posts and comments](#locking-posts-and-comments)).
 `score` is the sum of the post's votes, `0` without votes (see
-[Scores on content](#scores-on-content)).
+[Scores on content](#scores-on-content)). `saved` is caller-dependent: `true`
+only when the authenticated caller has saved the post, `false` otherwise and
+always `false` for an anonymous caller (see [Saved posts](#saved-posts)).
 
 ### Removing and restoring content
 
@@ -4160,6 +4169,117 @@ buckets (`api:write:ip`, 60 per IP, and `api:write:account`, 120 per account
 per minute), `GET` against the read buckets. Voting is the highest-frequency
 legitimate write in the product. If abuse appears, a dedicated vote bucket is
 the candidate, added as a documented per-route override, never an exemption.
+
+## Saved posts
+
+A user can keep a private list of posts to come back to. Before this, the
+nearest tool was an upvote, which is public in aggregate through the score and
+carries a judgement.
+
+| Route | Success | Notes |
+| --- | --- | --- |
+| `POST /posts/:id/save` | `204` | Saves the post for the caller |
+| `DELETE /posts/:id/save` | `204` | Removes the caller's save |
+| `GET /users/me/saved-posts` | `200`, `{ "items", "page", "limit", "total", "sort" }` | The caller's saved posts |
+
+All three require a bearer token. The user is always the token's: no route
+takes a user parameter, so one account can never read or change another's
+saves. The two writes take no body and live on a `/save` sub-resource of the
+post, like `/pin`, `/lock` and `/subscribe`. They are stored in `saved_posts`
+(migration `027_create_saved_posts`), with the composite primary key
+`(user_id, post_id)`: one row per user and post.
+
+**Saves are private.** No endpoint exposes another user's saves, and no
+response carries a save count. A public count would turn a private bookmark
+into a signal, and nothing asks for one.
+
+**Both writes are idempotent.** Saving is
+`INSERT … ON DUPLICATE KEY UPDATE created_at = created_at`, the pattern of
+`POST /communities/:name/subscribe`: a repeat save leaves one row and keeps
+its `created_at`, the listing's order key. Removing a save that does not exist
+returns `204`, like `DELETE /communities/:name/subscribe`.
+
+| Status | `POST /posts/:id/save` | `DELETE /posts/:id/save` |
+| --- | --- | --- |
+| `400` | Malformed id | Malformed id |
+| `401` | No token | No token |
+| `404` | Unknown post, a post removed by moderation, or one in a deleted or suspended community | Unknown post only |
+
+Unsaving needs only the post to exist, in any state, so a user can always drop
+a bookmark, including one to a post that has since been hidden. Saving your own
+post is allowed.
+
+**Not gated on rule acceptance.** Saving is a private act that adds nothing to
+a community, so it is not participation: rule acceptance gates joining, posting,
+commenting and voting, and gating saves would mean a user who has not accepted
+the rules cannot bookmark the rules discussion they are trying to read.
+
+### Listing saved posts
+
+`GET /users/me/saved-posts` takes `page` (1-10,000, default `1`), `limit`
+(1-100, default `20`) and `sort` (`new`, the default, or `oldest`);
+out-of-range values and unknown query properties, a `user_id` included, are
+`400`. Each item pairs the one post type with the save time, as
+`GET /subscriptions` pairs a community with `subscribed_at`:
+
+```json
+{
+  "post": { "id": "post-id", "title": "A post", "saved": true, "…": "…" },
+  "saved_at": "2026-11-01T08:00:00.000Z"
+}
+```
+
+**Ordered by when you saved it, not when it was posted.** Both readings are
+plausible; a bookmark list is read in the order things were kept.
+`new` orders `saved_posts.created_at DESC, post_id DESC` (`post_id` is the
+tiebreaker), `oldest` the reverse. It is served by
+`idx_saved_posts_user_created (user_id, created_at, post_id)` in index order,
+each post by primary key, without a filesort
+(`saved-posts.mysql.spec.ts` asserts the plan). An account without saves gets
+`200` with `items: []` and `total: 0`.
+
+**What the list omits, and what it keeps.** A saved post can become unreachable
+after it was saved:
+
+| The saved post | Listed? |
+| --- | --- |
+| Removed by moderation | **Omitted.** A tombstone was considered: a private list showing "this was removed" is arguably useful, but it would leak a moderation outcome into a surface with no other moderation semantics |
+| In a deleted or suspended community | **Omitted** |
+| By an author whose account was deleted | **Kept.** The post is retained under the placeholder username and is still readable, so the save is still valid |
+| Hard-deleted by its author | Gone: `saved_posts.post_id` cascades |
+
+`total` is computed with exactly the same `FROM` and `WHERE` as the page
+(`SAVED_POSTS_FROM` in `saved-posts.service.ts`), so paging to the last page
+always finds it non-empty and the count matches. A count without the filters
+would be the easy mistake here; the tests page through a list containing hidden
+posts to pin it.
+
+**Rows for omitted posts are not deleted.** A post removed by moderation is not
+deleted, so its saves remain, and a restored post reappears in the list. A
+cleanup job deleting those rows would be the wrong instinct: it would make a
+moderator's restore lose every user's bookmark.
+
+### The `saved` field on posts
+
+Every post response carries `saved` (`PostResponse`). It is caller-dependent:
+`true` only for the caller's own saved posts, `false` otherwise, and always
+`false` for an anonymous caller. The public post reads (`GET /posts`,
+`GET /posts/:id`, `GET /communities/:name/posts`,
+`GET /users/:username/posts`) accept an optional bearer token for it; an
+absent, invalid or expired token reads as anonymous, so they are exactly as
+public as before.
+
+It is computed like the vote score: after the page is selected, one grouped
+lookup over the page's ids,
+`SELECT post_id FROM saved_posts WHERE user_id = ? AND post_id IN (…)`,
+on the primary key (`loadSavedFlags` in `src/posts/saved-flags.ts`), never a
+query per row. It is bound to the caller, so it cannot reveal anyone else's
+saves, and an anonymous request issues no lookup at all. Combined with `score`
+and the reviewer-only removal fields, this makes `PostResponse`
+caller-dependent; caches must vary on the `Authorization` header.
+
+**Rate limiting.** The global buckets apply. Saving is a cheap, private,
+self-scoped write, so there is no dedicated bucket.
 
 ## Notifications
 

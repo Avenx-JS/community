@@ -244,6 +244,17 @@ CREATE TABLE votes (
 );
 CREATE INDEX idx_votes_target ON votes (target_type, target_id, value);
 
+-- A user's private bookmarks (027_create_saved_posts).
+CREATE TABLE saved_posts (
+    user_id VARCHAR(36) NOT NULL,
+    post_id VARCHAR(36) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, post_id),
+    INDEX idx_saved_posts_user_created (user_id, created_at, post_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
+);
+
 CREATE TABLE user_reports (
     id VARCHAR(36) PRIMARY KEY,
     reporter_id VARCHAR(36) NULL,
@@ -563,4 +574,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('023_add_community_moderation_community_actions'),
     ('024_add_community_subscriptions_community_index'),
     ('025_add_community_suspension'),
-    ('026_add_post_pinning');
+    ('026_add_post_pinning'),
+    ('027_create_saved_posts');
