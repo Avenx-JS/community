@@ -151,6 +151,10 @@ describe('User profile endpoints (e2e)', () => {
         { blocker_id: 'user-b', blocked_id: 'user-a' },
         { blocker_id: 'user-b', blocked_id: 'user-suspended' },
       ],
+      password_reset_tokens: [
+        { token_hash: 'hash-a', user_id: 'user-a' },
+        { token_hash: 'hash-b', user_id: 'user-b' },
+      ],
       posts: [
         {
           id: 'post-a',
@@ -818,6 +822,10 @@ describe('User profile endpoints (e2e)', () => {
       // either. A block between two other accounts survives.
       expect(tables.user_blocks).toEqual([
         { blocker_id: 'user-b', blocked_id: 'user-suspended' },
+      ]);
+      // A live reset link must not outlive the account.
+      expect(tables.password_reset_tokens).toEqual([
+        { token_hash: 'hash-b', user_id: 'user-b' },
       ]);
       // Other accounts' rows, including a notification A caused, survive.
       expect(

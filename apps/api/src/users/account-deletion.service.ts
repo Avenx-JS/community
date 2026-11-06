@@ -43,6 +43,9 @@ export const DELETE_PRIVATE_STATE_SQL = [
   // anonymising the row would not fire the foreign keys' cascades.
   'DELETE FROM user_blocks WHERE blocker_id = ?',
   'DELETE FROM user_blocks WHERE blocked_id = ?',
+  // Anonymising would not fire the cascade, and a live link must not outlive
+  // the account.
+  'DELETE FROM password_reset_tokens WHERE user_id = ?',
 ] as const;
 
 export const COMMUNITY_CREATOR_MESSAGE =

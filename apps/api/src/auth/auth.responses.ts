@@ -1,6 +1,13 @@
 import { ApiProperty } from '@nestjs/swagger';
 import type { AuthResponse } from './auth.service';
 
+export class PasswordForgotResponse {
+  @ApiProperty({
+    description: 'The same text whether or not the address has an account.',
+  })
+  message!: string;
+}
+
 export class AuthUserResponse {
   @ApiProperty()
   id!: string;

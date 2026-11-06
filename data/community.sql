@@ -44,6 +44,18 @@ CREATE TABLE auth_refresh_tokens (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+-- Single-use password reset credentials (029_create_password_reset_tokens).
+CREATE TABLE password_reset_tokens (
+    token_hash CHAR(64) PRIMARY KEY,
+    user_id VARCHAR(36) NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    used_at TIMESTAMP NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_password_reset_tokens_user_id (user_id),
+    INDEX idx_password_reset_tokens_expires_at (expires_at),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
 CREATE TABLE auth_rate_limits (
     bucket_key CHAR(64) PRIMARY KEY,
     window_started_at TIMESTAMP NOT NULL,
@@ -589,4 +601,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('025_add_community_suspension'),
     ('026_add_post_pinning'),
     ('027_create_saved_posts'),
-    ('028_create_user_blocks');
+    ('028_create_user_blocks'),
+    ('029_create_password_reset_tokens');

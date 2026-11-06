@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Logger,
   UnauthorizedException,
@@ -14,12 +15,24 @@ import {
 import { argon2id, hash as argon2Hash, verify as argon2Verify } from 'argon2';
 import { createHash, randomBytes, scrypt as scryptCallback } from 'node:crypto';
 import type { Pool, PoolConnection } from 'mysql2/promise';
+import type { EmailTransport, OutboundMessage } from '../email/email-transport';
+import { EmailDeliveryError } from '../email/smtp-email.transport';
 import { DELETED_PASSWORD_HASH } from '../users/account-deletion.service';
 import {
   AuthService,
   CHANGE_PASSWORD_SQL,
+  CONSUME_RESET_TOKEN_SQL,
+  INSERT_RESET_TOKEN_SQL,
+  INVALID_RESET_TOKEN_MESSAGE,
+  INVALIDATE_RESET_TOKENS_SQL,
   LOCK_PASSWORD_SQL,
+  LOCK_RESET_TOKEN_SQL,
+  RESET_ACCOUNT_BY_EMAIL_SQL,
+  RESET_PASSWORD_SQL,
+  RESET_TOKEN_OWNER_SQL,
 } from './auth.service';
+
+const noEmail: EmailTransport = { send: () => Promise.resolve() };
 
 type ExecuteResult = [unknown, unknown] | Error;
 type ExecuteFunction = (
@@ -80,19 +93,25 @@ describe('AuthService', () => {
       },
       release: () => undefined,
     };
-    service = new AuthService({
-      execute,
-      getConnection: () => Promise.resolve(connection),
-    } as unknown as Pool);
+    service = new AuthService(
+      {
+        execute,
+        getConnection: () => Promise.resolve(connection),
+      } as unknown as Pool,
+      noEmail,
+    );
   });
 
   it('records last-seen with the configured conditional interval after validation', async () => {
     const previousInterval = process.env.USER_ACTIVITY_WRITE_INTERVAL_SECONDS;
     process.env.USER_ACTIVITY_WRITE_INTERVAL_SECONDS = '42';
-    const configuredService = new AuthService({
-      execute,
-      getConnection: () => Promise.resolve({}),
-    } as unknown as Pool);
+    const configuredService = new AuthService(
+      {
+        execute,
+        getConnection: () => Promise.resolve({}),
+      } as unknown as Pool,
+      noEmail,
+    );
     results.push([[{ id: 'user-1' }], []], [{ affectedRows: 1 }, []]);
 
     try {
@@ -119,10 +138,13 @@ describe('AuthService', () => {
   it('uses the five-minute default activity interval', async () => {
     const previousInterval = process.env.USER_ACTIVITY_WRITE_INTERVAL_SECONDS;
     delete process.env.USER_ACTIVITY_WRITE_INTERVAL_SECONDS;
-    const defaultService = new AuthService({
-      execute,
-      getConnection: () => Promise.resolve({}),
-    } as unknown as Pool);
+    const defaultService = new AuthService(
+      {
+        execute,
+        getConnection: () => Promise.resolve({}),
+      } as unknown as Pool,
+      noEmail,
+    );
     results.push([[{ id: 'user-1' }], []], [{ affectedRows: 1 }, []]);
 
     try {
@@ -630,9 +652,12 @@ describe('AuthService.changePassword', () => {
         events.push('release');
       },
     };
-    service = new AuthService({
-      getConnection: () => Promise.resolve(connection),
-    } as unknown as Pool);
+    service = new AuthService(
+      {
+        getConnection: () => Promise.resolve(connection),
+      } as unknown as Pool,
+      noEmail,
+    );
     logoutAll = jest.spyOn(service, 'logoutAll').mockImplementation(() => {
       events.push('logoutAll');
       return Promise.resolve();
@@ -760,5 +785,461 @@ describe('AuthService.changePassword', () => {
     for (const secret of [CURRENT, NEXT, storedHash]) {
       expect(logged).not.toContain(secret);
     }
+  });
+});
+
+describe('AuthService password reset', () => {
+  const USER_ID = 'user-1';
+  const EMAIL = 'member@example.com';
+  const NEW_PASSWORD = 'brand-new-horse-battery';
+  const INITIAL_HASH = 'initial-hash';
+  const TOKEN = 'a'.repeat(43);
+  const hash = (token: string) =>
+    createHash('sha256').update(token).digest('hex');
+
+  interface StoredToken {
+    user_id: string;
+    used_at: Date | null;
+    expired: number;
+    ttl?: number;
+  }
+
+  let accounts: { id: string; email: string; deleted: boolean }[];
+  let tokens: Map<string, StoredToken>;
+  let passwordHash: string;
+  let events: string[];
+  let sent: OutboundMessage[];
+  let send: (message: OutboundMessage) => Promise<void>;
+  let afterTokenLock: () => void;
+  let failInsert: boolean;
+  let hangConnection: boolean;
+  let service: AuthService;
+  let logs: ReturnType<typeof captureLogs>;
+
+  const captureLogs = () =>
+    (['log', 'warn', 'error', 'debug', 'verbose'] as const).map((level) =>
+      jest.spyOn(Logger.prototype, level).mockImplementation(() => undefined),
+    );
+  const logged = () =>
+    JSON.stringify(logs.flatMap((spy) => spy.mock.calls as unknown[]));
+  const settle = async () => {
+    for (let turn = 0; turn < 10; turn += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
+
+  beforeEach(() => {
+    accounts = [{ id: USER_ID, email: EMAIL, deleted: false }];
+    tokens = new Map();
+    passwordHash = INITIAL_HASH;
+    events = [];
+    sent = [];
+    send = (message) => {
+      sent.push(message);
+      return Promise.resolve();
+    };
+    afterTokenLock = () => undefined;
+    failInsert = false;
+    hangConnection = false;
+    logs = captureLogs();
+
+    const execute = (sql: string, values: unknown[]) => {
+      events.push(sql);
+      const answer = (rows: unknown) => Promise.resolve([rows, []]);
+      switch (sql) {
+        case RESET_ACCOUNT_BY_EMAIL_SQL:
+          return answer(
+            accounts
+              .filter(
+                (account) =>
+                  !account.deleted &&
+                  account.email.localeCompare(values[0] as string, undefined, {
+                    sensitivity: 'base',
+                  }) === 0,
+              )
+              .map(({ id, email }) => ({ id, email })),
+          );
+        case LOCK_PASSWORD_SQL:
+          return answer(
+            accounts
+              .filter((a) => a.id === values[0] && !a.deleted)
+              .map(({ id }) => ({ id, password_hash: passwordHash })),
+          );
+        case INVALIDATE_RESET_TOKENS_SQL: {
+          let affectedRows = 0;
+          for (const token of tokens.values()) {
+            if (token.user_id === values[0] && token.used_at === null) {
+              token.used_at = new Date();
+              affectedRows += 1;
+            }
+          }
+          return answer({ affectedRows });
+        }
+        case INSERT_RESET_TOKEN_SQL:
+          if (failInsert) {
+            return Promise.reject(
+              new Error(`insert failed ${String(values[0])}`),
+            );
+          }
+          tokens.set(values[0] as string, {
+            user_id: values[1] as string,
+            used_at: null,
+            expired: 0,
+            ttl: values[2] as number,
+          });
+          return answer({ affectedRows: 1 });
+        case RESET_TOKEN_OWNER_SQL: {
+          const token = tokens.get(values[0] as string);
+          return answer(token ? [{ user_id: token.user_id }] : []);
+        }
+        case LOCK_RESET_TOKEN_SQL: {
+          const token = tokens.get(values[0] as string);
+          const rows = token ? [{ ...token }] : [];
+          afterTokenLock();
+          return answer(rows);
+        }
+        case RESET_PASSWORD_SQL:
+          passwordHash = values[0] as string;
+          return answer({ affectedRows: 1 });
+        case CONSUME_RESET_TOKEN_SQL: {
+          const token = tokens.get(values[0] as string);
+          if (!token || token.used_at !== null) {
+            return answer({ affectedRows: 0 });
+          }
+          token.used_at = new Date();
+          return answer({ affectedRows: 1 });
+        }
+        default:
+          return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
+      }
+    };
+    const connection = {
+      execute,
+      beginTransaction: () => {
+        events.push('begin');
+        return Promise.resolve();
+      },
+      commit: () => {
+        events.push('commit');
+        return Promise.resolve();
+      },
+      rollback: () => {
+        events.push('rollback');
+        return Promise.resolve();
+      },
+      release: () => {
+        events.push('release');
+      },
+    };
+    service = new AuthService(
+      {
+        execute,
+        getConnection: () =>
+          hangConnection
+            ? new Promise(() => undefined)
+            : Promise.resolve(connection),
+      } as unknown as Pool,
+      { send: (message: OutboundMessage) => send(message) },
+    );
+    jest.spyOn(service, 'logoutAll').mockImplementation(() => {
+      events.push('logoutAll');
+      return Promise.resolve();
+    });
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    delete process.env.PASSWORD_RESET_TTL_SECONDS;
+  });
+
+  const storeToken = (overrides: Partial<StoredToken> = {}) =>
+    tokens.set(hash(TOKEN), {
+      user_id: USER_ID,
+      used_at: null,
+      expired: 0,
+      ...overrides,
+    });
+
+  describe('forgotPassword', () => {
+    it('stores only the hash of the emailed token, for 60 minutes, derived in SQL', async () => {
+      await service.forgotPassword(EMAIL);
+      await settle();
+
+      expect(sent).toHaveLength(1);
+      expect(sent[0].to).toBe(EMAIL);
+      const [token] = /[A-Za-z0-9_-]{43}/.exec(sent[0].text)!;
+      expect([...tokens.keys()]).toEqual([hash(token)]);
+      expect(tokens.get(hash(token))?.ttl).toBe(3600);
+      expect(INSERT_RESET_TOKEN_SQL).toContain(
+        'DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND)',
+      );
+    });
+
+    it('commits the token before the email goes out', async () => {
+      await service.forgotPassword(EMAIL);
+      send = () => {
+        events.push('send');
+        return Promise.resolve();
+      };
+      await settle();
+      events = [];
+      await service.forgotPassword(EMAIL);
+      await settle();
+      expect(events.indexOf('commit')).toBeLessThan(events.indexOf('send'));
+      expect(events.at(-1)).toBe('send');
+      expect(events).toContain('release');
+    });
+
+    it('takes the lifetime from PASSWORD_RESET_TTL_SECONDS', () => {
+      process.env.PASSWORD_RESET_TTL_SECONDS = 'soon';
+      expect(
+        () => new AuthService({} as Pool, { send: () => Promise.resolve() }),
+      ).toThrow('PASSWORD_RESET_TTL_SECONDS');
+    });
+
+    it('invalidates the account’s earlier unused tokens, so only the newest works', async () => {
+      await service.forgotPassword(EMAIL);
+      await settle();
+      await service.forgotPassword(EMAIL);
+      await settle();
+
+      expect(tokens.size).toBe(2);
+      const newest = /[A-Za-z0-9_-]{43}/.exec(sent[1].text)![0];
+      for (const [tokenHash, token] of tokens) {
+        expect(token.used_at === null).toBe(tokenHash === hash(newest));
+      }
+    });
+
+    it('locks the users row before touching tokens', async () => {
+      await service.forgotPassword(EMAIL);
+      await settle();
+      expect(events.indexOf(LOCK_PASSWORD_SQL)).toBeLessThan(
+        events.indexOf(INVALIDATE_RESET_TOKENS_SQL),
+      );
+    });
+
+    it('does nothing for an unknown address: no row, no email, no transaction', async () => {
+      await service.forgotPassword('nobody@example.com');
+      await settle();
+      expect(tokens.size).toBe(0);
+      expect(sent).toEqual([]);
+      expect(events).toEqual([RESET_ACCOUNT_BY_EMAIL_SQL]);
+    });
+
+    it('never runs a password hash on either path', async () => {
+      const hashPassword = jest.spyOn(
+        service as unknown as { hashPassword: () => Promise<string> },
+        'hashPassword',
+      );
+      await service.forgotPassword(EMAIL);
+      await service.forgotPassword('nobody@example.com');
+      await settle();
+      expect(hashPassword).not.toHaveBeenCalled();
+      expect(passwordHash).toBe(INITIAL_HASH);
+    });
+
+    // The collation matches these; the email must never reach the variant, and
+    // each variant must not get a rate-limit bucket of its own.
+    it.each(['mémber@example.com', 'membér@example.com'])(
+      'treats the accent variant %s as unknown',
+      async (variant) => {
+        await service.forgotPassword(variant);
+        await settle();
+        expect(sent).toEqual([]);
+        expect(tokens.size).toBe(0);
+      },
+    );
+
+    it('matches case-insensitively, and emails the stored address', async () => {
+      accounts[0].email = 'Member@Example.com';
+      await service.forgotPassword('  MEMBER@example.COM ');
+      await settle();
+      expect(sent.map((message) => message.to)).toEqual(['Member@Example.com']);
+    });
+
+    it('does not wait for the email: a hung transport still answers', async () => {
+      send = () => new Promise(() => undefined);
+      await expect(service.forgotPassword(EMAIL)).resolves.toBeUndefined();
+    });
+
+    it('does not wait for the token to be written either', async () => {
+      hangConnection = true;
+      await expect(service.forgotPassword(EMAIL)).resolves.toBeUndefined();
+      expect(events).toEqual([RESET_ACCOUNT_BY_EMAIL_SQL]);
+    });
+
+    it('logs a rejected send without the body or token, and swallows it', async () => {
+      send = (message) => {
+        sent.push(message);
+        return Promise.reject(new EmailDeliveryError('EAUTH'));
+      };
+      await expect(service.forgotPassword(EMAIL)).resolves.toBeUndefined();
+      await settle();
+
+      const token = /[A-Za-z0-9_-]{43}/.exec(sent[0].text)![0];
+      const output = logged();
+      expect(output).toContain(
+        'Password reset email could not be sent (EAUTH)',
+      );
+      expect(output).not.toContain(token);
+      expect(output).not.toContain(sent[0].text);
+      expect(output).not.toContain(EMAIL);
+    });
+
+    it('does not repeat an unknown error’s message, which may quote the body', async () => {
+      send = (message) => {
+        sent.push(message);
+        return Promise.reject(new Error(`could not send ${message.text}`));
+      };
+      await service.forgotPassword(EMAIL);
+      await settle();
+      const token = /[A-Za-z0-9_-]{43}/.exec(sent[0].text)![0];
+      expect(logged()).not.toContain(token);
+    });
+
+    it('logs a failed write without the token, sends nothing, and rolls back', async () => {
+      failInsert = true;
+      await expect(service.forgotPassword(EMAIL)).resolves.toBeUndefined();
+      await settle();
+      expect(sent).toEqual([]);
+      expect(events).toContain('rollback');
+      expect(events.at(-1)).toBe('release');
+      expect(logged()).toContain('Password reset could not be issued');
+      expect(logged()).not.toMatch(/[0-9a-f]{64}/);
+    });
+
+    it('sends nothing if the account was deleted after the lookup', async () => {
+      const lookup = service.forgotPassword(EMAIL);
+      await lookup;
+      accounts[0].deleted = true;
+      await settle();
+      expect(sent).toEqual([]);
+      expect(tokens.size).toBe(0);
+    });
+  });
+
+  describe('resetPassword', () => {
+    it('replaces the hash with Argon2id, consumes the token, commits, then revokes', async () => {
+      storeToken();
+      await service.resetPassword(TOKEN, NEW_PASSWORD);
+
+      expect(passwordHash).toMatch(/^\$argon2id\$v=19\$m=19456,p=1,t=2\$/);
+      await expect(argon2Verify(passwordHash, NEW_PASSWORD)).resolves.toBe(
+        true,
+      );
+      expect(tokens.get(hash(TOKEN))?.used_at).toBeInstanceOf(Date);
+      expect(events).toEqual([
+        RESET_TOKEN_OWNER_SQL,
+        'begin',
+        LOCK_PASSWORD_SQL,
+        LOCK_RESET_TOKEN_SQL,
+        RESET_PASSWORD_SQL,
+        CONSUME_RESET_TOKEN_SQL,
+        INVALIDATE_RESET_TOKENS_SQL,
+        'commit',
+        'release',
+        'logoutAll',
+      ]);
+      expect(LOCK_RESET_TOKEN_SQL).toMatch(/FOR UPDATE$/);
+      expect(LOCK_RESET_TOKEN_SQL).toContain('expires_at <= UTC_TIMESTAMP()');
+    });
+
+    it('marks the account’s other unused tokens used, and no one else’s', async () => {
+      storeToken();
+      tokens.set('other', { user_id: USER_ID, used_at: null, expired: 0 });
+      tokens.set('theirs', { user_id: 'user-2', used_at: null, expired: 0 });
+      await service.resetPassword(TOKEN, NEW_PASSWORD);
+      expect(tokens.get('other')?.used_at).toBeInstanceOf(Date);
+      expect(tokens.get('theirs')?.used_at).toBeNull();
+    });
+
+    const rejected = async () => {
+      const error = await service
+        .resetPassword(TOKEN, NEW_PASSWORD)
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect(passwordHash).toBe(INITIAL_HASH);
+      expect(events).not.toContain('logoutAll');
+      expect(events).not.toContain('commit');
+      return (error as BadRequestException).message;
+    };
+
+    it('refuses unknown, used, expired and deleted-account tokens with one message, writing nothing', async () => {
+      const messages: string[] = [];
+      messages.push(await rejected());
+      expect(events).toEqual([RESET_TOKEN_OWNER_SQL]);
+
+      events = [];
+      storeToken({ used_at: new Date() });
+      messages.push(await rejected());
+      expect(events).not.toContain(RESET_PASSWORD_SQL);
+      expect(events).toContain('rollback');
+      expect(events.at(-1)).toBe('release');
+
+      events = [];
+      storeToken({ expired: 1 });
+      messages.push(await rejected());
+      expect(events).not.toContain(RESET_PASSWORD_SQL);
+
+      events = [];
+      storeToken();
+      accounts[0].deleted = true;
+      messages.push(await rejected());
+      expect(events).not.toContain(RESET_PASSWORD_SQL);
+
+      expect(new Set(messages)).toEqual(new Set([INVALID_RESET_TOKEN_MESSAGE]));
+    });
+
+    it('rolls everything back if the token is consumed between the read and the update', async () => {
+      storeToken();
+      afterTokenLock = () => {
+        tokens.get(hash(TOKEN))!.used_at = new Date();
+      };
+      await expect(
+        service.resetPassword(TOKEN, NEW_PASSWORD),
+      ).rejects.toMatchObject({ message: INVALID_RESET_TOKEN_MESSAGE });
+      expect(events).toContain(RESET_PASSWORD_SQL);
+      expect(events).toContain('rollback');
+      expect(events).not.toContain('commit');
+      expect(events).not.toContain('logoutAll');
+      expect(events.at(-1)).toBe('release');
+    });
+
+    it('rolls back and releases on an unexpected error', async () => {
+      storeToken();
+      jest
+        .spyOn(
+          service as unknown as { hashPassword: () => Promise<string> },
+          'hashPassword',
+        )
+        .mockRejectedValue(new Error('hash failed'));
+      await expect(service.resetPassword(TOKEN, NEW_PASSWORD)).rejects.toThrow(
+        'hash failed',
+      );
+      expect(events).toContain('rollback');
+      expect(events.at(-1)).toBe('release');
+    });
+
+    it('keeps the new password when revocation fails, logging no secret', async () => {
+      storeToken();
+      jest
+        .spyOn(service, 'logoutAll')
+        .mockRejectedValue(new Error('revocation failed'));
+
+      await expect(
+        service.resetPassword(TOKEN, NEW_PASSWORD),
+      ).resolves.toBeUndefined();
+
+      await expect(argon2Verify(passwordHash, NEW_PASSWORD)).resolves.toBe(
+        true,
+      );
+      const output = logged();
+      expect(output).toContain(
+        'Session revocation failed after password reset',
+      );
+      for (const secret of [TOKEN, hash(TOKEN), NEW_PASSWORD, passwordHash]) {
+        expect(output).not.toContain(secret);
+      }
+    });
   });
 });

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Inject,
@@ -22,7 +23,10 @@ import type {
   RowDataPacket,
 } from 'mysql2/promise';
 import { ACTIVE_USER_RESTRICTION_PREDICATE } from '../common/active-user-restriction';
+import { isSqlTrue } from '../common/community-moderation';
 import { readPositiveInteger } from '../common/read-positive-integer';
+import { EmailTransport } from '../email/email-transport';
+import { EmailDeliveryError } from '../email/smtp-email.transport';
 
 export const MYSQL_POOL = Symbol('MYSQL_POOL');
 
@@ -48,6 +52,28 @@ export const LOCK_PASSWORD_SQL =
 // overwritten: the same compare-and-set login uses for its rehash.
 export const CHANGE_PASSWORD_SQL =
   'UPDATE users SET password_hash = ? WHERE id = ? AND password_hash = ?';
+
+export const RESET_ACCOUNT_BY_EMAIL_SQL =
+  'SELECT id, email FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1';
+export const INVALIDATE_RESET_TOKENS_SQL =
+  'UPDATE password_reset_tokens SET used_at = UTC_TIMESTAMP() WHERE user_id = ? AND used_at IS NULL';
+export const INSERT_RESET_TOKEN_SQL =
+  'INSERT INTO password_reset_tokens (token_hash, user_id, expires_at) VALUES (?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND))';
+export const RESET_TOKEN_OWNER_SQL =
+  'SELECT user_id FROM password_reset_tokens WHERE token_hash = ? LIMIT 1';
+// Expiry is decided in SQL, against the same clock and session time zone that
+// wrote expires_at. Comparing in JavaScript would be off by the UTC offset on a
+// server whose session time zone is not UTC.
+export const LOCK_RESET_TOKEN_SQL =
+  'SELECT user_id, used_at, expires_at <= UTC_TIMESTAMP() AS expired FROM password_reset_tokens WHERE token_hash = ? FOR UPDATE';
+export const RESET_PASSWORD_SQL =
+  'UPDATE users SET password_hash = ? WHERE id = ?';
+export const CONSUME_RESET_TOKEN_SQL =
+  'UPDATE password_reset_tokens SET used_at = UTC_TIMESTAMP() WHERE token_hash = ? AND used_at IS NULL';
+
+// One message for unknown, used and expired alike: telling them apart would
+// tell an attacker which guesses are close.
+export const INVALID_RESET_TOKEN_MESSAGE = 'Invalid or expired reset token';
 
 interface PasswordVerification {
   valid: boolean;
@@ -108,6 +134,17 @@ interface RefreshTokenRow extends RowDataPacket {
   revoked_at: Date | string | null;
 }
 
+interface ResetAccountRow extends RowDataPacket {
+  id: string;
+  email: string;
+}
+
+interface ResetTokenRow extends RowDataPacket {
+  user_id: string;
+  used_at: Date | string | null;
+  expired: number | string | boolean;
+}
+
 export interface RegisterInput {
   username: string;
   email: string;
@@ -148,8 +185,15 @@ export class AuthService {
     'USER_ACTIVITY_WRITE_INTERVAL_SECONDS',
     300,
   );
+  private readonly passwordResetTtlSeconds = readPositiveInteger(
+    'PASSWORD_RESET_TTL_SECONDS',
+    3600,
+  );
 
-  constructor(@Inject(MYSQL_POOL) private readonly pool: Pool) {}
+  constructor(
+    @Inject(MYSQL_POOL) private readonly pool: Pool,
+    private readonly email: EmailTransport,
+  ) {}
 
   async register(input: RegisterInput): Promise<AuthResponse> {
     const username = input.username.trim();
@@ -227,14 +271,19 @@ export class AuthService {
     token: string,
   ): Promise<AccessTokenValidationResult> {
     const tokenHash = this.hashToken(token);
+    // A derived table, because the shared predicate's bare expires_at would be
+    // ambiguous with auth_sessions.expires_at in the join's ON clause.
     const [sessions] = await this.pool.execute<SessionUserRow[]>(
       `SELECT auth_sessions.user_id AS id,
          restriction.type AS restriction_type,
          restriction.expires_at AS restriction_expires_at
        FROM auth_sessions
-       LEFT JOIN user_restrictions restriction
+       LEFT JOIN (
+         SELECT user_id, type, expires_at
+         FROM user_restrictions
+         WHERE ${ACTIVE_USER_RESTRICTION_PREDICATE}
+       ) restriction
          ON restriction.user_id = auth_sessions.user_id
-        AND ${ACTIVE_USER_RESTRICTION_PREDICATE}
        WHERE auth_sessions.token_hash = ?
          AND auth_sessions.expires_at > UTC_TIMESTAMP()
        LIMIT 1`,
@@ -420,6 +469,181 @@ export class AuthService {
       await this.logoutAll(userId);
     } catch {
       this.logger.warn('Session revocation failed after password change');
+    }
+  }
+
+  // Resolves as soon as the account lookup, which both paths share, is done. The
+  // rest runs detached so the response cannot depend on whether the address
+  // exists: an SMTP send takes far longer than doing nothing, and a failed write
+  // on the known path would otherwise be a 500 only known addresses can produce.
+  async forgotPassword(rawEmail: string): Promise<void> {
+    const email = rawEmail.trim().toLowerCase();
+    const [accounts] = await this.pool.execute<ResetAccountRow[]>(
+      RESET_ACCOUNT_BY_EMAIL_SQL,
+      [email],
+    );
+    const account = accounts[0];
+    // users.email has an accent-insensitive collation, so bób@ matches bob@.
+    // Only the address itself counts: variants would otherwise each get their
+    // own rate-limit bucket and could mail-bomb one account.
+    if (!account || account.email.toLowerCase() !== email) {
+      return;
+    }
+    void this.issuePasswordReset(account);
+  }
+
+  // Never rejects: nothing awaits it. Logs carry no token, address or body.
+  private async issuePasswordReset(account: ResetAccountRow): Promise<void> {
+    const token = randomBytes(32).toString('base64url');
+    try {
+      if (!(await this.storePasswordResetToken(account.id, token))) {
+        return;
+      }
+    } catch {
+      this.logger.warn('Password reset could not be issued');
+      return;
+    }
+
+    try {
+      // The stored address, never the submitted one.
+      await this.email.send({
+        to: account.email,
+        subject: 'Reset your password',
+        text: this.passwordResetEmailText(token),
+      });
+    } catch (error) {
+      const code = error instanceof EmailDeliveryError ? error.code : undefined;
+      this.logger.warn(
+        `Password reset email could not be sent${code ? ` (${code})` : ''}`,
+      );
+    }
+  }
+
+  private async storePasswordResetToken(
+    userId: string,
+    token: string,
+  ): Promise<boolean> {
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+      // Serialises concurrent requests for one account, so exactly one link is
+      // left live, and holds off a concurrent account deletion. Always the users
+      // row before the token rows, as in resetPassword and account deletion.
+      const [accounts] = await connection.execute<PasswordRow[]>(
+        LOCK_PASSWORD_SQL,
+        [userId],
+      );
+      if (!accounts[0]) {
+        await connection.rollback();
+        transactionStarted = false;
+        return false;
+      }
+      await connection.execute<ResultSetHeader>(INVALIDATE_RESET_TOKENS_SQL, [
+        userId,
+      ]);
+      await connection.execute<ResultSetHeader>(INSERT_RESET_TOKEN_SQL, [
+        this.hashToken(token),
+        userId,
+        this.passwordResetTtlSeconds,
+      ]);
+      await connection.commit();
+      transactionStarted = false;
+      return true;
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  private passwordResetEmailText(token: string): string {
+    const minutes = Math.ceil(this.passwordResetTtlSeconds / 60);
+    return [
+      'Someone asked to reset the password for your account.',
+      '',
+      `Your reset code, valid for ${minutes} minutes and usable once:`,
+      '',
+      token,
+      '',
+      'If this was not you, ignore this message: your password has not changed.',
+    ].join('\n');
+  }
+
+  async resetPassword(token: string, newPassword: string): Promise<void> {
+    const invalid = () => new BadRequestException(INVALID_RESET_TOKEN_MESSAGE);
+    const tokenHash = this.hashToken(token);
+    // Unlocked, only to find which users row to lock first. The token is judged
+    // below, under its own lock.
+    const [owners] = await this.pool.execute<
+      (RowDataPacket & { user_id: string })[]
+    >(RESET_TOKEN_OWNER_SQL, [tokenHash]);
+    const userId = owners[0]?.user_id;
+    if (!userId) {
+      throw invalid();
+    }
+
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+
+      // A deleted account's password_hash must stay the placeholder.
+      const [accounts] = await connection.execute<PasswordRow[]>(
+        LOCK_PASSWORD_SQL,
+        [userId],
+      );
+      if (!accounts[0]) {
+        throw invalid();
+      }
+
+      // The lock is what stops two concurrent resets both consuming one token.
+      const [tokens] = await connection.execute<ResetTokenRow[]>(
+        LOCK_RESET_TOKEN_SQL,
+        [tokenHash],
+      );
+      const current = tokens[0];
+      if (!current || current.used_at !== null || isSqlTrue(current.expired)) {
+        throw invalid();
+      }
+
+      await connection.execute<ResultSetHeader>(RESET_PASSWORD_SQL, [
+        await this.hashPassword(newPassword),
+        userId,
+      ]);
+      const [consumed] = await connection.execute<ResultSetHeader>(
+        CONSUME_RESET_TOKEN_SQL,
+        [tokenHash],
+      );
+      if (consumed.affectedRows !== 1) {
+        throw invalid();
+      }
+      await connection.execute<ResultSetHeader>(INVALIDATE_RESET_TOKENS_SQL, [
+        userId,
+      ]);
+
+      await connection.commit();
+      transactionStarted = false;
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
+
+    // After the commit and allowed to fail, as in changePassword, whose comment
+    // sets out what survives a failure here.
+    try {
+      await this.logoutAll(userId);
+    } catch {
+      this.logger.warn('Session revocation failed after password reset');
     }
   }
 

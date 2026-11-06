@@ -25,16 +25,21 @@ import {
   ErrorResponse,
   RestrictedAccountResponse,
 } from '../common/openapi';
-import { AuthTokensResponse } from './auth.responses';
+import { AuthTokensResponse, PasswordForgotResponse } from './auth.responses';
 import { AuthGuard } from './auth.guard';
 import type { AuthenticatedRequest } from './auth.guard';
 import { AllowRestricted } from './allow-restricted.decorator';
 import { AuthService } from './auth.service';
 import { AuthRateLimitService } from './auth-rate-limit.service';
 import { ChangePasswordDto } from './dto/change-password.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { RefreshDto } from './dto/refresh.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
+
+export const PASSWORD_FORGOT_MESSAGE =
+  'If that address has an account, a password reset email has been sent.';
 
 @ApiTags('auth')
 @Controller('auth')
@@ -212,6 +217,71 @@ export class AuthController {
       body.current_password,
       body.new_password,
     );
+  }
+
+  @Post('password/forgot')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Request a password reset',
+    description:
+      '**Always returns the same 200 response**, whether or not the address ' +
+      'has an account, the account is restricted, or the email could be sent, ' +
+      'so it cannot be used to test which addresses exist. If the address ' +
+      'matches an account, a single-use reset token is sent to it and any ' +
+      'earlier token stops working. Rate limited per client IP and address.',
+  })
+  @ApiOkResponse({ type: PasswordForgotResponse })
+  @ApiErrorResponses({
+    400: 'Missing or malformed email, or unknown property.',
+  })
+  async forgotPassword(
+    @Body() body: ForgotPasswordDto,
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<PasswordForgotResponse> {
+    await this.enforceRateLimit(
+      response,
+      this.authRateLimitService.enforcePasswordForgot(
+        this.clientIp(request),
+        body.email,
+      ),
+    );
+    await this.authService.forgotPassword(body.email);
+    return { message: PASSWORD_FORGOT_MESSAGE };
+  }
+
+  @Post('password/reset')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary: 'Reset a password with an emailed token',
+    description:
+      'Replaces the password and revokes every session of the account. ' +
+      'Returns no tokens: sign in with `POST /auth/login`, because a reset ' +
+      'link must not work as a sign-in. A suspended or banned account may ' +
+      'reset but is still refused at login. Rate limited per client IP and ' +
+      'token.',
+  })
+  @ApiNoContentResponse({
+    description: 'The password is replaced and all sessions are revoked.',
+  })
+  @ApiErrorResponses({
+    400:
+      'Invalid input, or an unknown, expired or already used token; all three ' +
+      'token cases return the same message.',
+  })
+  async resetPassword(
+    @Body() body: ResetPasswordDto,
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<void> {
+    await this.enforceRateLimit(
+      response,
+      this.authRateLimitService.enforcePasswordReset(
+        this.clientIp(request),
+        body.token,
+      ),
+    );
+    await this.authService.resetPassword(body.token, body.new_password);
   }
 
   private clientIp(request: Request): string {

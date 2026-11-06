@@ -1,17 +1,37 @@
-import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
-import { ValidationPipe } from '@nestjs/common';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  jest,
+} from '@jest/globals';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 import { verify as argon2Verify } from 'argon2';
-import { randomBytes, scrypt as scryptCallback } from 'node:crypto';
+import { createHash, randomBytes, scrypt as scryptCallback } from 'node:crypto';
+import { PASSWORD_FORGOT_MESSAGE } from '../src/auth/auth.controller';
 import {
   CHANGE_PASSWORD_SQL,
+  CONSUME_RESET_TOKEN_SQL,
+  INSERT_RESET_TOKEN_SQL,
+  INVALID_RESET_TOKEN_MESSAGE,
+  INVALIDATE_RESET_TOKENS_SQL,
   LOCK_PASSWORD_SQL,
+  LOCK_RESET_TOKEN_SQL,
   MYSQL_POOL,
+  RESET_ACCOUNT_BY_EMAIL_SQL,
+  RESET_PASSWORD_SQL,
+  RESET_TOKEN_OWNER_SQL,
 } from '../src/auth/auth.service';
+import {
+  EmailTransport,
+  type OutboundMessage,
+} from '../src/email/email-transport';
 import {
   ANONYMISE_ACCOUNT_SQL,
   CREATED_COMMUNITY_SQL,
@@ -76,8 +96,23 @@ interface TestRateLimitBucket {
   windowSeconds: number;
 }
 
+interface TestResetToken {
+  token_hash: string;
+  user_id: string;
+  expires_at: Date;
+  used_at: Date | null;
+}
+
+const FORGOT_IP_MAX = 8;
+const RESET_IP_MAX = 12;
+
 describe('Auth endpoints (e2e)', () => {
   let app: INestApplication<App>;
+  let resetTokens: TestResetToken[];
+  let sentEmails: OutboundMessage[];
+  let failEmail: Error | null;
+  let previousForgotIpMax: string | undefined;
+  let previousResetIpMax: string | undefined;
   let users: TestUser[];
   let userInsertCount: number;
   let sessions: TestSession[];
@@ -109,6 +144,13 @@ describe('Auth endpoints (e2e)', () => {
       process.env.USER_ACTIVITY_WRITE_INTERVAL_SECONDS;
     previousPasswordChangeAccountMax =
       process.env.AUTH_PASSWORD_CHANGE_ACCOUNT_MAX;
+    previousForgotIpMax = process.env.AUTH_PASSWORD_FORGOT_IP_MAX;
+    previousResetIpMax = process.env.AUTH_PASSWORD_RESET_IP_MAX;
+    process.env.AUTH_PASSWORD_FORGOT_IP_MAX = String(FORGOT_IP_MAX);
+    process.env.AUTH_PASSWORD_RESET_IP_MAX = String(RESET_IP_MAX);
+    resetTokens = [];
+    sentEmails = [];
+    failEmail = null;
     process.env.AUTH_LOGIN_IP_MAX = '2';
     process.env.AUTH_PASSWORD_CHANGE_ACCOUNT_MAX = '3';
     process.env.AUTH_LOGIN_IP_WINDOW_SECONDS = '60';
@@ -126,6 +168,30 @@ describe('Auth endpoints (e2e)', () => {
       sql: string,
       values: unknown[],
     ): Promise<[unknown, unknown]> => {
+      if (sql === RESET_ACCOUNT_BY_EMAIL_SQL) {
+        const [email] = values as [string];
+        return Promise.resolve([
+          users
+            .filter(
+              (user) =>
+                !user.deleted_at &&
+                user.email.localeCompare(email, undefined, {
+                  sensitivity: 'base',
+                }) === 0,
+            )
+            .map(({ id, email: stored }) => ({ id, email: stored })),
+          [],
+        ]);
+      }
+      if (sql === RESET_TOKEN_OWNER_SQL) {
+        const [tokenHash] = values as [string];
+        return Promise.resolve([
+          resetTokens
+            .filter((row) => row.token_hash === tokenHash)
+            .map(({ user_id }) => ({ user_id })),
+          [],
+        ]);
+      }
       if (sql.startsWith('INSERT INTO users')) {
         userInsertCount += 1;
         const [id, username, email, passwordHash] = values as [
@@ -234,7 +300,13 @@ describe('Auth endpoints (e2e)', () => {
         ]);
       }
       if (sql.startsWith('SELECT type, expires_at')) {
-        return Promise.resolve([[], []]);
+        const [userId] = values as [string];
+        return Promise.resolve([
+          restrictedUserIds.has(userId)
+            ? [{ type: 'suspension', expires_at: null }]
+            : [],
+          [],
+        ]);
       }
       if (sql.startsWith('SELECT session_id FROM auth_sessions')) {
         const [tokenHash] = values as [string];
@@ -426,6 +498,56 @@ describe('Auth endpoints (e2e)', () => {
         }
         return Promise.resolve([{ affectedRows: user ? 1 : 0 }, []]);
       }
+      // Password reset, through the real AuthService.
+      if (sql === INVALIDATE_RESET_TOKENS_SQL) {
+        const [userId] = values as [string];
+        const live = resetTokens.filter(
+          (row) => row.user_id === userId && row.used_at === null,
+        );
+        live.forEach((row) => {
+          row.used_at = new Date();
+        });
+        return Promise.resolve([{ affectedRows: live.length }, []]);
+      }
+      if (sql === INSERT_RESET_TOKEN_SQL) {
+        const [tokenHash, userId, ttl] = values as [string, string, number];
+        resetTokens.push({
+          token_hash: tokenHash,
+          user_id: userId,
+          expires_at: new Date(Date.now() + ttl * 1000),
+          used_at: null,
+        });
+        return Promise.resolve([{ affectedRows: 1 }, []]);
+      }
+      if (sql === LOCK_RESET_TOKEN_SQL) {
+        const [tokenHash] = values as [string];
+        return Promise.resolve([
+          resetTokens
+            .filter((row) => row.token_hash === tokenHash)
+            .map((row) => ({
+              user_id: row.user_id,
+              used_at: row.used_at,
+              expired: row.expires_at.getTime() <= Date.now() ? 1 : 0,
+            })),
+          [],
+        ]);
+      }
+      if (sql === RESET_PASSWORD_SQL) {
+        const [passwordHash, userId] = values as [string, string];
+        users.find((entry) => entry.id === userId)!.password_hash =
+          passwordHash;
+        return Promise.resolve([{ affectedRows: 1 }, []]);
+      }
+      if (sql === CONSUME_RESET_TOKEN_SQL) {
+        const [tokenHash] = values as [string];
+        const row = resetTokens.find(
+          (entry) => entry.token_hash === tokenHash && entry.used_at === null,
+        );
+        if (row) {
+          row.used_at = new Date();
+        }
+        return Promise.resolve([{ affectedRows: row ? 1 : 0 }, []]);
+      }
       // Account deletion, through the real AccountDeletionService.
       if (sql === LOCK_ACCOUNT_SQL) {
         const [userId] = values as [string];
@@ -456,6 +578,9 @@ describe('Auth endpoints (e2e)', () => {
         return Promise.resolve([{ affectedRows: 1 }, []]);
       }
       if ((DELETE_PRIVATE_STATE_SQL as readonly string[]).includes(sql)) {
+        if (sql.includes('password_reset_tokens')) {
+          resetTokens = resetTokens.filter((row) => row.user_id !== values[0]);
+        }
         return Promise.resolve([{ affectedRows: 0 }, []]);
       }
       return Promise.reject(new Error(`Unexpected transactional SQL: ${sql}`));
@@ -477,6 +602,13 @@ describe('Auth endpoints (e2e)', () => {
     })
       .overrideProvider(MYSQL_POOL)
       .useValue(pool)
+      .overrideProvider(EmailTransport)
+      .useValue({
+        send: (message: OutboundMessage) => {
+          sentEmails.push(message);
+          return failEmail ? Promise.reject(failEmail) : Promise.resolve();
+        },
+      })
       .compile();
 
     app = moduleFixture.createNestApplication();
@@ -492,6 +624,16 @@ describe('Auth endpoints (e2e)', () => {
 
   afterEach(async () => {
     await app.close();
+    for (const [name, previous] of [
+      ['AUTH_PASSWORD_FORGOT_IP_MAX', previousForgotIpMax],
+      ['AUTH_PASSWORD_RESET_IP_MAX', previousResetIpMax],
+    ] as const) {
+      if (previous === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = previous;
+      }
+    }
     if (previousLoginIpMax === undefined) {
       delete process.env.AUTH_LOGIN_IP_MAX;
     } else {
@@ -1249,6 +1391,312 @@ describe('Auth endpoints (e2e)', () => {
         'Too many requests',
       );
       await login(CURRENT, 200);
+    });
+  });
+
+  describe('password reset', () => {
+    const OLD = 'correct-horse-battery';
+    const NEXT = 'brand-new-horse-battery';
+    const ADDRESS = 'resetting_user@example.com';
+
+    const server = () => request(app.getHttpServer());
+    const register = async () => {
+      const response = await server()
+        .post('/auth/register')
+        .send({ username: 'resetting_user', email: ADDRESS, password: OLD })
+        .expect(201);
+      return response.body as { accessToken: string; refreshToken: string };
+    };
+    const settle = async () => {
+      for (let turn = 0; turn < 10; turn += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    };
+    const forgot = async (email = ADDRESS) => {
+      const response = await server()
+        .post('/auth/password/forgot')
+        .send({ email });
+      await settle();
+      return response;
+    };
+    const tokenFrom = (message: OutboundMessage) =>
+      /[A-Za-z0-9_-]{43}/.exec(message.text)![0];
+    const requestToken = async () => {
+      await forgot().then((response) => expect(response.status).toBe(200));
+      return tokenFrom(sentEmails.at(-1)!);
+    };
+    const reset = (token: string, newPassword = NEXT) =>
+      server()
+        .post('/auth/password/reset')
+        .send({ token, new_password: newPassword });
+    const login = (password: string) =>
+      server()
+        .post('/auth/login')
+        .send({ identifier: 'resetting_user', password });
+    const hashOf = (token: string) =>
+      createHash('sha256').update(token).digest('hex');
+
+    describe('POST /auth/password/forgot', () => {
+      // The test that matters most: nothing may vary with the address.
+      it('answers byte-identically for known, unknown, restricted and deleted addresses, and when sending fails', async () => {
+        await register();
+        users.push(
+          {
+            id: 'restricted-id',
+            username: 'restricted_user',
+            email: 'restricted@example.com',
+            password_hash: 'x',
+            created_at: new Date(),
+            last_seen_at: null,
+          },
+          {
+            id: 'deleted-id',
+            username: 'deleted_user',
+            email: 'deleted@example.com',
+            password_hash: 'x',
+            created_at: new Date(),
+            last_seen_at: null,
+            deleted_at: new Date(),
+          },
+        );
+        restrictedUserIds.add('restricted-id');
+
+        const answers = [
+          await forgot(ADDRESS),
+          await forgot('nobody@example.com'),
+          await forgot('restricted@example.com'),
+          await forgot('deleted@example.com'),
+        ];
+        failEmail = new Error('smtp down');
+        answers.push(await forgot('second_address@example.com'));
+        users.push({
+          id: 'failing-id',
+          username: 'failing_user',
+          email: 'failing@example.com',
+          password_hash: 'x',
+          created_at: new Date(),
+          last_seen_at: null,
+        });
+        answers.push(await forgot('failing@example.com'));
+
+        for (const answer of answers) {
+          expect(answer.status).toBe(200);
+          expect(answer.text).toBe(answers[0].text);
+          expect(answer.headers['content-type']).toBe(
+            answers[0].headers['content-type'],
+          );
+          expect(answer.headers['content-length']).toBe(
+            answers[0].headers['content-length'],
+          );
+        }
+        expect(answers[0].body).toEqual({ message: PASSWORD_FORGOT_MESSAGE });
+      });
+
+      it('stores one hash of a token that appears only in the email', async () => {
+        await register();
+        const logs = (
+          ['log', 'warn', 'error', 'debug', 'verbose'] as const
+        ).map((level) => jest.spyOn(Logger.prototype, level));
+        const response = await forgot();
+
+        expect(sentEmails).toHaveLength(1);
+        expect(sentEmails[0].to).toBe(ADDRESS);
+        const token = tokenFrom(sentEmails[0]);
+        expect(resetTokens.map((row) => row.token_hash)).toEqual([
+          hashOf(token),
+        ]);
+        expect(response.text).not.toContain(token);
+        expect(JSON.stringify(response.headers)).not.toContain(token);
+        expect(
+          JSON.stringify(logs.flatMap((spy) => spy.mock.calls as unknown[])),
+        ).not.toContain(token);
+        logs.forEach((spy) => spy.mockRestore());
+      });
+
+      it('makes an earlier link stop working', async () => {
+        await register();
+        const first = await requestToken();
+        const second = await requestToken();
+        await reset(first).expect(400);
+        await reset(second).expect(204);
+      });
+
+      it('inserts nothing and sends nothing for an unknown address', async () => {
+        await forgot('nobody@example.com');
+        expect(resetTokens).toEqual([]);
+        expect(sentEmails).toEqual([]);
+      });
+
+      it('logs a rejected send without the body or token', async () => {
+        await register();
+        failEmail = new Error('smtp down');
+        const warn = jest.spyOn(Logger.prototype, 'warn');
+        const response = await forgot();
+
+        expect(response.status).toBe(200);
+        const token = tokenFrom(sentEmails[0]);
+        const output = JSON.stringify(warn.mock.calls);
+        expect(output).toContain('Password reset email could not be sent');
+        expect(output).not.toContain(token);
+        expect(output).not.toContain(sentEmails[0].text);
+        warn.mockRestore();
+      });
+
+      it.each([
+        [{}],
+        [{ email: 'not-an-email' }],
+        [{ email: 42 }],
+        [{ email: ADDRESS, unexpected: true }],
+      ])('rejects %j with 400, sending nothing', async (body) => {
+        await server().post('/auth/password/forgot').send(body).expect(400);
+        expect(sentEmails).toEqual([]);
+      });
+
+      it('answers 429 with Retry-After past the per-address bucket, keyed case-insensitively', async () => {
+        const send = (email: string) =>
+          server().post('/auth/password/forgot').send({ email });
+        await send('limited@example.com').expect(200);
+        await send('LIMITED@example.com').expect(200);
+        await send('limited@EXAMPLE.com').expect(200);
+        const limited = await send('Limited@example.com').expect(429);
+        expect(limited.headers['retry-after']).toMatch(/^\d+$/);
+      });
+
+      it('answers 429 with Retry-After past the per-IP bucket', async () => {
+        for (let index = 0; index < FORGOT_IP_MAX; index += 1) {
+          await server()
+            .post('/auth/password/forgot')
+            .send({ email: `address${index}@example.com` })
+            .expect(200);
+        }
+        const limited = await server()
+          .post('/auth/password/forgot')
+          .send({ email: 'one-more@example.com' })
+          .expect(429);
+        expect(limited.headers['retry-after']).toMatch(/^\d+$/);
+      });
+    });
+
+    describe('POST /auth/password/reset', () => {
+      it('round-trips forgot, reset and login: new password in, old password out', async () => {
+        await register();
+        const previous = users[0].password_hash;
+        const token = await requestToken();
+
+        const response = await reset(token).expect(204);
+        expect(response.text).toBe('');
+        expect(users[0].password_hash).not.toBe(previous);
+        expect(users[0].password_hash).toMatch(/^\$argon2id\$/);
+        await expect(argon2Verify(users[0].password_hash, NEXT)).resolves.toBe(
+          true,
+        );
+        expect(resetTokens[0].used_at).toBeInstanceOf(Date);
+
+        await login(OLD).expect(401);
+        await login(NEXT).expect(200);
+      });
+
+      it('returns no token of any kind', async () => {
+        await register();
+        const response = await reset(await requestToken()).expect(204);
+        expect(response.text).not.toMatch(/accessToken|refreshToken|session/);
+        expect(response.headers['set-cookie']).toBeUndefined();
+      });
+
+      it('revokes every session: the old access and refresh tokens stop working', async () => {
+        const { accessToken, refreshToken } = await register();
+        await server()
+          .post('/auth/logout-all')
+          .set('Authorization', 'Bearer not-a-token')
+          .expect(401);
+
+        await reset(await requestToken()).expect(204);
+
+        expect(sessions).toEqual([]);
+        await server()
+          .post('/auth/logout')
+          .set('Authorization', `Bearer ${accessToken}`)
+          .expect(401);
+        await server().post('/auth/refresh').send({ refreshToken }).expect(401);
+      });
+
+      it('answers unknown, reused and expired tokens with the same 400, writing nothing', async () => {
+        await register();
+        const token = await requestToken();
+        await reset(token).expect(204);
+        const afterReset = users[0].password_hash;
+
+        const unknown = await reset('z'.repeat(43)).expect(400);
+        const reused = await reset(token, 'another-horse-battery').expect(400);
+
+        const expiring = await requestToken();
+        resetTokens.find(
+          (row) => row.token_hash === hashOf(expiring),
+        )!.expires_at = new Date(Date.now() - 1000);
+        const expired = await reset(expiring, 'another-horse-battery').expect(
+          400,
+        );
+
+        expect(users[0].password_hash).toBe(afterReset);
+        expect(unknown.text).toBe(reused.text);
+        expect(expired.text).toBe(reused.text);
+        expect((reused.body as { message: string }).message).toBe(
+          INVALID_RESET_TOKEN_MESSAGE,
+        );
+      });
+
+      it('lets a restricted account reset, and still refuses it at login', async () => {
+        await register();
+        restrictedUserIds.add(users[0].id);
+        await reset(await requestToken()).expect(204);
+        await expect(argon2Verify(users[0].password_hash, NEXT)).resolves.toBe(
+          true,
+        );
+        await login(NEXT).expect(403);
+      });
+
+      it('refuses a link issued before the account was deleted', async () => {
+        const { accessToken } = await register();
+        const token = await requestToken();
+        await server()
+          .delete('/users/me')
+          .set('Authorization', `Bearer ${accessToken}`)
+          .send({ password: OLD })
+          .expect(204);
+        const placeholder = users[0].password_hash;
+
+        await reset(token).expect(400);
+        expect(users[0].password_hash).toBe(placeholder);
+      });
+
+      it.each([
+        [{ token: 'a'.repeat(43) }],
+        [{ new_password: NEXT }],
+        [{ token: 'a'.repeat(43), new_password: 'p'.repeat(11) }],
+        [{ token: 'a'.repeat(43), new_password: 'p'.repeat(129) }],
+        [{ token: '', new_password: NEXT }],
+        [{ token: 'a'.repeat(129), new_password: NEXT }],
+        [{ token: 'a'.repeat(43), new_password: NEXT, user_id: 'x' }],
+      ])('rejects %j with 400', async (body) => {
+        await server().post('/auth/password/reset').send(body).expect(400);
+      });
+
+      it('answers 429 with Retry-After past the per-token bucket', async () => {
+        const token = 'q'.repeat(43);
+        for (let index = 0; index < 5; index += 1) {
+          await reset(token).expect(400);
+        }
+        const limited = await reset(token).expect(429);
+        expect(limited.headers['retry-after']).toMatch(/^\d+$/);
+      });
+
+      it('answers 429 with Retry-After past the per-IP bucket', async () => {
+        for (let index = 0; index < RESET_IP_MAX; index += 1) {
+          await reset(`${index}`.padEnd(43, 'r')).expect(400);
+        }
+        const limited = await reset('s'.repeat(43)).expect(429);
+        expect(limited.headers['retry-after']).toMatch(/^\d+$/);
+      });
     });
   });
 });

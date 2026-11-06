@@ -25,6 +25,83 @@
 
 [Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
 
+### Resetting a forgotten password
+
+A user who forgot their password requests a token by email and exchanges it for
+a new password. Neither route takes a bearer token: the caller is signed out by
+definition. The token is stored in `password_reset_tokens` (migration
+`029_create_password_reset_tokens`).
+
+| Route | Success | Notes |
+| --- | --- | --- |
+| `POST /auth/password/forgot` | `200`, `{ "message" }` | `{ "email" }`. The same response for every address |
+| `POST /auth/password/reset` | `204`, no body | `{ "token", "new_password" }` (12–128 characters) |
+
+**`forgot` always answers the same.** The status and body are identical whether
+the address is known, unknown, restricted or deleted, and whether or not the email
+could be sent. Any variation would be an account-enumeration oracle, and the
+address is the one field an attacker can test in bulk. That includes latency: an
+SMTP send takes far longer than doing nothing, so the response waits only for the
+account lookup both paths share. Writing the token and sending the email happen
+after it, detached from the request, so a failure there is logged rather than
+returned, and a process restart in that moment loses the email. An unknown address
+writes nothing and sends nothing. No artificial delay is added.
+
+**Only the stored address is ever emailed, and only an exact match counts.**
+`users.email` has an accent-insensitive collation, so `bób@example.com` matches
+`bob@example.com`. Such a variant is treated as an unknown address: otherwise each
+one would get its own rate-limit bucket and could mail-bomb one account, and
+sending to the submitted address would hand its owner the token.
+
+**The token.** `randomBytes(32)` in base64url, like access and refresh tokens.
+
+- **Only its SHA-256 hash is stored**, so reading the table yields nothing usable.
+  It appears only in the email: never in a response, a log line or an error. The
+  development-only logging transport is the deliberate exception (see [Outbound
+  email](#outbound-email)).
+- **It lasts 60 minutes**, configurable with `PASSWORD_RESET_TTL_SECONDS` (read
+  once at startup through `readPositiveInteger`). `expires_at` is computed and
+  compared on the database clock.
+- **It is single-use.** `used_at` is set when it is consumed. The row is kept.
+- **A new request invalidates earlier tokens**, so only the newest email works.
+  Otherwise every past request would stay live for its full lifetime.
+- **The email holds the token itself, not a link**, because no reset page exists
+  yet and no web URL is configured.
+
+**One `400` for every invalid token.** Unknown, expired and already used tokens all
+return `Invalid or expired reset token` and write nothing, and so does a token
+whose account has been deleted. Distinguishing them would tell an attacker which
+guesses are close. A reuse does not revoke anything, unlike a reused refresh token:
+the holder of a used link has no session to protect against.
+
+The reset runs in one transaction: it locks the `users` row, then the token row
+(`SELECT … FOR UPDATE`, which is what stops two concurrent resets both consuming
+one token), writes a new Argon2id hash, consumes the token and marks the account's
+other tokens used. Of two concurrent resets exactly one gets `204`; the loser gets
+the generic `400` and changes nothing. `forgot`, `reset` and account deletion all
+lock the `users` row before the token rows, so they cannot deadlock on each other.
+
+**A reset revokes every session and issues no tokens.** It is the response to a
+suspected compromise, so no existing session may survive. The user signs in through
+`POST /auth/login` afterwards. Issuing a session here would turn a reset link into a
+sign-in, so a link left in a browser history or fetched by a mail scanner would be
+an account takeover. As with [changing your password](#changing-your-password),
+revocation runs after the commit and its failure is logged, not returned, and
+leaves the same exposure: surviving access tokens work for up to their 15-minute
+lifetime, and surviving refresh tokens keep working until they expire (30 days) or
+are revoked by `POST /auth/logout-all`.
+
+**A restricted account may reset, and still cannot log in.** `AuthGuard` is not
+involved, and login checks for an active restriction independently. Blocking the
+reset would not improve anything and would reveal the account's state.
+
+**Not included.** Expired tokens are not cleaned up: `auth_sessions`,
+`auth_refresh_tokens` and `auth_rate_limits` all accumulate rows with no reaper, so
+adding one only here would be inconsistent, and
+`idx_password_reset_tokens_expires_at` makes a future job cheap. Neither route writes
+a notification: `notifications.type` is an `ENUM` needing a migration, and the
+sessions are revoked anyway, so the inbox is unreachable until the next sign-in.
+
 ## Auth API
 
 The API connects to MySQL using `MYSQL_HOST` (defaults to `127.0.0.1`),
@@ -1234,6 +1311,10 @@ and 10 per refresh token per hour. Password changes are limited to 10 per IP
 and 5 per account (the token's user ID) per hour, because the endpoint
 verifies a password and is therefore a guessing oracle for anyone holding a
 stolen access token; the global write limit is far too loose for that.
+Password reset requests are limited to 5 per IP and 3 per lowercased address per
+hour; without the per-address bucket the route would be a mail-bombing tool aimed
+at a third party, and it counts unknown addresses alike, so a `429` reveals nothing.
+Password resets are limited to 20 per IP and 5 per submitted token per hour.
 Exceeded limits return HTTP `429` with a
 `Retry-After` header. Login failures remain generic, and no account lockout is
 applied. The exported `AuthRateLimitService.enforceSignals()` method uses the
@@ -1247,8 +1328,12 @@ Limits are configurable with `AUTH_LOGIN_IP_MAX`,
 `AUTH_REFRESH_IP_WINDOW_SECONDS`, `AUTH_REFRESH_TOKEN_MAX`,
 `AUTH_REFRESH_TOKEN_WINDOW_SECONDS`, `AUTH_PASSWORD_CHANGE_IP_MAX`,
 `AUTH_PASSWORD_CHANGE_IP_WINDOW_SECONDS`, `AUTH_PASSWORD_CHANGE_ACCOUNT_MAX`,
-and `AUTH_PASSWORD_CHANGE_ACCOUNT_WINDOW_SECONDS`. Values must be integers
-from 1 to 86400.
+`AUTH_PASSWORD_CHANGE_ACCOUNT_WINDOW_SECONDS`, `AUTH_PASSWORD_FORGOT_IP_MAX`,
+`AUTH_PASSWORD_FORGOT_IP_WINDOW_SECONDS`, `AUTH_PASSWORD_FORGOT_ACCOUNT_MAX`,
+`AUTH_PASSWORD_FORGOT_ACCOUNT_WINDOW_SECONDS`, `AUTH_PASSWORD_RESET_IP_MAX`,
+`AUTH_PASSWORD_RESET_IP_WINDOW_SECONDS`, `AUTH_PASSWORD_RESET_TOKEN_MAX`, and
+`AUTH_PASSWORD_RESET_TOKEN_WINDOW_SECONDS`. Values must be integers from 1 to
+86400.
 The API does not trust proxy forwarding headers by default; `request.ip` uses
 the direct socket address. Deployments behind a reverse proxy must configure
 trusted proxy handling at the infrastructure/application boundary before
@@ -1686,8 +1771,9 @@ password reset need: the only safe channel for a reset token is the address on
 file, never an HTTP response. Feature modules import `EmailModule` and inject
 the abstract `EmailTransport`, which has a single
 `send({ to, subject, text }): Promise<void>`. Messages are plain text only:
-there is no HTML body, no attachments, and no templating. No route sends email
-yet.
+there is no HTML body, no attachments, and no templating. `POST
+/auth/password/forgot` is the only route that sends email (see [Resetting a
+forgotten password](#resetting-a-forgotten-password)).
 
 The transport is selected and validated when the application starts. An
 invalid value, or a missing one in production, fails startup instead of

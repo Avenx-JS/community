@@ -26,6 +26,10 @@ interface AuthRateLimitConfig {
   loginAccount: RateLimitOptions;
   passwordChangeIp: RateLimitOptions;
   passwordChangeAccount: RateLimitOptions;
+  passwordForgotIp: RateLimitOptions;
+  passwordForgotAccount: RateLimitOptions;
+  passwordResetIp: RateLimitOptions;
+  passwordResetToken: RateLimitOptions;
   registerIp: RateLimitOptions;
   registerAccount: RateLimitOptions;
   refreshIp: RateLimitOptions;
@@ -65,6 +69,10 @@ function readConfig(): AuthRateLimitConfig {
     loginAccount: readOptions('AUTH_LOGIN_ACCOUNT', 10, 900),
     passwordChangeIp: readOptions('AUTH_PASSWORD_CHANGE_IP', 10, 3600),
     passwordChangeAccount: readOptions('AUTH_PASSWORD_CHANGE_ACCOUNT', 5, 3600),
+    passwordForgotIp: readOptions('AUTH_PASSWORD_FORGOT_IP', 5, 3600),
+    passwordForgotAccount: readOptions('AUTH_PASSWORD_FORGOT_ACCOUNT', 3, 3600),
+    passwordResetIp: readOptions('AUTH_PASSWORD_RESET_IP', 20, 3600),
+    passwordResetToken: readOptions('AUTH_PASSWORD_RESET_TOKEN', 5, 3600),
     registerIp: readOptions('AUTH_REGISTER_IP', 5, 3600),
     registerAccount: readOptions('AUTH_REGISTER_ACCOUNT', 3, 3600),
     refreshIp: readOptions('AUTH_REFRESH_IP', 30, 3600),
@@ -119,6 +127,37 @@ export class AuthRateLimitService {
         'password:change:account',
         userId,
         this.config.passwordChangeAccount,
+      ),
+    ]);
+  }
+
+  // The per-address bucket is what stops this route being a mail-bombing tool
+  // aimed at a third party. It counts every address alike, known or not, so a
+  // 429 reveals nothing about which ones exist.
+  async enforcePasswordForgot(
+    ip: string,
+    email: string,
+  ): Promise<number | null> {
+    return this.enforceSignals([
+      this.signal('password:forgot:ip', ip, this.config.passwordForgotIp),
+      this.signal(
+        'password:forgot:email',
+        email.trim().toLowerCase(),
+        this.config.passwordForgotAccount,
+      ),
+    ]);
+  }
+
+  async enforcePasswordReset(
+    ip: string,
+    token: string,
+  ): Promise<number | null> {
+    return this.enforceSignals([
+      this.signal('password:reset:ip', ip, this.config.passwordResetIp),
+      this.signal(
+        'password:reset:token',
+        token,
+        this.config.passwordResetToken,
       ),
     ]);
   }

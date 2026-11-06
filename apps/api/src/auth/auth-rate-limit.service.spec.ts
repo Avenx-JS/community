@@ -73,6 +73,23 @@ describe('AuthRateLimitService', () => {
     expect(JSON.stringify(calls)).not.toContain('opaque-refresh-token');
   });
 
+  it('applies IP and normalized address signals to password reset requests', async () => {
+    await service.enforcePasswordForgot('192.0.2.10', ' Member@Example.COM ');
+    const first = JSON.stringify(calls);
+    expect(calls).toHaveLength(4);
+    expect(first.toLowerCase()).not.toContain('member@example.com');
+
+    calls = [];
+    await service.enforcePasswordForgot('192.0.2.10', 'member@example.com');
+    expect(JSON.stringify(calls)).toBe(first);
+  });
+
+  it('applies IP and token signals to password resets, never storing the token', async () => {
+    await service.enforcePasswordReset('192.0.2.10', 'opaque-reset-token');
+    expect(calls).toHaveLength(4);
+    expect(JSON.stringify(calls)).not.toContain('opaque-reset-token');
+  });
+
   it('supports fixed-window expiry in the atomic upsert', async () => {
     await service.enforceRegistration(
       '192.0.2.10',
