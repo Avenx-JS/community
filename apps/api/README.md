@@ -189,8 +189,8 @@ Grant these to the migration operator, not to the API runtime user.
 #### Search indexes
 
 Migration `015_add_fulltext_search_indexes` adds MySQL native `FULLTEXT`
-indexes for word search. No endpoint queries them yet; they exist for the
-search endpoint, which must use exactly these column lists:
+indexes for word search. [`GET /search`](#search) queries them, and must use
+exactly these column lists:
 
 | Index | Table | Query it supports |
 | --- | --- | --- |
@@ -203,8 +203,8 @@ each table has one multi-column index rather than one per column. A
 leading-wildcard `LIKE '%term%'` cannot use a B-tree index and scans the whole
 table; on posts and comments that would make each public search request a
 scan of all content. `GET /communities?search=` still uses its `LIKE` substring
-match unchanged; moving it to `MATCH` changes its matching and ordering and is
-the search endpoint's decision.
+match unchanged. `GET /search` did not move it to `MATCH`, because that would
+change its matching and ordering for existing clients.
 
 **Why native FULLTEXT.** An external engine (Elasticsearch, Meilisearch,
 Typesense) searches better, but adds a service to run, a sync pipeline to keep
@@ -2173,7 +2173,9 @@ environment variables: `API_REQUEST_IP_MAX` and
 `API_WRITE_ACCOUNT_WINDOW_SECONDS`; `API_CONTENT_CREATE_IP_MAX` and
 `API_CONTENT_CREATE_IP_WINDOW_SECONDS`; `API_CONTENT_CREATE_ACCOUNT_MAX` and
 `API_CONTENT_CREATE_ACCOUNT_WINDOW_SECONDS`; and `API_CONTENT_COOLDOWN_MAX`
-and `API_CONTENT_COOLDOWN_WINDOW_SECONDS`. Configure the same values and
+and `API_CONTENT_COOLDOWN_WINDOW_SECONDS`; and `API_SEARCH_IP_MAX` and
+`API_SEARCH_IP_WINDOW_SECONDS` for [`GET /search`](#search), 30 per IP per
+minute by default. Configure the same values and
 `RATE_LIMIT_HASH_SECRET` on every API instance. The MySQL upsert counter is
 atomic and shared across instances; process-local memory is not used for
 limiting. Configure a trusted proxy hop count as described in the security
@@ -2195,6 +2197,141 @@ database work; protect it from excessive traffic at the network/load-balancer
 layer. No other routes bypass the API limiter. Expired rows in
 `auth_rate_limits` should be periodically purged by database maintenance after
 their longest configured window has elapsed.
+
+## Search
+
+`GET /search` finds users, communities, posts or comments by text. It is public,
+like `GET /posts` and `GET /communities`. An optional bearer token only sets each
+post's `saved` flag.
+
+**One result kind per request.** `type` is required and chooses it. A combined
+response holding all four kinds was rejected: it would cost four queries per
+request, have four paginations that cannot be combined, and offer no meaningful
+relevance order across different kinds of row. Each request is therefore one
+standard collection with a bounded cost. A client wanting a combined view issues
+parallel requests. `type` has no default, because a default would silently pick
+one of the four and clients would not notice.
+
+| Parameter | Applies to | Accepted values |
+| --- | --- | --- |
+| `q` | all, required | 3–100 characters of plain text, trimmed; see below |
+| `type` | required | `users`, `communities`, `posts`, `comments` |
+| `community` | `posts`, `comments` | A community name, 1–50 letters, digits, underscores or hyphens |
+| `author` | `posts`, `comments` | A username, 3–50 letters, digits or underscores |
+| `from` / `to` | `posts`, `comments` | ISO 8601; half-open `created_at >= from AND created_at < to`, UTC, like the report queue. `to` must be later than `from` |
+| `page` | all | Integer 1–**100**; defaults to `1` |
+| `limit` | all | Integer 1–100; defaults to `20` |
+| `sort` | all | `relevance` (default) or `new` |
+
+`community`, `author`, `from` or `to` with `type=users` or `type=communities`
+returns `400`. So does a missing or unknown `q` or `type`, and any other query
+property. An unknown community, or one that is deleted or suspended, returns
+`404`, and so does an unknown or deleted author: the same answer as
+`GET /communities/:name/posts` and `GET /users/:username/posts`. A deleted
+account's placeholder username contains a hyphen and so fails the `author`
+pattern with `400`.
+
+The response is the standard envelope with the `type` echoed, so a client can
+tell the item shape:
+
+```json
+{ "type": "posts", "items": [], "page": 1, "limit": 20, "total": 0 }
+```
+
+| `type` | Items | Matched on | OpenAPI |
+| --- | --- | --- | --- |
+| `users` | The public profile: `username`, `display_name`, `bio`, `created_at` | Username prefix | `UserSearchResultListResponse` |
+| `communities` | The community DTO (`CommunityResponse`) | `name`, `description` | `CommunitySearchResultListResponse` |
+| `posts` | `PostResponse` | `title`, `content` | `PostSearchResultListResponse` |
+| `comments` | A flat comment with `post_title`, `community_name` and `score`, as from `GET /users/:username/comments`. No `replies`: a search hit has no place in a thread | `content` | `CommentSearchResultListResponse` |
+
+Post and community items carry `author_id` and `creator_id` exactly as every other
+post and community response does ([Data classification](#data-classification-errors-and-logging)).
+User items carry no account ID.
+
+An empty result is `200` with `items: []` and `total: 0`. `total` is counted with
+the same `FROM` and `WHERE` as the page, built once and shared, so the last page is
+never empty and the count never disagrees with the rows.
+
+### Full-text matching
+
+Communities, posts and comments use the `FULLTEXT` indexes of migration 015
+([Search indexes](#search-indexes)): `MATCH (title, content)`,
+`MATCH (content)` and `MATCH (name, description)` `AGAINST (? IN BOOLEAN MODE)`,
+with column lists exactly the indexes'. Boolean mode, not natural-language mode,
+because natural-language relevance filtering can drop common words.
+
+**Minimum length.** `innodb_ft_min_token_size` is 3 by default and is server
+configuration, which no migration can change. Shorter words are not in the index,
+so `q` must be at least 3 characters, and for these three types must contain at
+least one word of 3 or more letters or digits. Otherwise the response is `400` with
+a message naming the minimum. `go` or `C` would otherwise answer `200` with an
+empty list, which looks like missing results. InnoDB's stopwords (`the`, `with`, …)
+also match nothing. Matching is by whole word with no stemming: `kitten` does not
+find `kittens`.
+
+**Operators are never interpreted. This is a security requirement.** Boolean mode
+reads `+ - > < ( ) ~ * " @` as syntax: required and excluded words, weights,
+groups, wildcards, phrases and `@distance` proximity. Passed through, user input
+would change what a query means and could make it a syntax error, and wildcards or
+proximity searches can make it expensive. `booleanModeTerms`
+(`src/search/search-terms.ts`) therefore keeps only runs of letters, digits and
+underscores, and joins them with spaces. It is a whitelist, not a list of operators
+to strip, so a missed operator is impossible. It also drops words shorter than 3,
+deduplicates, and keeps at most 10 words, bounding one request's index lookups. The
+result is always a bound parameter, never interpolated. Plain words in boolean mode
+mean "any of these": `kitten cake` matches either, and rows matching more words
+rank higher. There is one test per operator character, against the stub and
+against a real server.
+
+**Ordering.** `sort=relevance` orders by the `MATCH … AGAINST` score descending,
+and `sort=new` by `created_at` descending. Both break ties on `id`, so paging
+returns each row exactly once.
+
+### Users
+
+Users are not full-text indexed: a username is a single token, and the existing
+`UNIQUE` index on `users.username` serves a prefix match. `type=users` is
+`username LIKE CONCAT(?, '%') ESCAPE '='`, with `%`, `_` and `=` escaped as in the
+other searches. It has no leading wildcard, because `LIKE '%term%'` cannot use the
+index and this is a public route, and no `LOWER()`, because the column's
+case-insensitive collation already ignores case. `sort=relevance` means prefix,
+then alphabetical; `sort=new` orders by join date. Only the username is matched:
+**never the email**, display name or bio. `GET /admin/users`' email search stays
+admin-only, and an email-shaped `q` matches no account. Search is not a way
+around the [PII minimisation](#data-classification-errors-and-logging).
+
+### What search never returns
+
+Each type filters what a public reader may not see, with the same predicates for
+items and `total`:
+
+- **Posts:** removed by moderation, or in a deleted or suspended community.
+- **Comments:** removed by moderation, on a removed post, or in a deleted or
+  suspended community.
+- **Communities:** deleted or suspended.
+- **Users:** deleted accounts and their `deleted_<id>` placeholder usernames.
+
+### Cost
+
+This is the most expensive public route in the API: an unauthenticated full-text
+query over the largest tables.
+
+- **Pages stop at 100**, not the 10000 used elsewhere. `OFFSET` makes MySQL
+  produce and discard every skipped match, which costs most for a full-text
+  query. Keyset pagination (a "results after this score and id" cursor) is the
+  real fix if deep paging is ever needed.
+- **A dedicated rate-limit bucket:** 30 requests per IP per minute by default, on
+  top of the general read limit (120). Override it with `API_SEARCH_IP_MAX` and
+  `API_SEARCH_IP_WINDOW_SECONDS`. It is keyed on `GET /search` by path, like the
+  report and content-creation buckets, and counts every request, including those
+  refused with `400`. Exceeding it returns `429` with `Retry-After`.
+- **No cache.** Nothing else in the project has one, and invalidating cached
+  results on every write, removal and suspension would be new infrastructure.
+
+`search.mysql.spec.ts` checks the plans against a real server: a `fulltext`
+access on each index for communities, posts and comments, and a `range` on the
+username index for users.
 
 ## Reports
 

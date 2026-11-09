@@ -52,6 +52,10 @@ export function createOpenApiDocument(app: INestApplication): OpenAPIObject {
     .addTag('saved-posts', "The authenticated user's private saved posts.")
     .addTag('comments', 'Threaded comments on posts.')
     .addTag('votes', 'Votes on posts and comments.')
+    .addTag(
+      'search',
+      'Full-text search over communities, posts and comments; username prefix search.',
+    )
     .addTag('reports', 'Reporting users to platform administrators.')
     .addTag('notifications', "The authenticated user's notification inbox.")
     .addTag('admin: users', 'Account directory for administrators.')

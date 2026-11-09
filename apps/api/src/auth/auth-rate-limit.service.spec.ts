@@ -394,6 +394,54 @@ describe('AuthRateLimitService', () => {
     }
   });
 
+  // GET /search reads a full-text index over every post: the general read
+  // bucket is far too loose for it.
+  it('gives GET /search its own configurable per-IP bucket, and only it', async () => {
+    const names = ['API_SEARCH_IP_MAX', 'API_SEARCH_IP_WINDOW_SECONDS'];
+    const previous = names.map((name) => process.env[name]);
+    process.env.API_SEARCH_IP_MAX = '2';
+    process.env.API_SEARCH_IP_WINDOW_SECONDS = '45';
+    try {
+      const searchCalls: Array<{ sql: string; values: unknown[] }> = [];
+      const overridden = new AuthRateLimitService({
+        execute: (sql: string, values: unknown[]) => {
+          searchCalls.push({ sql, values });
+          return Promise.resolve([[{ request_count: 3, retry_after: 41 }], []]);
+        },
+      } as unknown as Pool);
+      const searchWindows = () =>
+        searchCalls.filter(
+          ({ sql }) =>
+            sql.startsWith('INSERT INTO auth_rate_limits') &&
+            sql.includes('INTERVAL 45 SECOND'),
+        );
+
+      await expect(
+        overridden.enforceApiRequest('192.0.2.10', 'GET', '/search'),
+      ).resolves.toBe(41);
+      expect(searchWindows()).toHaveLength(1);
+
+      searchCalls.length = 0;
+      for (const [method, path] of [
+        ['GET', '/posts'],
+        ['GET', '/communities'],
+        ['GET', '/search/anything'],
+        ['POST', '/search'],
+      ]) {
+        await overridden.enforceApiRequest('192.0.2.10', method, path);
+      }
+      expect(searchWindows()).toHaveLength(0);
+    } finally {
+      names.forEach((name, index) => {
+        if (previous[index] === undefined) {
+          delete process.env[name];
+        } else {
+          process.env[name] = previous[index];
+        }
+      });
+    }
+  });
+
   it('shares API counters across service instances through the database store', async () => {
     const previousMax = process.env.API_READ_IP_MAX;
     process.env.API_READ_IP_MAX = '1';

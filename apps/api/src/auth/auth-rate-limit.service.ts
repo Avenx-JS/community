@@ -45,6 +45,7 @@ interface AuthRateLimitConfig {
   reportCreateAccount: RateLimitOptions;
   accountDeleteIp: RateLimitOptions;
   accountDeleteAccount: RateLimitOptions;
+  searchIp: RateLimitOptions;
 }
 
 const localDevelopmentSecret = 'community-local-rate-limit-secret';
@@ -88,6 +89,7 @@ function readConfig(): AuthRateLimitConfig {
     reportCreateAccount: readOptions('API_REPORT_CREATE_ACCOUNT', 10, 3600),
     accountDeleteIp: readOptions('API_ACCOUNT_DELETE_IP', 10, 86400),
     accountDeleteAccount: readOptions('API_ACCOUNT_DELETE_ACCOUNT', 5, 86400),
+    searchIp: readOptions('API_SEARCH_IP', 30, 60),
   };
 }
 
@@ -271,6 +273,13 @@ export class AuthRateLimitService {
           ),
         );
       }
+    }
+
+    // A public full-text query over every post and comment: far costlier than
+    // a read the general bucket was sized for. Per IP only, since the route
+    // needs no token.
+    if (method === 'GET' && path === '/search') {
+      signals.push(this.signal('api:search:ip', ip, this.config.searchIp));
     }
 
     return this.enforceSignals(signals);
