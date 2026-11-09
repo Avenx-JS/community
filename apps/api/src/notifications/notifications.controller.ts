@@ -51,7 +51,11 @@ export class NotificationsController {
   @AllowRestricted()
   @ApiOperation({
     summary: 'List your notifications',
-    description: 'Newest first by default, then by ID.',
+    description:
+      'Newest first by default, then by ID. Notifications caused by an ' +
+      'account you have blocked, or that has blocked you, are left out; ' +
+      'they are kept, and reappear if the block is lifted. Moderation ' +
+      'notifications are never left out.',
   })
   @ApiAuthenticated({ allowRestricted: true })
   @ApiOkResponse({ type: NotificationListResponse })
@@ -69,7 +73,8 @@ export class NotificationsController {
   @ApiOperation({
     summary: 'Count your unread notifications',
     description:
-      'The cheap route for polling a badge; poll this, not the listing.',
+      'The cheap route for polling a badge; poll this, not the listing. ' +
+      'Counts exactly what the listing shows, blocked actors left out.',
   })
   @ApiAuthenticated({ allowRestricted: true })
   @ApiOkResponse({ type: UnreadCountResponse })

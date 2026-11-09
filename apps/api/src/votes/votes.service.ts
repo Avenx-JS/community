@@ -3,6 +3,7 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { isSqlTrue } from '../common/community-moderation';
 import { randomUUID } from 'node:crypto';
@@ -15,6 +16,7 @@ import type {
 import { MYSQL_POOL } from '../auth/auth.service';
 import { activeCommunitySql } from '../common/community-visibility';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
+import { UserBlockPolicyService } from '../users/user-block-policy.service';
 
 interface VoteRow extends RowDataPacket {
   id: string;
@@ -57,6 +59,7 @@ export interface VoteInput {
 type VoteTarget = VoteInput['target_type'];
 interface VoteTargetState {
   communityId: string;
+  authorId: string;
   removed: boolean;
 }
 type Executor = Pick<Pool | PoolConnection, 'execute'>;
@@ -70,10 +73,15 @@ export const SCORE_SQL =
 
 @Injectable()
 export class VotesService {
+  private readonly blocks: UserBlockPolicyService;
+
   constructor(
     @Inject(MYSQL_POOL) private readonly pool: Pool,
     private readonly ruleAcceptance: CommunityRuleAcceptanceService,
-  ) {}
+    @Optional() blocks?: UserBlockPolicyService,
+  ) {
+    this.blocks = blocks ?? new UserBlockPolicyService(pool);
+  }
 
   async vote(input: VoteInput, userId: string): Promise<VoteResponseDto> {
     const connection = await this.pool.getConnection();
@@ -92,6 +100,13 @@ export class VotesService {
       await this.ruleAcceptance.assertAcceptedOrThrow(
         userId,
         target.communityId,
+        connection,
+      );
+      // A vote is directed at the content's author: refused when either has
+      // blocked the other, after the 404 and the rule gate.
+      await this.blocks.assertNotBlockedOrThrow(
+        userId,
+        target.authorId,
         connection,
       );
       // Removed content takes no new votes. Withdrawing a vote (DELETE)
@@ -149,7 +164,7 @@ export class VotesService {
   // shape as vote(): the target is locked first, so the returned score is
   // consistent with the deletion. Idempotent: without a vote nothing is
   // deleted and the current score is returned.
-  // Deliberately NOT gated on rule acceptance: withdrawing a vote removes
+  // Deliberately NOT gated on rule acceptance or on blocks: withdrawing a vote removes
   // participation rather than adding it, and gating it would leave a user who
   // declines new rules with votes they cannot retract.
   async withdraw(
@@ -236,12 +251,13 @@ export class VotesService {
       (RowDataPacket & {
         id: string;
         community_id: string;
+        author_id: string;
         removed?: number | string | boolean | null;
       })[]
     >(
       targetType === 'post'
-        ? `SELECT id, community_id, removed_at IS NOT NULL AS removed FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')}${lock ? ' FOR UPDATE' : ''}`
-        : `SELECT comments.id, posts.community_id,
+        ? `SELECT id, community_id, author_id, removed_at IS NOT NULL AS removed FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')}${lock ? ' FOR UPDATE' : ''}`
+        : `SELECT comments.id, posts.community_id, comments.author_id,
              (comments.removed_at IS NOT NULL OR posts.removed_at IS NOT NULL) AS removed
            FROM comments
            INNER JOIN posts ON posts.id = comments.post_id
@@ -259,6 +275,7 @@ export class VotesService {
     }
     return {
       communityId: target.community_id,
+      authorId: target.author_id,
       removed: isSqlTrue(target.removed ?? 0),
     };
   }

@@ -47,6 +47,7 @@ import { UpdatePostDto } from './dto/update-post.dto';
 import { ListPostsDto } from './dto/list-posts.dto';
 import { PostsService } from './posts.service';
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
+import { USER_BLOCKED_FORBIDDEN_DOC } from '../users/user-block-policy.service';
 import { CastVoteDto } from '../votes/dto/cast-vote.dto';
 import {
   VoteResponse,
@@ -344,10 +345,11 @@ export class PostsController {
     description:
       "Idempotent: the caller's one vote on the post is set to value; " +
       'repeating the request leaves one vote. Requires acceptance of the ' +
-      "community's current rules.",
+      "community's current rules. Refused when the caller and the post's " +
+      'author have blocked each other.',
   })
   @ApiAuthenticated({
-    forbidden: "The caller has not accepted the community's current rules.",
+    forbidden: `The caller has not accepted the community's current rules. ${USER_BLOCKED_FORBIDDEN_DOC}`,
   })
   @ApiRouteParam('id', 'id', 'Post ID.')
   @ApiOkResponse({ type: VoteResponse })
@@ -466,9 +468,15 @@ export class PostsController {
   @ApiTags('comments')
   @ApiOperation({
     summary: 'Comment on a post',
-    description: 'Set parent_id to reply to a comment on the same post.',
+    description:
+      'Set parent_id to reply to a comment on the same post. Refused when ' +
+      'the caller and the author it is directed at have blocked each other: ' +
+      "the post's author for a comment, the parent comment's author for a " +
+      'reply.',
   })
-  @ApiAuthenticated()
+  @ApiAuthenticated({
+    forbidden: `The caller has not accepted the community's current rules. ${USER_BLOCKED_FORBIDDEN_DOC}`,
+  })
   @ApiRouteParam('postId', 'id', 'Post ID.')
   @ApiCreatedResponse({ type: CommentResponse })
   @ApiErrorResponses({

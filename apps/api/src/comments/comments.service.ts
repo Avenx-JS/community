@@ -5,6 +5,7 @@ import {
   Injectable,
   NotFoundException,
   PayloadTooLargeException,
+  Optional,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -14,6 +15,7 @@ import type {
   RowDataPacket,
 } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { UserBlockPolicyService } from '../users/user-block-policy.service';
 import {
   canModerateCommunitySql,
   isSqlTrue,
@@ -223,11 +225,16 @@ export interface CommentReplyListDto {
 
 @Injectable()
 export class CommentsService {
+  private readonly blocks: UserBlockPolicyService;
+
   constructor(
     @Inject(MYSQL_POOL) private readonly pool: Pool,
     private readonly notifications: NotificationsService,
     private readonly ruleAcceptance: CommunityRuleAcceptanceService,
-  ) {}
+    @Optional() blocks?: UserBlockPolicyService,
+  ) {
+    this.blocks = blocks ?? new UserBlockPolicyService(pool);
+  }
 
   // The thread varies by viewer only where content was removed. A removed
   // post's thread is 404 for everyone but its reviewers
@@ -586,6 +593,16 @@ export class CommentsService {
       await this.ruleAcceptance.assertAcceptedOrThrow(
         authorId,
         post.community_id,
+        connection,
+      );
+      // A comment is directed at the post's author, a reply at the parent
+      // comment's author, never at the post's: replying to someone else's
+      // comment under a blocked user's post is not interacting with them.
+      // After the 404s and the rule gate, so an unknown post is still a 404
+      // and the check never confirms a post exists.
+      await this.blocks.assertNotBlockedOrThrow(
+        authorId,
+        parentAuthorId ?? post.author_id,
         connection,
       );
       // After the 404s and the rule gate, so a caller sees the most specific

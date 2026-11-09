@@ -155,7 +155,7 @@ export class UsersController {
   @ApiOkResponse({ type: UserPostListResponse })
   @ApiErrorResponses({
     400: 'Invalid username or query parameters.',
-    404: 'User not found.',
+    404: 'User not found, or the caller and the user have blocked each other (either way, the same 404).',
   })
   listUserPosts(
     @Param('username', new SafeRouteParamPipe('username')) username: string,
@@ -166,6 +166,7 @@ export class UsersController {
   }
 
   @Get(':username/comments')
+  @UseGuards(OptionalAuthGuard)
   @ApiOperation({
     summary: "List a user's comments",
     description:
@@ -178,16 +179,18 @@ export class UsersController {
   @ApiOkResponse({ type: UserCommentListResponse })
   @ApiErrorResponses({
     400: 'Invalid username or query parameters.',
-    404: 'User not found.',
+    404: 'User not found, or the caller and the user have blocked each other (either way, the same 404).',
   })
   listUserComments(
     @Param('username', new SafeRouteParamPipe('username')) username: string,
     @Query() query: ListUserActivityDto,
+    @Req() request?: OptionallyAuthenticatedRequest,
   ) {
-    return this.userActivity.listComments(username, query);
+    return this.userActivity.listComments(username, query, request?.user?.id);
   }
 
   @Get(':username/communities')
+  @UseGuards(OptionalAuthGuard)
   @ApiOperation({
     summary: 'List the communities a user visibly takes part in',
     description:
@@ -200,12 +203,17 @@ export class UsersController {
   @ApiOkResponse({ type: UserCommunityListResponse })
   @ApiErrorResponses({
     400: 'Invalid username or query parameters.',
-    404: 'User not found.',
+    404: 'User not found, or the caller and the user have blocked each other (either way, the same 404).',
   })
   listUserCommunities(
     @Param('username', new SafeRouteParamPipe('username')) username: string,
     @Query() query: ListUserCommunitiesDto,
+    @Req() request?: OptionallyAuthenticatedRequest,
   ) {
-    return this.userActivity.listCommunities(username, query);
+    return this.userActivity.listCommunities(
+      username,
+      query,
+      request?.user?.id,
+    );
   }
 }

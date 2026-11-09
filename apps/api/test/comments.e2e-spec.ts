@@ -83,6 +83,8 @@ describe('Comment endpoints (e2e)', () => {
   let rules: RulesStore;
   let deletedCommunities: Set<string>;
   let suspendedCommunities: Set<string>;
+  // "blocker:blocked" pairs, read by the block lookup.
+  let blocks: Set<string>;
   let lockedPosts: Set<string>;
   let removedPosts: Set<string>;
   let ancestryReads: number;
@@ -168,6 +170,7 @@ describe('Comment endpoints (e2e)', () => {
     openConnections = 0;
     deletedCommunities = new Set();
     suspendedCommunities = new Set();
+    blocks = new Set();
     lockedPosts = new Set();
     removedPosts = new Set();
     ancestryReads = 0;
@@ -716,6 +719,11 @@ describe('Comment endpoints (e2e)', () => {
           comments = comments.filter((comment) => !deletedIds.has(comment.id));
           return [{ affectedRows: 1 }, []];
         }
+        if (sql.includes('FROM user_blocks')) {
+          const [a, b] = values as string[];
+          const blocked = blocks.has(`${a}:${b}`) || blocks.has(`${b}:${a}`);
+          return [[{ blocked: blocked ? 1 : 0 }], []];
+        }
         throw new Error(`Unexpected SQL query: ${sql}`);
       },
       // A transaction snapshots the stored rows and restores them on
@@ -1165,6 +1173,119 @@ describe('Comment endpoints (e2e)', () => {
         true,
       );
       expect(openConnections).toBe(0);
+    });
+  });
+
+  // user-2 wrote post-1 and reply-1; user-1 wrote post-2, root-1 and
+  // nested-reply; user-3 wrote root-2. A block in either direction refuses
+  // directed interaction and changes nothing else.
+  describe('between blocked users', () => {
+    const as = (token: string) => {
+      const server = () => request(app.getHttpServer());
+      const auth = (call: request.Test) =>
+        call.set('Authorization', `Bearer ${token}`);
+      return {
+        comment: (postId: string, parentId?: string) =>
+          auth(server().post(`/posts/${postId}/comments`)).send({
+            content: 'Hello',
+            ...(parentId ? { parent_id: parentId } : {}),
+          }),
+        remove: (id: string) =>
+          auth(server().post(`/comments/${id}/remove`)).send({}),
+        lock: (id: string) => auth(server().post(`/comments/${id}/lock`)),
+        deleteOwn: (id: string) => auth(server().delete(`/comments/${id}`)),
+      };
+    };
+    const user1 = as('valid-token');
+    const user2 = as('post-author-token');
+    const moderator = as('moderator-token');
+    const inserts = () =>
+      queryCalls.filter(({ sql }) => sql.startsWith('INSERT INTO comments'));
+    const refusedFor = async (call: request.Test) => {
+      const response = await call.expect(403);
+      expect(response.body).toEqual({ reason: 'user_blocked' });
+      return response.text;
+    };
+
+    it.each([
+      ['user-2 blocked user-1', 'user-2:user-1'],
+      ['user-1 blocked user-2', 'user-1:user-2'],
+    ])(
+      'refuses comments both ways, with one payload, when %s',
+      async (_name, pair) => {
+        blocks.add(pair);
+        const before = comments.length;
+        // user-1 on user-2's post, and user-2 on user-1's post.
+        const one = await refusedFor(user1.comment('post-1'));
+        const other = await refusedFor(user2.comment('post-2'));
+        expect(one).toBe(other);
+        expect(one).not.toMatch(/user-1|user-2|blocker|blocked_by/);
+        expect(comments).toHaveLength(before);
+        expect(inserts()).toHaveLength(0);
+        expect(notifications).toEqual([]);
+        expect(openConnections).toBe(0);
+      },
+    );
+
+    it('is byte-identical whichever way the block runs', async () => {
+      blocks.add('user-2:user-1');
+      const blocked = await refusedFor(user1.comment('post-1'));
+      blocks.clear();
+      blocks.add('user-1:user-2');
+      const blocker = await refusedFor(user1.comment('post-1'));
+      expect(blocked).toBe(blocker);
+    });
+
+    // A reply is directed at the parent comment's author, not the post's.
+    it('refuses a reply to the blocked user’s comment, and allows one to a third user’s on their post', async () => {
+      blocks.add('user-2:user-1');
+      await refusedFor(user1.comment('post-1', 'reply-1'));
+      await user1.comment('post-1', 'root-2').expect(201);
+      expect(notifications.map((row) => row.recipient_id)).toEqual(['user-3']);
+    });
+
+    it('allows a reply to a third user’s comment even where the post author is blocked', async () => {
+      blocks.add('user-1:user-2');
+      await user1.comment('post-1', 'root-2').expect(201);
+    });
+
+    // After the 404s, so the check never confirms that a post exists.
+    it('answers an unknown post with 404, not 403', async () => {
+      blocks.add('user-2:user-1');
+      await user1.comment('no-such-post').expect(404);
+      await user1.comment('post-1', 'no-such-parent').expect(404);
+    });
+
+    it('lets a blocked user’s comments stay in the shared thread', async () => {
+      blocks.add('user-1:user-2');
+      const thread = (
+        await request(app.getHttpServer())
+          .get('/posts/post-1/comments')
+          .set('Authorization', 'Bearer valid-token')
+          .expect(200)
+      ).text;
+      expect(thread).toContain('"reply-1"');
+      expect(thread).toContain('"author_id":"user-2"');
+    });
+
+    it('lets either side delete their own comment', async () => {
+      blocks.add('user-1:user-2');
+      blocks.add('user-2:user-1');
+      await user1.deleteOwn('root-2').expect(403);
+      await user1.deleteOwn('nested-reply').expect(204);
+      await user2.deleteOwn('other-post-comment').expect(204);
+    });
+
+    // Blocking a moderator must not let anyone block their way out of
+    // moderation, and a moderator's own block changes nothing either.
+    it('never stops a moderator acting on a user who blocked them, or whom they blocked', async () => {
+      blocks.add('user-1:user-mod');
+      blocks.add('user-mod:user-1');
+      await moderator.remove('root-1').expect(200);
+      await moderator.lock('nested-reply').expect(200);
+      expect(
+        comments.find((comment) => comment.id === 'root-1')?.removed_at,
+      ).toBeTruthy();
     });
   });
 

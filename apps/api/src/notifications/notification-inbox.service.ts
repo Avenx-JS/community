@@ -1,6 +1,7 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { eitherBlockedSql } from '../users/user-block-policy.service';
 import { ListNotificationsDto } from './dto/list-notifications.dto';
 import {
   MODERATION_NOTIFICATION_TYPES,
@@ -110,6 +111,13 @@ export function toNotificationDto(row: NotificationRow): NotificationDto {
   };
 }
 
+// Notifications from an account blocked in either direction are hidden on
+// read, never deleted: a block is reversible, and unblocking shows them again.
+// The filter uses actor_id, not the actor_username snapshot in metadata.
+// Moderation notifications have actor_id NULL and are never filtered. Bound
+// once per placeholder as the recipient: (recipient, recipient).
+export const INBOX_NOT_BLOCKED_SQL = `(actor_id IS NULL OR NOT ${eitherBlockedSql('?', 'notifications.actor_id')})`;
+
 // Builds the listing and count statements. The recipient is always the first
 // bound value and comes only from the caller's validated identity. Each
 // filter combination keeps a prefix of one of migration 010's indexes:
@@ -121,8 +129,8 @@ export function buildNotificationListQuery(
 ): { sql: string; countSql: string; values: (string | number)[] } {
   const page = query.page ?? 1;
   const limit = query.limit ?? 20;
-  const filters = ['recipient_id = ?'];
-  const values: string[] = [recipientId];
+  const filters = ['recipient_id = ?', INBOX_NOT_BLOCKED_SQL];
+  const values: string[] = [recipientId, recipientId, recipientId];
 
   if (query.read === false) {
     filters.push('read_at IS NULL');
@@ -147,8 +155,9 @@ export function buildNotificationListQuery(
   };
 }
 
-export const UNREAD_COUNT_SQL =
-  'SELECT COUNT(*) AS unread FROM notifications WHERE recipient_id = ? AND read_at IS NULL';
+// The badge applies the same block filter as the list, or the two disagree.
+// Bound as [recipient, recipient, recipient].
+export const UNREAD_COUNT_SQL = `SELECT COUNT(*) AS unread FROM notifications WHERE recipient_id = ? AND ${INBOX_NOT_BLOCKED_SQL} AND read_at IS NULL`;
 
 // COALESCE keeps an existing read_at, so marking read again never refreshes
 // when the user read it. Both statements match the row whether or not it
@@ -198,7 +207,7 @@ export class NotificationInboxService {
   async unreadCount(recipientId: string): Promise<UnreadCountDto> {
     const [rows] = await this.pool.execute<
       (RowDataPacket & { unread: number | string })[]
-    >(UNREAD_COUNT_SQL, [recipientId]);
+    >(UNREAD_COUNT_SQL, [recipientId, recipientId, recipientId]);
     return { unread: Number(rows[0]?.unread ?? 0) };
   }
 

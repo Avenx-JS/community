@@ -39,7 +39,7 @@ describe('VotesService vote routes', () => {
   const answer = (sql: string, values: unknown[]): [unknown, unknown] => {
     if (
       sql.startsWith(
-        'SELECT id, community_id, removed_at IS NOT NULL AS removed FROM posts',
+        'SELECT id, community_id, author_id, removed_at IS NOT NULL AS removed FROM posts',
       ) ||
       sql.startsWith('SELECT comments.id, posts.community_id')
     ) {
@@ -100,6 +100,10 @@ describe('VotesService vote routes', () => {
       const [type, id] = values as string[];
       // MySQL returns SUM as a decimal string.
       return [[{ score: String(scoreOf(type, id)) }], []];
+    }
+    // The block lookup (UserBlockPolicyService): no block here.
+    if (sql.includes('FROM user_blocks')) {
+      return [[{ blocked: 0 }], []];
     }
     throw new Error(`Unexpected SQL: ${sql}`);
   };

@@ -36,6 +36,7 @@ import {
 import { UpdateCommentDto } from './dto/update-comment.dto';
 import { ListCommentRepliesDto } from './dto/list-comment-replies.dto';
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
+import { USER_BLOCKED_FORBIDDEN_DOC } from '../users/user-block-policy.service';
 import { CastVoteDto } from '../votes/dto/cast-vote.dto';
 import {
   VoteResponse,
@@ -115,10 +116,11 @@ export class CommentsController {
     description:
       "Idempotent: the caller's one vote on the comment is set to value; " +
       'repeating the request leaves one vote. Requires acceptance of the ' +
-      "current rules of the post's community.",
+      "current rules of the post's community. Refused when the caller and " +
+      "the comment's author have blocked each other.",
   })
   @ApiAuthenticated({
-    forbidden: "The caller has not accepted the community's current rules.",
+    forbidden: `The caller has not accepted the community's current rules. ${USER_BLOCKED_FORBIDDEN_DOC}`,
   })
   @ApiRouteParam('id', 'id', 'Comment ID.')
   @ApiOkResponse({ type: VoteResponse })

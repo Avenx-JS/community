@@ -8,6 +8,7 @@ import { AppModule } from '../src/app.module';
 import { AuthRateLimitService } from '../src/auth/auth-rate-limit.service';
 import { AuthService, MYSQL_POOL } from '../src/auth/auth.service';
 import { USER_ID_BY_USERNAME_SQL } from '../src/users/user-activity.service';
+import { BLOCKED_BETWEEN_SQL } from '../src/users/user-block-policy.service';
 import {
   BLOCK_STATE_SQL,
   BLOCK_USER_SQL,
@@ -174,6 +175,24 @@ describe('User blocks (e2e)', () => {
           ),
           [],
         ]);
+      }
+      // The block lookup, against the stored rows: bound as [a, b, b, a].
+      if (sql === BLOCKED_BETWEEN_SQL) {
+        const [a, b] = values as string[];
+        const blocked = blocks.some(
+          (row) =>
+            (row.blocker_id === a && row.blocked_id === b) ||
+            (row.blocker_id === b && row.blocked_id === a),
+        );
+        return Promise.resolve([[{ blocked: blocked ? 1 : 0 }], []]);
+      }
+      // GET /users/:username/posts, /comments and /communities: empty feeds,
+      // so a 200 against a 404 is all a test reads.
+      if (sql.startsWith('SELECT COUNT(*) AS total')) {
+        return Promise.resolve([[{ total: 0 }], []]);
+      }
+      if (/FROM (posts|comments c|\(\s*SELECT id AS community_id)/.test(sql)) {
+        return Promise.resolve([[], []]);
       }
       return Promise.reject(new Error(`Unexpected SQL query: ${sql}`));
     };
@@ -468,6 +487,50 @@ describe('User blocks (e2e)', () => {
     expect(await listNames()).toEqual([]);
     await userA.unblock('bob').expect(204);
     expect(await listNames()).toEqual([]);
+  });
+
+  // A block hides each person's profile feeds from the other, as an unknown
+  // account would be hidden; the profile itself and every shared surface stay.
+  describe('profile feeds between blocked users', () => {
+    const feeds = ['posts', 'comments', 'communities'];
+
+    it.each([
+      ['the viewer blocked them', 'token-a', 'bob'],
+      ['they blocked the viewer', 'token-b', 'alice'],
+    ])('answers 404 when %s', async (_name, token, target) => {
+      await userA.block('bob').expect(204);
+      for (const feed of feeds) {
+        const response = await as(token)
+          .get(`/users/${target}/${feed}`)
+          .expect(404);
+        // Exactly what an unknown account gets: it says nothing of a block.
+        const unknown = await as(token)
+          .get(`/users/nobody_here/${feed}`)
+          .expect(404);
+        expect(response.body).toEqual(unknown.body);
+        expect(response.text).not.toMatch(/block/i);
+      }
+    });
+
+    it('serves the feeds again after an unblock, and always to anonymous readers', async () => {
+      await userA.block('bob').expect(204);
+      for (const feed of feeds) {
+        await as().get(`/users/alice/${feed}`).expect(200);
+        await as().get(`/users/bob/${feed}`).expect(200);
+      }
+      await userA.unblock('bob').expect(204);
+      for (const feed of feeds) {
+        await userA.get(`/users/bob/${feed}`).expect(200);
+        await userB.get(`/users/alice/${feed}`).expect(200);
+      }
+    });
+
+    it('leaves a third account’s feeds alone', async () => {
+      await userA.block('bob').expect(204);
+      for (const feed of feeds) {
+        await userA.get(`/users/carol/${feed}`).expect(200);
+      }
+    });
   });
 
   describe('privacy', () => {

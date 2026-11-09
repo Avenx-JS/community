@@ -173,7 +173,7 @@ describe('Rule acceptance enforcement', () => {
       }
       if (
         sql.startsWith(
-          'SELECT id, community_id, removed_at IS NOT NULL AS removed FROM posts',
+          'SELECT id, community_id, author_id, removed_at IS NOT NULL AS removed FROM posts',
         )
       ) {
         const post = postById(values[0]);
@@ -290,6 +290,10 @@ describe('Rule acceptance enforcement', () => {
       }
       if (sql.startsWith('SELECT target_id, SUM(value) AS score')) {
         return rows([]);
+      }
+      // The block lookup (UserBlockPolicyService): no block here.
+      if (sql.includes('FROM user_blocks')) {
+        return Promise.resolve([[{ blocked: 0 }], []]);
       }
       return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
     };

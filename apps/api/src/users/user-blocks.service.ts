@@ -70,8 +70,8 @@ export const BLOCKED_USERS_SQL = `SELECT u.username, u.display_name, b.created_a
 
 export const BLOCKED_USERS_COUNT_SQL = `SELECT COUNT(*) AS total ${BLOCKED_USERS_FROM}`;
 
-// The relationship and its management only: nothing reads user_blocks to change
-// behaviour yet (see "Blocking users" in README.md). Blocks are private. Every
+// The relationship and its management only. What a block changes is decided in
+// user-block-policy.service.ts (see "Blocking users" in README.md). Blocks are private. Every
 // statement is bound to the caller's id from the token, no route takes a blocker
 // parameter, and nothing here notifies the blocked user or writes an audit entry.
 @Injectable()

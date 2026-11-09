@@ -8,6 +8,7 @@ import { ListNotificationsDto } from './dto/list-notifications.dto';
 import {
   buildNotificationListQuery,
   DELETE_NOTIFICATION_SQL,
+  INBOX_NOT_BLOCKED_SQL,
   MARK_ALL_READ_SQL,
   MARK_READ_SQL,
   MARK_UNREAD_SQL,
@@ -15,6 +16,11 @@ import {
   toNotificationDto,
   UNREAD_COUNT_SQL,
 } from './notification-inbox.service';
+
+// Every inbox read starts with the recipient and the block filter, which
+// binds the recipient twice more.
+const RECIPIENT = `recipient_id = ? AND ${INBOX_NOT_BLOCKED_SQL}`;
+const BOUND = ['user-a', 'user-a', 'user-a'];
 
 const query = (input: Record<string, unknown> = {}) =>
   plainToInstance(ListNotificationsDto, input);
@@ -71,13 +77,13 @@ describe('NotificationInboxService', () => {
       );
 
       expect(calls[0].sql).toBe(
-        'SELECT id, type, subject_type, subject_id, community_id, metadata, read_at, created_at FROM notifications WHERE recipient_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?',
+        `SELECT id, type, subject_type, subject_id, community_id, metadata, read_at, created_at FROM notifications WHERE ${RECIPIENT} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
       );
-      expect(calls[0].values).toEqual(['user-a', 20, 40]);
+      expect(calls[0].values).toEqual([...BOUND, 20, 40]);
       expect(calls[1].sql).toBe(
-        'SELECT COUNT(*) AS total FROM notifications WHERE recipient_id = ?',
+        `SELECT COUNT(*) AS total FROM notifications WHERE ${RECIPIENT}`,
       );
-      expect(calls[1].values).toEqual(['user-a']);
+      expect(calls[1].values).toEqual(BOUND);
       expect(result).toMatchObject({ page: 3, limit: 20, total: 41 });
       expect(result.items).toHaveLength(1);
     });
@@ -103,33 +109,32 @@ describe('NotificationInboxService', () => {
 
       for (const call of calls) {
         expect(call.sql).not.toMatch(/\bJOIN\b|\bposts\b|\bcomments\b/i);
-        expect(call.sql).not.toContain('actor_id');
+        // The actor filters the inbox but is never selected.
+        expect(call.sql.slice(0, call.sql.indexOf(' FROM '))).not.toContain(
+          'actor_id',
+        );
       }
     });
   });
 
   describe('buildNotificationListQuery', () => {
     it.each([
-      [{ read: 'false' }, 'recipient_id = ? AND read_at IS NULL', ['user-a']],
-      [
-        { read: 'true' },
-        'recipient_id = ? AND read_at IS NOT NULL',
-        ['user-a'],
-      ],
+      [{ read: 'false' }, `${RECIPIENT} AND read_at IS NULL`, BOUND],
+      [{ read: 'true' }, `${RECIPIENT} AND read_at IS NOT NULL`, BOUND],
       [
         { type: 'restriction_applied' },
-        'recipient_id = ? AND type = ?',
-        ['user-a', 'restriction_applied'],
+        `${RECIPIENT} AND type = ?`,
+        [...BOUND, 'restriction_applied'],
       ],
       [
         { community_id: 'community-1' },
-        'recipient_id = ? AND community_id = ?',
-        ['user-a', 'community-1'],
+        `${RECIPIENT} AND community_id = ?`,
+        [...BOUND, 'community-1'],
       ],
       [
         { read: 'false', type: 'post_comment', community_id: 'c-1' },
-        'recipient_id = ? AND read_at IS NULL AND type = ? AND community_id = ?',
-        ['user-a', 'post_comment', 'c-1'],
+        `${RECIPIENT} AND read_at IS NULL AND type = ? AND community_id = ?`,
+        [...BOUND, 'post_comment', 'c-1'],
       ],
     ])('filters %o', (input, where, filterValues) => {
       const built = buildNotificationListQuery('user-a', query(input));
@@ -150,7 +155,7 @@ describe('NotificationInboxService', () => {
       expect(built.sql).toContain(
         'ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?',
       );
-      expect(built.values).toEqual(['user-a', 5, 5]);
+      expect(built.values).toEqual([...BOUND, 5, 5]);
     });
 
     it('places limit and offset at the last page bound', () => {
@@ -169,9 +174,10 @@ describe('NotificationInboxService', () => {
     await expect(service.unreadCount('user-a')).resolves.toEqual({
       unread: 7,
     });
-    expect(calls[0]).toEqual({ sql: UNREAD_COUNT_SQL, values: ['user-a'] });
+    expect(calls[0]).toEqual({ sql: UNREAD_COUNT_SQL, values: BOUND });
+    // The same block filter as the list, so the badge agrees with it.
     expect(UNREAD_COUNT_SQL).toBe(
-      'SELECT COUNT(*) AS unread FROM notifications WHERE recipient_id = ? AND read_at IS NULL',
+      `SELECT COUNT(*) AS unread FROM notifications WHERE ${RECIPIENT} AND read_at IS NULL`,
     );
 
     results = [[{ unread: 0 }]];

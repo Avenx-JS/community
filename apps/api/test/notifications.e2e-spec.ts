@@ -12,6 +12,7 @@ import { ApiRateLimitInterceptor } from '../src/common/api-rate-limit.intercepto
 import { SafeApiExceptionFilter } from '../src/common/safe-api-exception.filter';
 import {
   DELETE_NOTIFICATION_SQL,
+  INBOX_NOT_BLOCKED_SQL,
   MARK_ALL_READ_SQL,
   MARK_READ_SQL,
   MARK_UNREAD_SQL,
@@ -88,6 +89,8 @@ describe('Notification inbox endpoints (e2e)', () => {
   let queries: Array<{ sql: string; values: unknown[] }>;
   let rateLimitCalls: Array<{ method: string; path: string }>;
   let databaseClock: number;
+  // "blocker:blocked" pairs, read by the inbox's block filter.
+  let blocks: Set<string>;
   const nextDatabaseTime = () => {
     databaseClock += 60_000;
     return new Date(databaseClock);
@@ -105,6 +108,7 @@ describe('Notification inbox endpoints (e2e)', () => {
     queries = [];
     rateLimitCalls = [];
     databaseClock = Date.UTC(2026, 9, 23, 9, 0, 0);
+    blocks = new Set();
     // 12 rows for user A sharing timestamps in pairs, so ordering relies on
     // the id tiebreaker; every third one is read.
     notifications = Array.from({ length: 12 }, (_, index) => ({
@@ -205,6 +209,19 @@ describe('Notification inbox endpoints (e2e)', () => {
               return row.read_at === null;
             case 'read_at IS NOT NULL':
               return row.read_at !== null;
+            // INBOX_NOT_BLOCKED_SQL: binds the recipient twice; a row with
+            // no actor (a moderation notice) always passes.
+            case 'NOT_BLOCKED': {
+              const recipient = values[parameter++] as string;
+              parameter++;
+              return (
+                row.actor_id === null ||
+                !(
+                  blocks.has(`${recipient}:${row.actor_id}`) ||
+                  blocks.has(`${row.actor_id}:${recipient}`)
+                )
+              );
+            }
             default:
               throw new Error(`Unexpected condition: ${condition}`);
           }
@@ -252,8 +269,10 @@ describe('Notification inbox endpoints (e2e)', () => {
       },
     };
 
-    const execute = (sql: string, values: unknown[]) => {
-      queries.push({ sql, values });
+    const execute = (rawSql: string, values: unknown[]) => {
+      queries.push({ sql: rawSql, values });
+      // The block filter is one condition, whatever ANDs it holds inside.
+      const sql = rawSql.split(INBOX_NOT_BLOCKED_SQL).join('NOT_BLOCKED');
       const write = writes[sql];
       if (write) {
         return Promise.resolve([{ affectedRows: write(values) }, []]);
@@ -470,6 +489,80 @@ describe('Notification inbox endpoints (e2e)', () => {
     });
     await get('/notifications/unread-count', 'token-empty').expect(200, {
       unread: 0,
+    });
+  });
+
+  // A block hides the other person in the blocker's inbox, and the blocker in
+  // the blocked person's: filtered on read, never deleted.
+  describe('blocked actors', () => {
+    const page = async (token = 'token-a') =>
+      ids((await get('/notifications?limit=100', token).expect(200)).body);
+    const unread = async (token = 'token-a') =>
+      (
+        (await get('/notifications/unread-count', token).expect(200)).body as {
+          unread: number;
+        }
+      ).unread;
+    const visibleUnread = () =>
+      notifications.filter(
+        (row) =>
+          row.recipient_id === 'user-a' &&
+          row.read_at === null &&
+          !['actor-1', 'actor-2'].includes(row.actor_id ?? ''),
+      ).length;
+
+    it.each([
+      [
+        'the recipient blocked the actors',
+        ['user-a:actor-1', 'user-a:actor-2'],
+      ],
+      [
+        'the actors blocked the recipient',
+        ['actor-1:user-a', 'actor-2:user-a'],
+      ],
+    ])(
+      'omits their notifications from list and badge when %s',
+      async (_name, pairs) => {
+        const before = (await page()).length;
+        for (const pair of pairs) blocks.add(pair);
+
+        const listed = await page();
+        expect(listed).not.toContain('a-01');
+        expect(listed).not.toContain('a-02');
+        expect(listed).toHaveLength(before - 2);
+        // The badge agrees with the list.
+        expect(await unread()).toBe(visibleUnread());
+      },
+    );
+
+    it('never filters notifications with no actor', async () => {
+      blocks.add('user-a:former_user');
+      expect(await page()).toEqual(
+        expect.arrayContaining(['a-deleted-actor', 'a-deleted-subject']),
+      );
+    });
+
+    it('hides on read without deleting, and an unblock shows them again', async () => {
+      const total = notifications.length;
+      const before = await page();
+      blocks.add('user-a:actor-1');
+      expect(await page()).not.toContain('a-01');
+      expect(notifications).toHaveLength(total);
+      blocks.delete('user-a:actor-1');
+      expect(await page()).toEqual(before);
+    });
+
+    it('filters on actor_id, never on the actor_username snapshot', async () => {
+      blocks.add('user-a:actor_1');
+      expect(await page()).toContain('a-01');
+      for (const { sql } of queries) {
+        expect(sql).not.toContain('actor_username');
+      }
+    });
+
+    it('leaves another recipient’s inbox alone', async () => {
+      blocks.add('user-a:actor-1');
+      expect(await page('token-b')).toContain('b-secret');
     });
   });
 

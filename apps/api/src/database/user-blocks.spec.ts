@@ -56,20 +56,52 @@ describe('migration 028 (user blocks)', () => {
   });
 });
 
-// Nothing is enforced yet: the feature must have no effect on any other code
-// path. A block is read only by its own service, and written otherwise only by
-// account deletion. The enforcement work is expected to change this list.
-describe('user blocks do not reach any other behaviour', () => {
-  it('leaves user_blocks referenced only by its own service and account deletion', () => {
-    const root = resolve(__dirname, '..');
-    const references = sourceFiles(root)
-      .filter((file) => file.endsWith('.ts') && !file.endsWith('.spec.ts'))
-      .filter((file) => readFileSync(file, 'utf8').includes('user_blocks'))
+// Every read of user_blocks that changes behaviour goes through the one
+// definition in user-block-policy.service.ts. Besides it, only the block list's
+// own service and account deletion name the table.
+describe('user blocks are read through one definition', () => {
+  const root = resolve(__dirname, '..');
+  const productionFiles = () =>
+    sourceFiles(root).filter(
+      (file) => file.endsWith('.ts') && !file.endsWith('.spec.ts'),
+    );
+  const referencing = (needle: RegExp) =>
+    productionFiles()
+      .filter((file) => needle.test(readFileSync(file, 'utf8')))
       .map((file) => relative(root, file).replace(/\\/g, '/'))
       .sort();
-    expect(references).toEqual([
+
+  it('names user_blocks only in its service, account deletion and the policy', () => {
+    expect(referencing(/user_blocks/)).toEqual([
       'users/account-deletion.service.ts',
+      'users/user-block-policy.service.ts',
       'users/user-blocks.service.ts',
     ]);
+  });
+
+  // The gated paths, and nothing else. Reporting, posting, membership, every
+  // moderation route, /admin, search and the shared reads must never consult
+  // a block: the risk here is over-enforcement, and a block that reached
+  // moderation would let a user block their way out of it. Adding a file to
+  // this list needs a reason in "Blocking users" in README.md.
+  it('uses the policy only on the gated paths', () => {
+    expect(
+      referencing(
+        /UserBlockPolicyService|eitherBlockedSql|BLOCKED_BETWEEN_SQL/,
+      ),
+    ).toEqual([
+      'comments/comments.service.ts',
+      'notifications/notification-inbox.service.ts',
+      'users/user-activity.service.ts',
+      'users/user-block-policy.module.ts',
+      'users/user-block-policy.service.ts',
+      'votes/votes.service.ts',
+    ]);
+  });
+
+  it('never reaches the moderation predicate', () => {
+    expect(
+      readFileSync(resolve(root, 'common/community-moderation.ts'), 'utf8'),
+    ).not.toMatch(/user_blocks|block/i);
   });
 });

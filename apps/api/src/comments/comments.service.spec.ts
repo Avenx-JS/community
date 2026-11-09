@@ -41,6 +41,10 @@ describe('CommentsService', () => {
     // The pool and the transaction connection share one query log and one
     // result queue, so a test reads the same whichever of them a query uses.
     const execute = (sql: string, values: unknown[]) => {
+      // The block lookup is answered outside the queue: no block here.
+      if (sql.includes('FROM user_blocks')) {
+        return Promise.resolve([[{ blocked: 0 }], []] as [unknown, unknown]);
+      }
       queries.push({ sql, values });
       return Promise.resolve([results.shift() ?? [], []] as [unknown, unknown]);
     };
@@ -237,6 +241,10 @@ describe('CommentsService.create notifications', () => {
       rollback: jest.fn().mockResolvedValue(undefined),
       release: jest.fn(),
       execute: (sql, values) => {
+        // The block lookup is answered outside the queue: no block here.
+        if (sql.includes('FROM user_blocks')) {
+          return Promise.resolve([[{ blocked: 0 }], []] as [unknown, unknown]);
+        }
         queries.push({ sql, values });
         return Promise.resolve([results.shift() ?? [], []]);
       },
@@ -561,6 +569,10 @@ describe('CommentsService.create with NotificationsService', () => {
           }
           return Promise.resolve([{ affectedRows: 1 }, []]);
         }
+        // The block lookup (UserBlockPolicyService): no block here.
+        if (sql.includes('FROM user_blocks')) {
+          return Promise.resolve([[{ blocked: 0 }], []]);
+        }
         return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
       },
     };
@@ -663,6 +675,10 @@ describe('CommentsService.remove', () => {
         }
         if (sql.startsWith('DELETE FROM comments')) {
           return Promise.resolve([{ affectedRows: 1 }, []]);
+        }
+        // The block lookup (UserBlockPolicyService): no block here.
+        if (sql.includes('FROM user_blocks')) {
+          return Promise.resolve([[{ blocked: 0 }], []]);
         }
         return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
       },
@@ -775,6 +791,10 @@ describe('CommentsService paginated listings', () => {
     results = [];
     const pool = {
       execute: (sql: string, values: unknown[]) => {
+        // The block lookup is answered outside the queue: no block here.
+        if (sql.includes('FROM user_blocks')) {
+          return Promise.resolve([[{ blocked: 0 }], []] as [unknown, unknown]);
+        }
         queries.push({ sql, values });
         return Promise.resolve([results.shift() ?? [], []]);
       },
@@ -1060,6 +1080,10 @@ describe('CommentsService.update', () => {
         if (sql.startsWith('SELECT target_id, SUM(value) AS score')) {
           return Promise.resolve([[{ target_id: values[1], score: 3 }], []]);
         }
+        // The block lookup (UserBlockPolicyService): no block here.
+        if (sql.includes('FROM user_blocks')) {
+          return Promise.resolve([[{ blocked: 0 }], []]);
+        }
         return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
       },
     };
@@ -1280,6 +1304,10 @@ describe('CommentsService.create on locked threads', () => {
             [],
           ]);
         }
+        // The block lookup (UserBlockPolicyService): no block here.
+        if (sql.includes('FROM user_blocks')) {
+          return Promise.resolve([[{ blocked: 0 }], []]);
+        }
         return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
       },
     };
@@ -1468,6 +1496,10 @@ describe('CommentsService removed content', () => {
           [],
         ]);
       }
+      // The block lookup (UserBlockPolicyService): no block here.
+      if (sql.includes('FROM user_blocks')) {
+        return Promise.resolve([[{ blocked: 0 }], []]);
+      }
       return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
     };
     const module: TestingModule = await Test.createTestingModule({
@@ -1596,6 +1628,10 @@ describe('CommentsService.create on removed content', () => {
           ],
           [],
         ]);
+      }
+      // The block lookup (UserBlockPolicyService): no block here.
+      if (sql.includes('FROM user_blocks')) {
+        return Promise.resolve([[{ blocked: 0 }], []]);
       }
       inserts += 1;
       return Promise.reject(new Error(`Unexpected SQL: ${sql}`));

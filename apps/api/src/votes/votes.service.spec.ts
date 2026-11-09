@@ -70,6 +70,10 @@ describe('VotesService', () => {
             .reduce((total, vote) => total + Number(vote.value), 0);
           return [[{ score }], []];
         }
+        // The block lookup (UserBlockPolicyService): no block here.
+        if (sql.includes('FROM user_blocks')) {
+          return [[{ blocked: 0 }], []];
+        }
         throw new Error(`Unexpected SQL query: ${sql}`);
       },
     };

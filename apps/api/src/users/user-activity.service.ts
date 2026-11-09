@@ -1,8 +1,14 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  NotFoundException,
+  Optional,
+} from '@nestjs/common';
 import type { Pool, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { listedCommunitySql } from '../common/community-visibility';
 import { loadVoteScores } from '../votes/vote-scores';
+import { UserBlockPolicyService } from './user-block-policy.service';
 import {
   POST_COLUMNS,
   toPostDtos,
@@ -154,14 +160,21 @@ type TotalRow = RowDataPacket & { total: number | string };
 
 @Injectable()
 export class UserActivityService {
-  constructor(@Inject(MYSQL_POOL) private readonly pool: Pool) {}
+  private readonly blocks: UserBlockPolicyService;
+
+  constructor(
+    @Inject(MYSQL_POOL) private readonly pool: Pool,
+    @Optional() blocks?: UserBlockPolicyService,
+  ) {
+    this.blocks = blocks ?? new UserBlockPolicyService(pool);
+  }
 
   async listPosts(
     username: string,
     query: ListUserActivityDto,
     viewerId?: string,
   ): Promise<Page<PostDto>> {
-    const userId = await this.resolve(username);
+    const userId = await this.resolve(username, viewerId);
     const { page, limit, offset } = paging(query);
     const sort = query.sort ?? 'new';
     const [rows] = await this.pool.execute<PostRow[]>(userPostsSql(sort), [
@@ -181,8 +194,9 @@ export class UserActivityService {
   async listComments(
     username: string,
     query: ListUserActivityDto,
+    viewerId?: string,
   ): Promise<Page<UserCommentDto>> {
-    const userId = await this.resolve(username);
+    const userId = await this.resolve(username, viewerId);
     const { page, limit, offset } = paging(query);
     const sort = query.sort ?? 'new';
     const [rows] = await this.pool.execute<UserCommentRow[]>(
@@ -215,8 +229,9 @@ export class UserActivityService {
   async listCommunities(
     username: string,
     query: ListUserCommunitiesDto,
+    viewerId?: string,
   ): Promise<Page<UserCommunityDto>> {
-    const userId = await this.resolve(username);
+    const userId = await this.resolve(username, viewerId);
     const { page, limit, offset } = paging(query);
     const activity = [userId, userId, userId, userId];
     const [rows] = await this.pool.execute<UserCommunityRow[]>(
@@ -236,13 +251,23 @@ export class UserActivityService {
     };
   }
 
-  private async resolve(username: string): Promise<string> {
+  // A blocked pair, in either direction, sees the other's feeds exactly as an
+  // unknown account: the same 404 and message, so the response does not say
+  // a block exists, let alone which way it runs. An anonymous reader is never
+  // blocked.
+  private async resolve(username: string, viewerId?: string): Promise<string> {
     const [users] = await this.pool.execute<(RowDataPacket & { id: string })[]>(
       USER_ID_BY_USERNAME_SQL,
       [username],
     );
     const user = users[0];
     if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    if (
+      viewerId !== undefined &&
+      (await this.blocks.isBlockedBetween(viewerId, user.id))
+    ) {
       throw new NotFoundException('User not found');
     }
     return user.id;

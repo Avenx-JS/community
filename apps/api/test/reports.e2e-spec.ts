@@ -17,6 +17,7 @@ import { AuthRateLimitService } from '../src/auth/auth-rate-limit.service';
 import { AuthService, MYSQL_POOL } from '../src/auth/auth.service';
 import { ApiRateLimitInterceptor } from '../src/common/api-rate-limit.interceptor';
 import { CommunityRuleAcceptanceService } from '../src/communities/community-rule-acceptance.service';
+import { UserBlockPolicyService } from '../src/users/user-block-policy.service';
 import { SafeApiExceptionFilter } from '../src/common/safe-api-exception.filter';
 
 const REPORTER = 'token-user-id';
@@ -557,6 +558,33 @@ describe('Report endpoint (e2e)', () => {
     expect(stored).toHaveLength(4);
     expect(check).not.toHaveBeenCalled();
     check.mockRestore();
+  });
+
+  // The safety mechanism must stay reachable: a user can report the person
+  // they blocked and the person who blocked them. Reporting never consults a
+  // block, even one that would refuse everything.
+  it('accepts every target type without consulting blocks', async () => {
+    const policy = app.get(UserBlockPolicyService);
+    const isBlocked = jest
+      .spyOn(policy, 'isBlockedBetween')
+      .mockResolvedValue(true);
+    const assert = jest
+      .spyOn(policy, 'assertNotBlockedOrThrow')
+      .mockRejectedValue(new Error('blocked'));
+
+    await reportOf('user', 'target', {
+      context_type: 'post',
+      context_id: 'post-1',
+    }).expect(201);
+    await reportOf('post', 'post-1').expect(201);
+    await reportOf('comment', 'comment-1').expect(201);
+    await reportOf('community', 'a-community').expect(201);
+
+    expect(stored).toHaveLength(4);
+    expect(isBlocked).not.toHaveBeenCalled();
+    expect(assert).not.toHaveBeenCalled();
+    isBlocked.mockRestore();
+    assert.mockRestore();
   });
 
   it('never returns an email, an internal id or a credential', async () => {

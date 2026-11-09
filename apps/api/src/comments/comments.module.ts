@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { CommunitiesModule } from '../communities/communities.module';
 import { DatabaseModule } from '../database/database.module';
+import { UserBlockPolicyModule } from '../users/user-block-policy.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { VotesModule } from '../votes/votes.module';
 import { CommentsService } from './comments.service';
@@ -18,6 +19,7 @@ import { CommentRemovalService } from './comment-removals.service';
     DatabaseModule,
     NotificationsModule,
     VotesModule,
+    UserBlockPolicyModule,
   ],
   providers: [CommentsService, CommentLocksService, CommentRemovalService],
   controllers: [

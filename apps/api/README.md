@@ -5293,12 +5293,10 @@ is the only self-service remedy: reporting asks an administrator to agree that
 a platform-level sanction is warranted, which is the wrong threshold for "I do
 not want to interact with this person".
 
-**Nothing is enforced yet.** These routes manage the relationship and nothing
-else, so the feature has no observable effect until the enforcement work lands:
-a blocked user can still read, comment, vote and receive notifications exactly
-as before, and so can the blocker. What a block actually prevents is a separate
-decision, because it touches content reads, comment creation and notification
-generation.
+**What a block does** is set out in
+[What a block prevents](#what-a-block-prevents): neither person can comment on,
+reply to or vote on the other's content; each disappears from the other's inbox
+and profile feeds; and shared spaces, reporting and moderation are untouched.
 
 | Route | Success | Notes |
 | --- | --- | --- |
@@ -5318,13 +5316,13 @@ returns is exactly the one `POST` and `DELETE` accept, with no extra lookup.
 
 **The row is directional.** `user_blocks` (migration `028_create_user_blocks`)
 holds `blocker_id` and `blocked_id`, with the composite primary key
-`(blocker_id, blocked_id)`: one row per pair. Whether a block's effects are
-symmetric is the enforcement work's decision. A directional row keeps that open;
-a symmetric table could not say who initiated it. There is no reason column: a
+`(blocker_id, blocked_id)`: one row per pair. The effects are symmetric (either
+direction refuses), but the row stays directional: only the blocker can lift
+it, and a symmetric table could not say who initiated it. There is no reason column: a
 block needs no justification, and a reason field would imply someone reads it.
 `chk_user_blocks_not_self` refuses a self-block in the database as well as in
 the service. `idx_user_blocks_blocked (blocked_id, blocker_id)` serves "who has
-blocked this user", which the primary key cannot, so enforcement needs no
+blocked this user", which the primary key cannot, so enforcement needed no
 migration of its own (`user-blocks.mysql.spec.ts` proves the lookup uses it).
 
 | Status | `GET` | `POST` | `DELETE` |
@@ -5380,9 +5378,11 @@ CASCADE` would never fire. The listing and its `total` also filter
 
 ### Privacy
 
-**A block is invisible to the blocked user. This is a hard rule, and the
-enforcement work must honour it too**, which constrains how it can make content
-disappear. Telling someone they have been blocked is itself an interaction, and
+**A block is invisible to the blocked user. This is a hard rule**, and it
+constrains how enforcement makes content disappear: every refusal is the same in
+both directions, and a hidden profile feed is the same `404` as an unknown
+account (see [What a block prevents](#what-a-block-prevents) for the one inherent
+limit). Telling someone they have been blocked is itself an interaction, and
 the one most likely to escalate. There is no notification, no field on any
 profile, and no endpoint that reveals whether an account has blocked the caller.
 
@@ -5396,17 +5396,127 @@ a private user action.
 Anyone but yourself, including moderators, community creators and platform
 administrators. The row is recorded.
 
-**For the enforcement work: blocking must not affect moderation or
-administrative powers**, or a user could block their way out of moderation. A
-blocked moderator must still see the blocker's content and act on it, and the
-same goes for administrators. Blocking does not affect community membership, rule
-acceptance, or anything else that exists today, because nothing is enforced yet.
+**Blocking never affects moderation or administrative powers**, or a user
+could block their way out of moderation. A blocked moderator still sees the
+blocker's content and acts on it, and so do administrators. Blocking does not
+affect community membership or rule acceptance either. The complete list of
+exempt paths, and the reason for each, is under
+[What a block deliberately does not touch](#what-a-block-deliberately-does-not-touch).
 
 **Rate limiting.** The global write buckets apply (60 per IP and 120 per account
 per minute), with no dedicated bucket: blocking is cheap and self-scoped. `POST`
 returning `404` for an unknown username does reveal which usernames exist, but
 `GET /users/:username` already reveals that publicly, so it adds no new
 disclosure.
+
+### What a block prevents
+
+**A block prevents directed interaction and hides the other person in personal
+surfaces. It does not erase anyone from shared spaces.** The predicate is defined
+once, in `UserBlockPolicyService` (`src/users/user-block-policy.service.ts`):
+`eitherBlockedSql`, `BLOCKED_BETWEEN_SQL` and
+`assertNotBlockedOrThrow(actorId, otherUserId, connection?)`, which runs on the
+caller's transaction connection like the rule gate does. No gated path restates
+the SQL, and `user-blocks.spec.ts` fails if a file outside the gated paths
+starts using it.
+
+**Enforcement is symmetric.** Every check asks whether *either* account has
+blocked the other, so the person blocked cannot work around a block by doing
+the thing themselves.
+
+| Gated path | Directed at | Refused with |
+| --- | --- | --- |
+| `POST /posts/:postId/comments`, top level | The post's author | `403` |
+| `POST /posts/:postId/comments` with `parent_id` | The **parent comment's** author, not the post's | `403` |
+| `PUT /posts/:id/vote` | The post's author | `403` |
+| `PUT /comments/:id/vote` | The comment's author | `403` |
+
+A reply is directed at the comment it answers. Replying to a third person's
+comment under a blocked user's post is not interacting with the blocked user,
+and it succeeds. `DELETE …/vote` is not gated: withdrawing a vote removes an
+interaction, which is the same reason it is outside the rule gate.
+
+**The refusal never says which way the block runs.** It is a `403` with exactly
+`{ "reason": "user_blocked" }`, the shape `AuthGuard` uses for restrictions and
+the rule gate uses for rules. It is byte-identical in both directions and names
+no user. If it distinguished "you blocked them" from "they blocked you", this
+route would become the way to discover a block, which the privacy rule below
+forbids. The blocker already knows their own list; the blocked user learns only
+that the interaction is unavailable. Nothing is written on a refusal, and the
+transaction rolls back and releases its connection.
+
+**Ordering.** The check runs after the resource `404`s and after the rule gate,
+like the rule gate itself. An unknown post is still a `404` between two blocked
+users, so the check never confirms that a post exists. A caller who has not
+accepted the rules learns that first.
+
+| Personal surface | Effect |
+| --- | --- |
+| `GET /notifications`, `GET /notifications/unread-count` | Notifications whose `actor_id` is blocked in either direction are left out, by the same predicate in both, so the badge matches the list |
+| `GET /users/:username/posts`, `/comments`, `/communities` | `404` when the viewer and the user have blocked each other, either way |
+
+**Notifications are filtered on read, never deleted.** A block is reversible;
+deleting would not be. Unblocking makes them visible again. The filter uses
+`notifications.actor_id`, never the `actor_username` metadata snapshot.
+Moderation notifications carry `actor_id` `NULL` and are never filtered.
+`GET /notifications/:id` returns a notification by ID unfiltered, since its ID
+comes from an earlier listing.
+
+**Profile feeds answer `404`**, with the same body as an unknown account,
+matching how the API treats resources the caller may not have. An anonymous
+reader is never blocked. One limitation is inherent: the public profile
+(`GET /users/:username`) stays `200`, and a logged-out request sees the feeds.
+So a blocked user who compares the two can infer that something is hidden. No
+response says so, but hiding a person from one viewer cannot be made
+undetectable to a viewer who has another way to look.
+
+#### What a block deliberately does not touch
+
+These paths are exempt, each for a reason. The tests assert that their services
+do not even depend on the block policy (`user-block-policy.service.spec.ts`),
+because the risk here is over-enforcement: a later change that "completes" the
+coverage by gating one of them would break something essential.
+
+- **Reporting (`POST /reports`).** A user must be able to report the person
+  they blocked, and the person who blocked them. The safety mechanism must stay
+  reachable; this is the same exemption the rule gate protects, and the most
+  important one. `reports.e2e-spec.ts` reports with every block check forced to
+  refuse.
+- **Moderation, all of it.** A community creator or moderator acting on content
+  (removal, locking, pinning), or on a member (bans, member removal), is never
+  subject to a block, even a mutual one. A block is never checked in
+  `canModerateCommunitySql` or in any moderator route. Otherwise a user could
+  block every moderator and block their way out of moderation. A test blocks the
+  moderator in both directions and still removes and locks the user's content.
+- **Platform administrators** acting through `/admin` are never blocked.
+- **Posting (`POST /posts`).** Creating a post is not directed at anyone, so
+  gating it would let one block exclude someone from a shared space.
+- **Community membership.** `POST /communities/:name/subscribe` and every
+  membership operation. A block is between two people and never controls access
+  to a community.
+- **Shared reads.** `GET /posts`, `GET /communities/:name/posts`, the comment
+  thread, the reply routes and `GET /search` are unfiltered. A blocked user's
+  content stays visible in the community where it was posted.
+- **Deleting your own content**, rule acceptance and the auth routes.
+
+**The rejected alternative: hiding everywhere.** It is the design a contributor
+will assume, and it was rejected. A community is a shared place. If a blocked
+user's posts vanished from a community feed, two members would see different
+versions of one discussion, with replies to posts that are not there. That is
+confusing rather than protective, and it is the failure mode of over-broad
+blocking. Blocks stop people reaching *you*; they do not rewrite the shared
+record.
+
+**Cost, and no cache.** Each gated write adds one statement of two direct index
+probes: the primary key `(blocker_id, blocked_id)` for one direction, and
+`idx_user_blocks_blocked (blocked_id, blocker_id)` for the other. The predicate
+is written as two `EXISTS` joined by `OR`, rather than one `EXISTS` with an `OR`
+inside, so each half is a single index lookup. The inbox pays the same two
+probes per candidate row, inside its existing `recipient_id` index range.
+`user-block-enforcement.mysql.spec.ts` checks both plans. Nothing is cached: a
+cached block decision would let a blocked interaction through for the cache's
+lifetime. If the inbox filter ever becomes a problem, the honest fix is a bounded
+`IN` list of blocked ids for callers with small lists, not a cache.
 
 ## Notifications
 

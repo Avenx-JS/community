@@ -42,8 +42,7 @@ export class UserBlocksController {
     summary: 'List the accounts you have blocked',
     description:
       'Your own blocks only; no route exposes another user’s. Most recently ' +
-      'blocked first. Deleted accounts are omitted. Blocks are recorded but ' +
-      'not enforced yet, so they currently have no other effect.',
+      'blocked first. Deleted accounts are omitted.',
   })
   @ApiAuthenticated()
   @ApiOkResponse({ type: BlockedUserListResponse })
@@ -63,8 +62,10 @@ export class UserBlocksController {
     description:
       'Adds the account to your private block list. The blocked user is not ' +
       'told, and no route reveals it to them. Idempotent: blocking again ' +
-      'keeps one block and its original time. Recorded but not enforced yet, ' +
-      'so it currently has no other effect.',
+      'keeps one block and its original time. Neither of you can then ' +
+      "comment on, reply to or vote on the other's content, their " +
+      'notifications leave your inbox, and each sees the other’s profile ' +
+      'feeds as 404. Shared spaces, reporting and moderation are unaffected.',
   })
   @ApiAuthenticated()
   @ApiRouteParam('username', 'username', 'Exact username.')

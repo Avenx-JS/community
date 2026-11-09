@@ -35,10 +35,13 @@ describe('Vote routes on posts and comments (e2e)', () => {
   let released: number;
   let rules: RulesStore;
   let deletedCommunities: Set<string>;
+  // "blocker:blocked" pairs, read by the block lookup.
+  let blocks: Set<string>;
 
   const tokens: Record<string, string> = {
     'user-1-token': 'user-1',
     'user-2-token': 'user-2',
+    'author-token': 'author-1',
   };
 
   beforeEach(async () => {
@@ -47,6 +50,7 @@ describe('Vote routes on posts and comments (e2e)', () => {
     acquired = 0;
     released = 0;
     deletedCommunities = new Set();
+    blocks = new Set();
     rules = createRulesStore({
       'community-1': { name: 'general', creator_id: 'creator-1' },
       'community-2': { name: 'orchards', creator_id: 'creator-2' },
@@ -73,7 +77,7 @@ describe('Vote routes on posts and comments (e2e)', () => {
       }
       if (
         sql.startsWith(
-          'SELECT id, community_id, removed_at IS NOT NULL AS removed FROM posts',
+          'SELECT id, community_id, author_id, removed_at IS NOT NULL AS removed FROM posts',
         ) ||
         sql.startsWith('SELECT comments.id, posts.community_id')
       ) {
@@ -88,7 +92,13 @@ describe('Vote routes on posts and comments (e2e)', () => {
           deletedCommunities.has(communityId);
         return Promise.resolve([
           communityId && !hidden
-            ? [{ id: targetId, community_id: communityId }]
+            ? [
+                {
+                  id: targetId,
+                  community_id: communityId,
+                  author_id: 'author-1',
+                },
+              ]
             : [],
           [],
         ]);
@@ -134,6 +144,11 @@ describe('Vote routes on posts and comments (e2e)', () => {
           [{ score: scoreOf(targetType, targetId) }],
           [],
         ]);
+      }
+      if (sql.includes('FROM user_blocks')) {
+        const [a, b] = values as string[];
+        const blocked = blocks.has(`${a}:${b}`) || blocks.has(`${b}:${a}`);
+        return Promise.resolve([[{ blocked: blocked ? 1 : 0 }], []]);
       }
       return Promise.reject(new Error(`Unexpected SQL query: ${sql}`));
     };
@@ -217,6 +232,59 @@ describe('Vote routes on posts and comments (e2e)', () => {
     '/%s/:id/vote',
     (resource: Target, id, targetType, communityId, communityName, missing) => {
       const path = `/${resource}/${id}/vote`;
+
+      describe('between blocked users', () => {
+        const author = as('author-token');
+
+        // Both directions, so neither side can work around the block, and
+        // the same body either way: it must not say who blocked whom.
+        it.each([
+          ['the author blocked the voter', 'author-1:user-2'],
+          ['the voter blocked the author', 'user-2:author-1'],
+        ])('refuses a vote with the same 403 when %s', async (_name, pair) => {
+          blocks.add(pair);
+          const response = await user2.put(path, { value: 1 }).expect(403);
+          // The reason and nothing else: no user, no direction.
+          expect(response.body).toEqual({ reason: 'user_blocked' });
+          expect(response.text).not.toMatch(
+            /author-1|user-2|blocker|blocked_by/,
+          );
+          expect(stored()).toHaveLength(0);
+        });
+
+        it('gives byte-identical refusals in both directions', async () => {
+          blocks.add('author-1:user-2');
+          const one = (await user2.put(path, { value: 1 }).expect(403)).text;
+          blocks.clear();
+          blocks.add('user-2:author-1');
+          const other = (await user2.put(path, { value: 1 }).expect(403)).text;
+          expect(one).toBe(other);
+        });
+
+        it('still lets either side withdraw an existing vote', async () => {
+          await user2.put(path, { value: 1 }).expect(200);
+          blocks.add('author-1:user-2');
+          await user2.delete(path).expect(200);
+          expect(stored()).toHaveLength(0);
+        });
+
+        it('leaves a third user free to vote', async () => {
+          blocks.add('author-1:user-2');
+          await user1.put(path, { value: 1 }).expect(200);
+        });
+
+        it('lets the author vote on their own content', async () => {
+          blocks.add('author-1:user-2');
+          await author.put(path, { value: 1 }).expect(200);
+        });
+
+        it('checks after the 404, so an unknown target is still a 404', async () => {
+          blocks.add('author-1:user-2');
+          await user2
+            .put(`/${resource}/no-such-${targetType}/vote`, { value: 1 })
+            .expect(404);
+        });
+      });
 
       it('votes, changes, repeats, withdraws and re-votes with the score each time', async () => {
         const first = await user1.put(path, { value: 1 }).expect(200);
@@ -350,7 +418,7 @@ describe('Vote routes on posts and comments (e2e)', () => {
         await user1.delete(path).expect(200);
         await user1.get(path).expect(200);
         const lookups = queryCalls.filter(({ sql }) =>
-          /^SELECT (id, community_id, removed_at IS NOT NULL AS removed FROM posts|comments\.id, posts\.community_id)/.test(
+          /^SELECT (id, community_id, author_id, removed_at IS NOT NULL AS removed FROM posts|comments\.id, posts\.community_id)/.test(
             sql,
           ),
         );
