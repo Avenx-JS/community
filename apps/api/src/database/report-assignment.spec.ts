@@ -114,7 +114,7 @@ describe('migration 031 (report assignment)', () => {
       `action ENUM( ${enumList(ADMIN_ACTIONS)} ) NOT NULL`,
     );
     expect(normalise(snapshot)).toContain(
-      "('030_add_report_withdrawal'), ('031_add_report_assignment');",
+      "('030_add_report_withdrawal'), ('031_add_report_assignment')",
     );
   });
 });

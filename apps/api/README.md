@@ -161,6 +161,7 @@ pair of `BEFORE INSERT` and `BEFORE UPDATE` triggers instead of a `CHECK`:
 | `chk_communities_suspension` | `communities` | `025_add_community_suspension` |
 | `chk_posts_pin` | `posts` | `026_add_post_pinning` |
 | `chk_user_reports_assignment` | `user_reports` | `031_add_report_assignment` |
+| `chk_community_bans_lift` | `community_bans` | `032_create_community_bans` |
 
 Each trigger is named after its rule (`trg_posts_pin_insert`,
 `trg_posts_pin_update`) and raises exactly what the `CHECK` would have: error
@@ -1314,6 +1315,10 @@ rather than exempting the route or adding a cache, which nothing else in this
 project has.
 
 ### Account restrictions (suspensions and bans)
+
+These are platform-wide and administrator-only. A ban from a single community is
+a different record with a different authority; see
+[Community bans and member removal](#community-bans-and-member-removal).
 
 Deleting, suspending, and banning an account are three different operations.
 These routes implement only temporary suspension and permanent ban, each as an
@@ -3402,6 +3407,162 @@ The actor index is on the username snapshot rather than `actor_id`, because
 that is what the filter matches; `admin_actions` needed migration `006` to
 correct the same mismatch. MySQL adds its own index on `actor_id` for the
 foreign key. Reads of the log are not themselves logged.
+
+#### Community bans and member removal
+
+> **Not enforced yet.** These routes record decisions. Until the ban-enforcement
+> change lands, a banned account can still subscribe again and still post,
+> comment and vote in the community. The two must ship together, or a moderator
+> will believe they have excluded someone who can still take part. Enforcement
+> reads `ACTIVE_COMMUNITY_BAN_SQL` (`src/common/active-community-ban.ts`).
+
+**A community ban is not a platform restriction.** Conflating the two would let
+a community moderator impose a platform sanction:
+
+| | Community ban | Platform restriction |
+| --- | --- | --- |
+| Scope | One community | The whole platform, every authenticated request |
+| Authority | That community's creator and moderators | Platform administrators |
+| Record | `community_bans`, `community_moderation_actions` | `user_restrictions`, `admin_actions` |
+| Routes | `/communities/:name/bans` | `/admin/restrictions` |
+
+No route here reads or writes `user_restrictions`. A ban in one community changes
+nothing in any other, and the tests assert both. Platform role does not enter
+into it: a platform administrator can be banned from a community, and an
+administrator who does not moderate a community cannot ban anyone from it.
+
+| Route | Success | Description |
+| --- | --- | --- |
+| `GET /communities/:name/bans` | `200`, `{ "items", "page", "limit", "total" }` | The community's bans |
+| `POST /communities/:name/bans` | `201`, the ban | Bans an account |
+| `POST /communities/:name/bans/:username/lift` | `204` | Lifts the account's open bans |
+| `POST /communities/:name/members/:username/remove` | `204` | Ends a membership without a ban |
+
+All four require a bearer token, the community's creator or one of its
+moderators (`403` otherwise), and an existing community: `404` comes before `403`.
+They fall under the global write buckets, since moderator actions are rare.
+Users are addressed by **username**, not ID, like every other user-addressed route
+here: the listing returns usernames, so what it shows is what the writes accept.
+
+**The listing is not public.** A list of excluded people is a moderation record,
+and publishing it would invite harassment of the banned. `active` filters it:
+`active` (default) means in force now, `lifted` means no longer in force (lifted
+or expired), and `any` means both. The first two partition the third. Newest
+first, ties by ID, `page` 1–10000, `limit` 1–100. Each item:
+
+```json
+{
+  "id": "ban-id",
+  "username": "member",
+  "reason": "Repeated spam after two warnings",
+  "created_by_username": "a_moderator",
+  "created_at": "2026-10-27T09:00:00.000Z",
+  "expires_at": null,
+  "lifted_at": null,
+  "lifted_by_username": null,
+  "lift_reason": null,
+  "active": true
+}
+```
+
+The `*username` fields are `null` once that account is deleted, never its
+`deleted_<id>` placeholder. `active` comes from the shared predicate.
+
+**Banning.** `POST /communities/:name/bans` takes
+`{ "username", "reason", "duration_hours"? }`:
+
+- `reason` is required, 1–2,000 characters of plain text, trimmed. Excluding a
+  person must carry a justification, as a platform restriction must.
+- `duration_hours` is an integer from 1 to 8,760 (one year). Omit it for a
+  permanent ban (`expires_at: null`). It is a **duration, not a timestamp**: the
+  server computes `DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? HOUR)` from the database
+  clock, exactly as platform suspensions do, so no client clock can set a ban in
+  the past or decades ahead. An explicit `null` returns `400`.
+- `expires_at`, `created_by` and any other property return `400`. The banning
+  moderator is taken from the token.
+
+| Case | Status |
+| --- | --- |
+| The creator or a moderator bans a member, or a platform administrator | `201` |
+| The creator bans a moderator | `201`; the moderator role is removed in the same transaction |
+| Banning yourself | `400` |
+| Banning the community creator | `403`: a moderator must not be able to lock the owner out |
+| A moderator banning another moderator | `403`: only the creator may, or two moderators could ban each other |
+| A caller who neither created nor moderates the community | `403` |
+| An unknown or deleted username | `404` |
+| An account already actively banned here | `409` |
+
+**Banning a moderator.** Only the creator can, and the ban removes the role first:
+the moderator row is deleted in the same transaction, before the ban is committed.
+A moderator therefore never holds the role while banned. Removing someone without
+banning them requires removing the role explicitly first (below).
+
+**No stacking.** A second ban of an account that is already actively banned is a
+`409`. Two active bans would make "the current ban" ambiguous, both for the
+predicate and for a moderator reading the list. Escalating a temporary ban to a
+permanent one is a lift and then a new ban: two decisions, two records, the same
+rule as platform restrictions. The check is a `FOR UPDATE` re-check over the shared
+predicate, after locking the account's row, so of two concurrent bans exactly one
+succeeds and the other gets `409`.
+
+**A ban ends membership.** The account's `community_subscriptions` row for this
+community is deleted. Its **rule acceptances are kept**, so a member who is
+unbanned does not have to accept, again, rules they already accepted at the current
+version. Deleting them would silently add a second penalty.
+
+**Lifting.** `POST /communities/:name/bans/:username/lift` takes an optional
+`{ "lift_reason" }` (1–2,000 characters). It is a `POST` to a sub-resource rather
+than a `DELETE`, as for platform restrictions, because the ban row is updated and
+never deleted. It sets `lifted_at` from the database clock, plus `lifted_by` and
+`lift_reason`, on every open ban of the account in this community. Usually there is
+one, but a temporary ban that expired without being lifted stays open alongside a
+later ban. An expired ban can still be lifted, which records that a moderator
+closed it. The update is conditional (`lifted_at IS NULL`). If it matches nothing,
+a re-read tells `404` (never banned here) from `409` (already lifted).
+
+**Lifting does not restore membership.** The subscription was deleted with the
+ban, so the user rejoins through `POST /communities/:name/subscribe` like anyone
+else. This is the expected support question, and it is deliberate: being allowed
+back is not the same as being made a member again.
+
+**Removing a member** (`POST /communities/:name/members/:username/remove`) is a
+distinct, weaker action: "leave and reconsider" rather than "you may not return".
+It deletes the subscription only, creates no ban, and the user may rejoin at once.
+Without it, a moderator's only tool would be a ban, and the ban would become the
+default. It is idempotent: removing a non-member returns `204` and logs nothing.
+Removing yourself returns `400` (use `DELETE /communities/:name/subscribe`), and
+removing the creator returns `403`. A moderator removing another moderator
+returns `403`. The creator removing a moderator returns `409`: remove the role
+first with `DELETE /communities/:name/moderators`, or they would rejoin as a
+moderator without a membership.
+
+**The record.** Each ban, lift and removal writes exactly one
+`community_moderation_actions` entry (`member_banned` with `username`, `reason`
+and `expires_at`; `member_unbanned` or `member_removed` with `username`), in the
+same transaction as the change. A failure to write the entry rolls the change back.
+
+**Schema.** `community_bans` (migration `032_create_community_bans`) is modelled on
+`user_restrictions`, so the two read alike and differ only in scope. There is one
+row per decision, never a flag on the membership: banned, unbanned and banned again
+is three decisions, and the history survives. `expires_at` `NULL` means permanent.
+There is no type column, so unlike `chk_user_restrictions_expiry` no rule pairs a
+type with an expiry. `created_by` and `lifted_by` are `ON DELETE SET NULL`, so a
+ban survives its moderator's account. Bans cascade with their community and with
+the banned account. `chk_community_bans_lift`, "no lifter or lift reason without a
+lift time", is a [trigger pair](#rules-enforced-by-triggers) because of
+`lifted_by`'s foreign key. Indexes:
+
+- `idx_community_bans_active (community_id, user_id, lifted_at, expires_at)`
+  serves the active-ban lookup enforcement will run on every participation attempt
+  (`community-bans.mysql.spec.ts` checks the plan).
+- `idx_community_bans_community_created` serves the listing.
+- `idx_community_bans_user` serves "which communities have banned me".
+
+The predicate, `lifted_at IS NULL AND (expires_at IS NULL OR expires_at >
+UTC_TIMESTAMP())`, is exported once as `ACTIVE_COMMUNITY_BAN_PREDICATE` and
+restated nowhere; a test fails if it is. It has the same shape as
+`ACTIVE_USER_RESTRICTION_PREDICATE` but is deliberately a separate constant, for a
+separate record.
 
 ### Community notification preferences
 

@@ -11,6 +11,10 @@ import type {
   SubscriptionListDto,
   SubscriptionStatusDto,
 } from './communities.service';
+import type {
+  CommunityBanDto,
+  CommunityBanList,
+} from './community-bans.service';
 import type { CommunityRuleItem } from './community-rules-hash';
 import type {
   CommunityRulesDto,
@@ -390,4 +394,66 @@ export class CommunityStatsResponse implements CommunityStatsDto {
     description: 'Comments created in the last 7 days on the database clock.',
   })
   comments_last_7_days!: number;
+}
+
+// A community ban as its moderators see it. Never public.
+export class CommunityBanResponse implements CommunityBanDto {
+  @ApiProperty()
+  id!: string;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description: 'The banned account; null once that account was deleted.',
+  })
+  username!: string | null;
+
+  @ApiProperty()
+  reason!: string;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description: 'Null once the banning moderator account was deleted.',
+  })
+  created_by_username!: string | null;
+
+  @ApiProperty({ format: 'date-time' })
+  created_at!: string;
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description: 'Null for a permanent ban.',
+  })
+  expires_at!: string | null;
+
+  @ApiProperty({ type: String, format: 'date-time', nullable: true })
+  lifted_at!: string | null;
+
+  @ApiProperty({ type: String, nullable: true })
+  lifted_by_username!: string | null;
+
+  @ApiProperty({ type: String, nullable: true })
+  lift_reason!: string | null;
+
+  @ApiProperty({
+    description: 'In force now: not lifted, and permanent or not yet expired.',
+  })
+  active!: boolean;
+}
+
+export class CommunityBanListResponse implements CommunityBanList {
+  @ApiProperty({ type: [CommunityBanResponse] })
+  items!: CommunityBanResponse[];
+
+  @ApiProperty({ type: 'integer' })
+  page!: number;
+
+  @ApiProperty({ type: 'integer' })
+  limit!: number;
+
+  @ApiProperty({ type: 'integer' })
+  total!: number;
 }

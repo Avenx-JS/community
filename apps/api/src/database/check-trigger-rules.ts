@@ -91,6 +91,13 @@ export const CHECK_TRIGGER_RULES: readonly CheckTriggerRule[] = [
     expression:
       '(NEW.assigned_to IS NULL AND NEW.assigned_at IS NULL) OR NEW.assigned_at IS NOT NULL',
   },
+  {
+    name: 'chk_community_bans_lift',
+    table: 'community_bans',
+    migration: '032_create_community_bans',
+    expression:
+      '(NEW.lifted_at IS NULL AND NEW.lifted_by IS NULL AND NEW.lift_reason IS NULL) OR NEW.lifted_at IS NOT NULL',
+  },
 ];
 
 export function checkTriggerRule(name: string): CheckTriggerRule {

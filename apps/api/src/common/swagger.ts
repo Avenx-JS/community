@@ -47,6 +47,10 @@ export function createOpenApiDocument(app: INestApplication): OpenAPIObject {
     .addTag('users', 'Public user profiles.')
     .addTag('blocks', "The authenticated user's private block list.")
     .addTag('communities', 'Communities, subscriptions, and moderators.')
+    .addTag(
+      'community-bans',
+      'Community-scoped bans and member removal, by community moderators. Not platform restrictions.',
+    )
     .addTag('subscriptions', "The authenticated user's memberships.")
     .addTag('posts', 'Posts within communities.')
     .addTag('saved-posts', "The authenticated user's private saved posts.")

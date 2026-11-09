@@ -3,6 +3,8 @@ import { AuthModule } from '../auth/auth.module';
 import { DatabaseModule } from '../database/database.module';
 import { CommunitiesService } from './communities.service';
 import { CommunitiesController } from './communities.controller';
+import { CommunityBansController } from './community-bans.controller';
+import { CommunityBansService } from './community-bans.service';
 import { CommunityModerationLogController } from './community-moderation-log.controller';
 import { CommunityModerationLogService } from './community-moderation-log.service';
 import { CommunityRuleAcceptanceService } from './community-rule-acceptance.service';
@@ -16,6 +18,7 @@ import { SubscriptionsController } from './subscriptions.controller';
   imports: [AuthModule, DatabaseModule],
   providers: [
     CommunitiesService,
+    CommunityBansService,
     CommunityModerationLogService,
     CommunityRuleAcceptanceService,
     CommunityRulesService,
@@ -24,6 +27,7 @@ import { SubscriptionsController } from './subscriptions.controller';
   ],
   controllers: [
     CommunitiesController,
+    CommunityBansController,
     CommunityModerationLogController,
     CommunityRulesController,
     SubscriptionsController,
