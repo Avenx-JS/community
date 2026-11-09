@@ -14,8 +14,10 @@ import type {
   ReportStatus,
   ReportTargetType,
 } from '../reports/report.constants';
+import { REPORT_TARGET_JOINS_SQL } from '../reports/report-target.sql';
 import { AuditLogService } from './audit-log.service';
 import { ListReportsDto } from './dto/list-reports.dto';
+import type { ReportWithdrawnFilter } from './dto/list-reports.dto';
 import { UpdateReportStatusDto } from './dto/update-report-status.dto';
 
 interface ReportListRow extends RowDataPacket {
@@ -32,6 +34,7 @@ interface ReportListRow extends RowDataPacket {
   context_id: string | null;
   created_at: Date | string;
   reviewed_at: Date | string | null;
+  withdrawn_at: Date | string | null;
 }
 
 export interface AdminReportDetailRecord extends ReportListRow {
@@ -46,6 +49,7 @@ interface ReportTransitionRow extends RowDataPacket {
   reporter_id: string | null;
   reported_user_id: string | null;
   status: ReportStatus;
+  withdrawn_at: Date | string | null;
 }
 
 interface ReportContextRow extends RowDataPacket {
@@ -83,6 +87,8 @@ export interface AdminReportListItem {
   has_context: boolean;
   created_at: string;
   reviewed_at: string | null;
+  // Set when the reporter withdrew the report (DELETE /reports/:id).
+  withdrawn_at: string | null;
 }
 
 export interface AdminReportList {
@@ -96,6 +102,7 @@ export interface AdminReportList {
     target_type: ReportTargetType | null;
     reported_username: string | null;
     reporter_username: string | null;
+    withdrawn: ReportWithdrawnFilter;
     from: string | null;
     to: string | null;
     sort: 'new' | 'oldest';
@@ -127,24 +134,15 @@ export interface AdminReportDetail extends AdminReportListItem {
   }>;
 }
 
-// Left joins throughout: user_reports.target_id has no foreign key, so a report
-// outlives its target, and a community report has no reported account. The
-// CASE picks the label by type; qualifying each join by type as well means a
-// report only looks up its own kind of target.
+// The CASE picks the label by type over REPORT_TARGET_JOINS_SQL. Reviewers see
+// the label of removed and deleted targets too; the reporter's own listing
+// does not (see ReportsService).
 const REPORT_TARGET_LABEL_SQL = `CASE ur.target_type
            WHEN 'user' THEN target_user.username
            WHEN 'post' THEN target_post.title
            WHEN 'comment' THEN LEFT(target_comment.content, 100)
            WHEN 'community' THEN target_community.name
          END AS target_label`;
-const REPORT_TARGET_JOINS_SQL = `LEFT JOIN users target_user
-         ON ur.target_type = 'user' AND target_user.id = ur.target_id
-       LEFT JOIN posts target_post
-         ON ur.target_type = 'post' AND target_post.id = ur.target_id
-       LEFT JOIN comments target_comment
-         ON ur.target_type = 'comment' AND target_comment.id = ur.target_id
-       LEFT JOIN communities target_community
-         ON ur.target_type = 'community' AND target_community.id = ur.target_id`;
 
 function toIsoString(value: Date | string | null): string | null {
   return value === null ? null : new Date(value).toISOString();
@@ -171,6 +169,7 @@ function toListItem(report: ReportListRow): AdminReportListItem {
     has_context: report.context_type !== null && report.context_id !== null,
     created_at: new Date(report.created_at).toISOString(),
     reviewed_at: toIsoString(report.reviewed_at),
+    withdrawn_at: toIsoString(report.withdrawn_at),
   };
 }
 
@@ -241,6 +240,15 @@ export class AdminReportsService {
       filters.push('ur.target_type = ?');
       values.push(query.target_type);
     }
+    // A withdrawn report is one its reporter no longer stands behind, so the
+    // queue leaves it out unless asked; without this a withdrawal would change
+    // nothing a moderator sees.
+    const withdrawn = query.withdrawn ?? 'exclude';
+    if (withdrawn === 'exclude') {
+      filters.push('ur.withdrawn_at IS NULL');
+    } else if (withdrawn === 'only') {
+      filters.push('ur.withdrawn_at IS NOT NULL');
+    }
     const where = filters.length > 0 ? ` WHERE ${filters.join(' AND ')}` : '';
     const order = query.sort === 'oldest' ? 'ASC' : 'DESC';
 
@@ -248,7 +256,8 @@ export class AdminReportsService {
       `SELECT ur.id, reporter_user.username AS reporter_username,
          reported_user.username AS reported_username, ur.target_type, ur.target_id,
          ${REPORT_TARGET_LABEL_SQL}, ur.reason, ur.status,
-         ur.resolution, ur.context_type, ur.context_id, ur.created_at, ur.reviewed_at
+         ur.resolution, ur.context_type, ur.context_id, ur.created_at, ur.reviewed_at,
+         ur.withdrawn_at
        FROM user_reports ur
        LEFT JOIN users reporter_user ON reporter_user.id = ur.reporter_id
        LEFT JOIN users reported_user ON reported_user.id = ur.reported_user_id
@@ -277,6 +286,7 @@ export class AdminReportsService {
         target_type: query.target_type ?? null,
         reported_username: query.reported_username ?? null,
         reporter_username: query.reporter_username ?? null,
+        withdrawn,
         from: query.from ?? null,
         to: query.to ?? null,
         sort: query.sort ?? 'new',
@@ -291,7 +301,7 @@ export class AdminReportsService {
          ur.target_type, ur.target_id, ${REPORT_TARGET_LABEL_SQL},
          ur.reason, ur.status, ur.resolution, ur.context_type, ur.context_id,
          ur.description, ur.resolution_note, ur.created_at, ur.reviewed_at,
-         reviewer_user.username AS reviewed_by_username
+         ur.withdrawn_at, reviewer_user.username AS reviewed_by_username
        FROM user_reports ur
        LEFT JOIN users reporter_user ON reporter_user.id = ur.reporter_id
        LEFT JOIN users reported_user ON reported_user.id = ur.reported_user_id
@@ -367,7 +377,7 @@ export class AdminReportsService {
       transactionStarted = true;
 
       const [reports] = await connection.execute<ReportTransitionRow[]>(
-        `SELECT id, reporter_id, reported_user_id, status
+        `SELECT id, reporter_id, reported_user_id, status, withdrawn_at
          FROM user_reports
          WHERE id = ? LIMIT 1 FOR UPDATE`,
         [id],
@@ -385,6 +395,11 @@ export class AdminReportsService {
         );
       }
 
+      // The reporter no longer stands behind it, so there is nothing to decide.
+      if (report.withdrawn_at !== null) {
+        throw new ConflictException('Report was withdrawn by its reporter');
+      }
+
       const sourceStatuses: ReportStatus[] =
         input.status === 'under_review' ? ['open'] : ['open', 'under_review'];
       if (!sourceStatuses.includes(report.status)) {
@@ -398,6 +413,7 @@ export class AdminReportsService {
          SET status = ?, resolution = ?, resolution_note = ?,
              reviewed_by = ?, reviewed_at = UTC_TIMESTAMP()
          WHERE id = ? AND status IN (${sourceStatuses.map(() => '?').join(', ')})
+           AND withdrawn_at IS NULL
            AND (reported_user_id IS NULL OR reported_user_id <> ?)
            AND (reporter_id IS NULL OR reporter_id <> ?)`,
         [
@@ -416,7 +432,7 @@ export class AdminReportsService {
         const [currentReports] = await connection.execute<
           ReportTransitionRow[]
         >(
-          `SELECT id, reporter_id, reported_user_id, status
+          `SELECT id, reporter_id, reported_user_id, status, withdrawn_at
            FROM user_reports
            WHERE id = ? LIMIT 1`,
           [id],

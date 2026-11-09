@@ -8,6 +8,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import type { Pool } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { CreateReportDto } from './dto/create-report.dto';
+import { ListOwnReportsDto } from './dto/list-own-reports.dto';
 import { ReportsService } from './reports.service';
 
 const REPORTER = 'reporter-id';
@@ -448,6 +449,15 @@ describe('ReportsService', () => {
         "status IN ('open', 'under_review')",
       );
     });
+
+    // A withdrawn report keeps status 'open'. Without this predicate a
+    // reporter who withdraws could never report that target again.
+    it('does not count a withdrawn report as active', async () => {
+      await service.create(report('post', 'post-1'), REPORTER);
+      expect(duplicateCheck()?.sql).toContain(
+        "status IN ('open', 'under_review') AND withdrawn_at IS NULL",
+      );
+    });
   });
 
   it('conflicts with an active duplicate and rolls back without inserting', async () => {
@@ -539,6 +549,411 @@ describe('ReportsService', () => {
       ).resolves.toMatchObject({ status: 'open' });
       await expect(competing).resolves.toBeInstanceOf(ConflictException);
       expect(committed).toEqual(['post-1']);
+    });
+  });
+});
+
+// Fields only a moderator may see, plus internal identifiers. None may reach a
+// reporter-facing response (#44, "Data classification" in the README).
+const MODERATOR_ONLY_FIELDS = [
+  'resolution',
+  'resolution_note',
+  'reviewed_by',
+  'reviewed_by_username',
+  'reviewed_at',
+  'reported_user_id',
+  'reported_username',
+  'reporter_id',
+  'target_id',
+  'target_author_id',
+  'context_type',
+  'context_id',
+] as const;
+
+describe('ReportsService: the reporter’s own reports', () => {
+  let service: ReportsService;
+  let poolCalls: Array<{ sql: string; values: unknown[] }>;
+  let connectionCalls: Array<{ sql: string; values: unknown[] }>;
+  let ownRows: Array<Record<string, unknown>>;
+  let total: number;
+  let lockedRow: Record<string, unknown> | undefined;
+  let updateAffectedRows: number;
+  let connection: {
+    beginTransaction: jest.Mock;
+    commit: jest.Mock;
+    rollback: jest.Mock;
+    release: jest.Mock;
+    execute: (sql: string, values: unknown[]) => Promise<[unknown, unknown]>;
+  };
+
+  // What MySQL would return if a moderator-only column were ever selected:
+  // the mapping must still drop it.
+  const row = (overrides: Record<string, unknown> = {}) => ({
+    id: 'report-1',
+    target_type: 'post',
+    target_label: 'A post title',
+    reason: 'spam',
+    description: 'My own words',
+    status: 'resolved',
+    created_at: '2026-10-25T10:00:00.000Z',
+    withdrawn_at: null,
+    resolution: 'user_banned',
+    resolution_note: 'Internal note',
+    reviewed_by: 'admin-id',
+    reviewed_at: '2026-10-26T10:00:00.000Z',
+    reported_user_id: 'reported-id',
+    ...overrides,
+  });
+  const openRow = () => ({
+    reporter_id: REPORTER,
+    status: 'open',
+    withdrawn_at: null,
+  });
+
+  beforeEach(() => {
+    poolCalls = [];
+    connectionCalls = [];
+    ownRows = [];
+    total = 0;
+    lockedRow = openRow();
+    updateAffectedRows = 1;
+    connection = {
+      beginTransaction: jest.fn(() => Promise.resolve()),
+      commit: jest.fn(() => Promise.resolve()),
+      rollback: jest.fn(() => Promise.resolve()),
+      release: jest.fn(),
+      execute: (sql, values) => {
+        connectionCalls.push({ sql, values });
+        if (sql.startsWith('SELECT reporter_id, status, withdrawn_at')) {
+          return Promise.resolve([lockedRow ? [lockedRow] : [], []]);
+        }
+        if (sql.startsWith('UPDATE user_reports')) {
+          return Promise.resolve([{ affectedRows: updateAffectedRows }, []]);
+        }
+        return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
+      },
+    };
+    const pool = {
+      execute: (sql: string, values: unknown[]) => {
+        poolCalls.push({ sql, values });
+        if (sql.startsWith('SELECT ur.id, ur.target_type')) {
+          return Promise.resolve([ownRows, []]);
+        }
+        if (sql.startsWith('SELECT COUNT(*) AS total FROM user_reports ur')) {
+          return Promise.resolve([[{ total }], []]);
+        }
+        return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
+      },
+      getConnection: () => Promise.resolve(connection),
+    };
+    service = new ReportsService(pool as unknown as Pool);
+  });
+
+  const query = (overrides: Partial<ListOwnReportsDto> = {}) =>
+    Object.assign(new ListOwnReportsDto(), overrides);
+  const update = () =>
+    connectionCalls.find((call) => call.sql.startsWith('UPDATE'));
+
+  describe('listOwn', () => {
+    it('binds the caller as reporter in both the page and the count', async () => {
+      await service.listOwn(REPORTER, query());
+      expect(poolCalls).toHaveLength(2);
+      for (const call of poolCalls) {
+        expect(call.sql).toContain('WHERE ur.reporter_id = ?');
+        expect(call.values[0]).toBe(REPORTER);
+      }
+      expect(poolCalls[0].values).toEqual([REPORTER, 20, 0]);
+      expect(poolCalls[1].values).toEqual([REPORTER]);
+    });
+
+    it('orders newest first with an id tiebreaker, or oldest first', async () => {
+      await service.listOwn(REPORTER, query());
+      expect(poolCalls[0].sql).toContain(
+        'ORDER BY ur.created_at DESC, ur.id DESC LIMIT ? OFFSET ?',
+      );
+      await service.listOwn(REPORTER, query({ sort: 'oldest' }));
+      expect(poolCalls[2].sql).toContain(
+        'ORDER BY ur.created_at ASC, ur.id ASC',
+      );
+    });
+
+    it('applies the status filter to page and count', async () => {
+      await service.listOwn(REPORTER, query({ status: 'under_review' }));
+      expect(poolCalls[0].sql).toContain(
+        'WHERE ur.reporter_id = ? AND ur.status = ?',
+      );
+      expect(poolCalls[0].values).toEqual([REPORTER, 'under_review', 20, 0]);
+      expect(poolCalls[1].values).toEqual([REPORTER, 'under_review']);
+    });
+
+    it('applies the target_type filter to page and count', async () => {
+      await service.listOwn(REPORTER, query({ target_type: 'comment' }));
+      expect(poolCalls[1].sql).toContain(
+        'WHERE ur.reporter_id = ? AND ur.target_type = ?',
+      );
+      expect(poolCalls[0].values).toEqual([REPORTER, 'comment', 20, 0]);
+    });
+
+    it('combines both filters and pages by offset', async () => {
+      await service.listOwn(
+        REPORTER,
+        query({ status: 'open', target_type: 'user', page: 3, limit: 5 }),
+      );
+      expect(poolCalls[0].values).toEqual([REPORTER, 'open', 'user', 5, 10]);
+      expect(poolCalls[1].values).toEqual([REPORTER, 'open', 'user']);
+    });
+
+    it('returns an empty envelope for a reporter with no reports', async () => {
+      await expect(service.listOwn(REPORTER, query())).resolves.toEqual({
+        items: [],
+        page: 1,
+        limit: 20,
+        total: 0,
+      });
+    });
+
+    it('returns exactly the reporter-facing fields', async () => {
+      ownRows = [row()];
+      total = 1;
+      await expect(service.listOwn(REPORTER, query())).resolves.toEqual({
+        items: [
+          {
+            id: 'report-1',
+            target_type: 'post',
+            target_label: 'A post title',
+            reason: 'spam',
+            description: 'My own words',
+            status: 'resolved',
+            created_at: '2026-10-25T10:00:00.000Z',
+            withdrawn_at: null,
+          },
+        ],
+        page: 1,
+        limit: 20,
+        total: 1,
+      });
+    });
+
+    it.each(MODERATOR_ONLY_FIELDS)(
+      'never returns %s, even if a row carried it',
+      async (field) => {
+        ownRows = [row()];
+        const [item] = (await service.listOwn(REPORTER, query())).items;
+        expect(item).not.toHaveProperty(field);
+      },
+    );
+
+    it.each(['resolution', 'resolution_note', 'reviewed_by', 'reviewed_at'])(
+      'never selects ur.%s',
+      async (column) => {
+        await service.listOwn(REPORTER, query());
+        await service.findOwn('report-1', REPORTER).catch(() => undefined);
+        expect(poolCalls).toHaveLength(3);
+        for (const call of poolCalls) {
+          expect(call.sql).not.toMatch(new RegExp(`ur\\.${column}\\b`));
+        }
+      },
+    );
+
+    it('never selects the reported account or joins the reviewer', async () => {
+      await service.listOwn(REPORTER, query());
+      expect(poolCalls[0].sql).not.toContain('reported_user_id');
+      expect(poolCalls[0].sql).not.toContain('reviewer');
+    });
+
+    // target_id has no foreign key; the target may be gone.
+    it('left-joins the target and passes a null label through', async () => {
+      ownRows = [row({ target_label: null })];
+      const [item] = (await service.listOwn(REPORTER, query())).items;
+      expect(item.target_label).toBeNull();
+      expect(poolCalls[0].sql).not.toMatch(/\bINNER JOIN\b/);
+      for (const table of ['users', 'posts', 'comments', 'communities']) {
+        expect(poolCalls[0].sql).toContain(`LEFT JOIN ${table} target_`);
+      }
+    });
+
+    it('labels only what is still publicly readable', async () => {
+      await service.listOwn(REPORTER, query());
+      const sql = poolCalls[0].sql;
+      expect(sql).toContain(
+        'IF(target_user.deleted_at IS NULL, target_user.username, NULL)',
+      );
+      expect(sql).toContain(
+        'IF(target_post.removed_at IS NULL, target_post.title, NULL)',
+      );
+      expect(sql).toContain(
+        'IF(target_comment.removed_at IS NULL, LEFT(target_comment.content, 100), NULL)',
+      );
+      expect(sql).toContain(
+        'IF(target_community.deleted_at IS NULL, target_community.name, NULL)',
+      );
+    });
+
+    it('maps a withdrawal time to ISO', async () => {
+      ownRows = [
+        row({
+          status: 'open',
+          withdrawn_at: new Date('2026-10-27T08:00:00Z'),
+        }),
+      ];
+      const [item] = (await service.listOwn(REPORTER, query())).items;
+      expect(item.withdrawn_at).toBe('2026-10-27T08:00:00.000Z');
+    });
+  });
+
+  describe('findOwn', () => {
+    it('binds both the id and the caller as reporter', async () => {
+      ownRows = [row()];
+      await service.findOwn('report-1', REPORTER);
+      expect(poolCalls[0].sql).toContain(
+        'WHERE ur.id = ? AND ur.reporter_id = ? LIMIT 1',
+      );
+      expect(poolCalls[0].values).toEqual(['report-1', REPORTER]);
+    });
+
+    it('returns the reporter-facing shape only', async () => {
+      ownRows = [row()];
+      const report = await service.findOwn('report-1', REPORTER);
+      expect(Object.keys(report).sort()).toEqual(
+        [
+          'created_at',
+          'description',
+          'id',
+          'reason',
+          'status',
+          'target_label',
+          'target_type',
+          'withdrawn_at',
+        ].sort(),
+      );
+      for (const field of MODERATOR_ONLY_FIELDS) {
+        expect(report).not.toHaveProperty(field);
+      }
+    });
+
+    // Another reporter's report matches no row, exactly like an unknown id, so
+    // it is 404 and never 403, which would confirm the report exists.
+    it('answers 404, not 403, for a report that is not the caller’s', async () => {
+      await expect(
+        service.findOwn('someone-elses', REPORTER),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
+  describe('withdraw', () => {
+    it('locks the row, then sets withdrawn_at from the database clock', async () => {
+      await service.withdraw('report-1', REPORTER);
+
+      expect(connection.beginTransaction).toHaveBeenCalled();
+      expect(connectionCalls[0].sql).toContain(
+        'SELECT reporter_id, status, withdrawn_at FROM user_reports',
+      );
+      expect(connectionCalls[0].sql).toContain(
+        'WHERE id = ? LIMIT 1 FOR UPDATE',
+      );
+      expect(connectionCalls[0].values).toEqual(['report-1']);
+      expect(update()?.sql).toContain('SET withdrawn_at = UTC_TIMESTAMP()');
+      expect(update()?.sql).toMatch(
+        /WHERE id = \? AND reporter_id = \? AND withdrawn_at IS NULL\s+AND status = 'open'/,
+      );
+      expect(update()?.values).toEqual(['report-1', REPORTER]);
+      expect(connection.commit).toHaveBeenCalled();
+      expect(connection.rollback).not.toHaveBeenCalled();
+      expect(connection.release).toHaveBeenCalledTimes(1);
+    });
+
+    it('never deletes the row', async () => {
+      await service.withdraw('report-1', REPORTER);
+      for (const call of connectionCalls) {
+        expect(call.sql).not.toMatch(/\bDELETE\b/);
+      }
+    });
+
+    it('answers 404 for an unknown report', async () => {
+      lockedRow = undefined;
+      await expect(
+        service.withdraw('missing', REPORTER),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(update()).toBeUndefined();
+    });
+
+    it.each([['another-reporter'], [null]])(
+      'answers 404, not 403, for a report filed by %s',
+      async (reporterId) => {
+        lockedRow = { ...openRow(), reporter_id: reporterId };
+        await expect(
+          service.withdraw('report-1', REPORTER),
+        ).rejects.toBeInstanceOf(NotFoundException);
+        expect(update()).toBeUndefined();
+      },
+    );
+
+    it.each(['under_review', 'resolved', 'rejected'])(
+      'answers 409 for a %s report and changes nothing',
+      async (status) => {
+        lockedRow = { ...openRow(), status };
+        await expect(
+          service.withdraw('report-1', REPORTER),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(update()).toBeUndefined();
+        expect(connection.rollback).toHaveBeenCalled();
+        expect(connection.commit).not.toHaveBeenCalled();
+      },
+    );
+
+    it('answers 409 for a second withdrawal', async () => {
+      lockedRow = {
+        ...openRow(),
+        withdrawn_at: new Date('2026-10-27T08:00:00Z'),
+      };
+      await expect(
+        service.withdraw('report-1', REPORTER),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(update()).toBeUndefined();
+    });
+
+    it('answers 409 and rolls back when the conditional update matches nothing', async () => {
+      updateAffectedRows = 0;
+      await expect(
+        service.withdraw('report-1', REPORTER),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(connection.rollback).toHaveBeenCalled();
+      expect(connection.commit).not.toHaveBeenCalled();
+    });
+
+    it('releases the connection on every path', async () => {
+      const arrangements: Array<() => void> = [
+        () => undefined,
+        () => {
+          lockedRow = undefined;
+        },
+        () => {
+          lockedRow = { ...openRow(), reporter_id: 'another-reporter' };
+        },
+        () => {
+          lockedRow = { ...openRow(), status: 'resolved' };
+        },
+        () => {
+          updateAffectedRows = 0;
+        },
+      ];
+      for (const arrange of arrangements) {
+        connection.release.mockClear();
+        lockedRow = openRow();
+        updateAffectedRows = 1;
+        arrange();
+        await service.withdraw('report-1', REPORTER).catch(() => undefined);
+        expect(connection.release).toHaveBeenCalledTimes(1);
+      }
+    });
+
+    it('rolls back and releases when the locking read itself fails', async () => {
+      connection.execute = () => Promise.reject(new Error('lock wait timeout'));
+      await expect(service.withdraw('report-1', REPORTER)).rejects.toThrow(
+        'lock wait timeout',
+      );
+      expect(connection.rollback).toHaveBeenCalled();
+      expect(connection.release).toHaveBeenCalledTimes(1);
     });
   });
 });

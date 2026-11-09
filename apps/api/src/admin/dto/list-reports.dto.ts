@@ -21,6 +21,9 @@ import type {
   ReportTargetType,
 } from '../../reports/report.constants';
 
+export const REPORT_WITHDRAWN_FILTERS = ['exclude', 'include', 'only'] as const;
+export type ReportWithdrawnFilter = (typeof REPORT_WITHDRAWN_FILTERS)[number];
+
 export class ListReportsDto {
   @IsOptional()
   @IsIn(REPORT_STATUSES)
@@ -47,6 +50,18 @@ export class ListReportsDto {
   @IsString()
   @Matches(/^[a-zA-Z0-9_]{3,50}$/)
   reporter_username?: string;
+
+  @ApiPropertyOptional({
+    enum: REPORT_WITHDRAWN_FILTERS,
+    default: 'exclude',
+    description:
+      'Reports their reporter withdrew. `exclude` (default) hides them from ' +
+      'the queue, `include` lists them alongside the rest, `only` lists ' +
+      'nothing else.',
+  })
+  @IsOptional()
+  @IsIn(REPORT_WITHDRAWN_FILTERS)
+  withdrawn: ReportWithdrawnFilter = 'exclude';
 
   @ApiPropertyOptional({ format: 'date-time' })
   @IsOptional()

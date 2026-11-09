@@ -27,6 +27,7 @@ interface ReportFixture {
   created_at: string;
   reviewed_at: string | null;
   resolution_note: string | null;
+  withdrawn_at: string | null;
 }
 
 interface AdminListResponse {
@@ -90,6 +91,7 @@ describe('Admin reports API (e2e)', () => {
       created_at: new Date(Date.UTC(2026, 0, index + 1)).toISOString(),
       reviewed_at: null,
       resolution_note: null,
+      withdrawn_at: null,
     }));
     roles = new Map([
       ['admin-id', 'admin'],
@@ -160,6 +162,12 @@ describe('Admin reports API (e2e)', () => {
       if (where.includes('ur.target_type = ?')) {
         const value = values[parameter++];
         result = result.filter((row) => row.target_type === value);
+      }
+      if (where.includes('ur.withdrawn_at IS NULL')) {
+        result = result.filter((row) => row.withdrawn_at === null);
+      }
+      if (where.includes('ur.withdrawn_at IS NOT NULL')) {
+        result = result.filter((row) => row.withdrawn_at !== null);
       }
       return result;
     };
@@ -315,6 +323,7 @@ describe('Admin reports API (e2e)', () => {
                       ? 'target-id'
                       : null,
                     status: report.status,
+                    withdrawn_at: report.withdrawn_at,
                   },
                 ]
               : [],
@@ -323,7 +332,7 @@ describe('Admin reports API (e2e)', () => {
         }
         if (sql.startsWith('UPDATE user_reports')) {
           const report = reports.find((row) => row.id === values[4]);
-          if (!report) {
+          if (!report || report.withdrawn_at !== null) {
             return Promise.resolve([{ affectedRows: 0 }, []]);
           }
           previousReportState = {
@@ -671,6 +680,7 @@ describe('Admin reports API (e2e)', () => {
       created_at: '2026-06-01T00:00:00.000Z',
       reviewed_at: null,
       resolution_note: null,
+      withdrawn_at: null,
       ...overrides,
     });
     const listed = async (query: string) =>
@@ -916,6 +926,96 @@ describe('Admin reports API (e2e)', () => {
         rollbacks: 1,
         releases: 1,
       });
+    });
+  });
+
+  describe('withdrawn reports', () => {
+    const withdraw = (id: string) => {
+      reports.find((row) => row.id === id)!.withdrawn_at =
+        '2026-10-27T08:00:00.000Z';
+    };
+    const ids = (body: AdminListResponse) => body.items.map((item) => item.id);
+    const queue = async (query = '') =>
+      (await adminRequest(`/admin/reports?limit=100${query}`).expect(200))
+        .body as AdminListResponse;
+
+    it('drops a report from the default queue once its reporter withdraws it', async () => {
+      const before = await queue();
+      expect(ids(before)).toContain('report-03');
+      expect(before.total).toBe(25);
+      expect(before.filters.withdrawn).toBe('exclude');
+
+      withdraw('report-03');
+
+      const after = await queue();
+      expect(ids(after)).not.toContain('report-03');
+      expect(after.total).toBe(24);
+      expect((await queue('&status=open')).total).toBe(11);
+    });
+
+    it('lists it again under withdrawn=include, and alone under withdrawn=only', async () => {
+      withdraw('report-03');
+
+      const included = await queue('&withdrawn=include');
+      expect(included.total).toBe(25);
+      expect(
+        included.items.find((item) => item.id === 'report-03'),
+      ).toMatchObject({ withdrawn_at: '2026-10-27T08:00:00.000Z' });
+      expect(included.filters.withdrawn).toBe('include');
+
+      const only = await queue('&withdrawn=only');
+      expect(ids(only)).toEqual(['report-03']);
+      expect(only.total).toBe(1);
+    });
+
+    it('answers an unknown withdrawn value with 400', async () => {
+      await adminRequest('/admin/reports?withdrawn=true').expect(400);
+    });
+
+    it('still returns a withdrawn report by id, marked as withdrawn', async () => {
+      withdraw('report-03');
+      const detail = await adminRequest('/admin/reports/report-03').expect(200);
+      expect(detail.body).toMatchObject({
+        id: 'report-03',
+        status: 'open',
+        withdrawn_at: '2026-10-27T08:00:00.000Z',
+      });
+      const standing = await adminRequest('/admin/reports/report-05').expect(
+        200,
+      );
+      expect(standing.body).toMatchObject({ withdrawn_at: null });
+    });
+
+    it.each([
+      { status: 'under_review' },
+      { status: 'rejected' },
+      { status: 'resolved', resolution: 'no_action' },
+    ])(
+      'refuses %o on a withdrawn report with 409, writing nothing',
+      async (body) => {
+        withdraw('report-03');
+        await adminPatch('/admin/reports/report-03').send(body).expect(409);
+
+        expect(reports.find((row) => row.id === 'report-03')).toMatchObject({
+          status: 'open',
+          reviewed_at: null,
+          resolution: null,
+        });
+        expect(auditRows).toHaveLength(0);
+        expect(notificationRows).toHaveLength(0);
+        expect(transactionCounts).toEqual({
+          commits: 0,
+          rollbacks: 1,
+          releases: 1,
+        });
+      },
+    );
+
+    it('still transitions a report that was not withdrawn', async () => {
+      withdraw('report-03');
+      await adminPatch('/admin/reports/report-05')
+        .send({ status: 'under_review' })
+        .expect(200);
     });
   });
 });

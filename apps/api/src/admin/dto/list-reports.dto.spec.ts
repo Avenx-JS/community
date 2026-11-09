@@ -14,9 +14,23 @@ describe('ListReportsDto', () => {
     },
   );
 
+  it.each(['exclude', 'include', 'only'])(
+    'accepts withdrawn=%s',
+    async (withdrawn) => {
+      await expect(
+        validate(plainToInstance(ListReportsDto, { withdrawn })),
+      ).resolves.toHaveLength(0);
+    },
+  );
+
   it('applies pagination and sort defaults', () => {
     const dto = plainToInstance(ListReportsDto, {});
-    expect(dto).toMatchObject({ page: 1, limit: 20, sort: 'new' });
+    expect(dto).toMatchObject({
+      page: 1,
+      limit: 20,
+      sort: 'new',
+      withdrawn: 'exclude',
+    });
   });
 
   it.each([
@@ -29,6 +43,9 @@ describe('ListReportsDto', () => {
     { target_type: 'unknown' },
     { target_type: 'POST' },
     { sort: 'random' },
+    { withdrawn: 'true' },
+    { withdrawn: 'INCLUDE' },
+    { include_withdrawn: 'true' },
     { reported_username: 'bad-name' },
     { reporter_username: 'x' },
     { from: 'not-a-date' },

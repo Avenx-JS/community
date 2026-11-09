@@ -34,7 +34,12 @@ export class AdminReportsController {
   constructor(private readonly reportsService: AdminReportsService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List user reports' })
+  @ApiOperation({
+    summary: 'List user reports',
+    description:
+      'Reports withdrawn by their reporter are left out unless `withdrawn` ' +
+      'is `include` or `only`.',
+  })
   @ApiAuthenticated(ADMIN_ONLY)
   @ApiOkResponse({ type: AdminReportListResponse })
   @ApiErrorResponses({ 400: 'Invalid query parameters.' })
@@ -60,7 +65,7 @@ export class AdminReportsController {
     description:
       'open moves to under_review, resolved, or rejected; under_review ' +
       'moves to resolved or rejected. resolution is required only when ' +
-      'resolving.',
+      'resolving. A report withdrawn by its reporter cannot be transitioned.',
   })
   @ApiAuthenticated({
     forbidden:
@@ -72,7 +77,9 @@ export class AdminReportsController {
   @ApiErrorResponses({
     400: 'Invalid report ID or status data.',
     404: 'Report not found.',
-    409: 'The report is in a terminal status or changed concurrently.',
+    409:
+      'The report is in a terminal status, was withdrawn by its reporter, or ' +
+      'changed concurrently.',
   })
   updateStatus(
     @Param('id', new SafeRouteParamPipe('id')) id: string,

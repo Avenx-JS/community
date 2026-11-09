@@ -894,6 +894,7 @@ envelope. Optional query parameters:
 | `target_type`       | `user`, `post`, `comment`, `community`; omit it for every type in one ordered stream          |
 | `reported_username` | Exact username, 3–50 letters, digits, or underscores. Does not match community reports       |
 | `reporter_username` | Exact username, 3–50 letters, digits, or underscores                                         |
+| `withdrawn`         | `exclude` (default) hides reports their reporter withdrew; `include` lists them too; `only` lists nothing else |
 | `from` / `to`       | ISO 8601 timestamps; UTC half-open range `created_at >= from AND created_at < to`            |
 | `page`              | Integer 1–10000; defaults to `1`                                                             |
 | `limit`             | Integer 1–100; defaults to `20`                                                              |
@@ -907,6 +908,15 @@ List items include report and queue fields, `has_context`, timestamps, the
 reporter/reported usernames and the target. A deleted reporter is shown as
 `null`. Free-text descriptions are returned only by the detail route. An empty
 page returns `200` with an empty `items` array.
+
+**Withdrawn reports leave the queue by default.** A reporter can withdraw an open
+report ([`DELETE /reports/:id`](#reading-and-withdrawing-your-own-reports)). The
+report keeps `status: "open"` but carries a `withdrawn_at` timestamp, and the
+default `withdrawn=exclude` leaves it out of both the page and `total`. Otherwise
+a withdrawal would change nothing a moderator sees. `withdrawn=include` shows it
+again, and every item carries `withdrawn_at` (`null` while the report stands).
+Account-level aggregates (`open_reports_against_user`, the user directory's open
+counts) and the analytics still count withdrawn reports as filed.
 
 **The target.** Every item carries `target_type`, `target_id` and a resolved,
 human-readable `target_label`:
@@ -948,7 +958,8 @@ lose a report.
       "resolution": null,
       "has_context": true,
       "created_at": "2026-10-25T10:00:00.000Z",
-      "reviewed_at": null
+      "reviewed_at": null,
+      "withdrawn_at": null
     }
   ],
   "page": 1,
@@ -960,6 +971,7 @@ lose a report.
     "target_type": null,
     "reported_username": null,
     "reporter_username": null,
+    "withdrawn": "exclude",
     "from": null,
     "to": null,
     "sort": "new"
@@ -974,6 +986,7 @@ resolution note, reviewer username, context, and triage aggregates:
 when no context was filed; a deleted referenced post/comment returns
 `exists: false` and null detail fields. Deleted reporter and reviewer usernames
 are also `null`. Unknown report IDs return `404`; malformed IDs return `400`.
+A withdrawn report is still returned, marked by a non-null `withdrawn_at`.
 
 `target_content` holds what a reviewer needs to judge a `post` or `comment`
 report: `title` (`null` for a comment), the full `content`, not an excerpt, and
@@ -1045,6 +1058,12 @@ Allowed state transitions are:
 | `under_review` | `409`          | allowed    | allowed    |
 | `resolved`     | `409`          | `409`      | `409`      |
 | `rejected`     | `409`          | `409`      | `409`      |
+
+**A withdrawn report cannot be transitioned:** any `PATCH` returns `409` and
+writes nothing (no status change, audit entry or notification). The reporter no
+longer stands behind it, so there is nothing to decide. The check runs on the
+locked row and again in the conditional `UPDATE`, so a withdrawal that lands
+between the two is still refused.
 
 Resolved and rejected reports are terminal. Repeating the current status also
 returns `409`, preserving the original reviewer and timestamp. `rejected`
@@ -1191,7 +1210,10 @@ community, and their moderation lifecycle data.
 (`open`, `under_review`, `resolved`, or `rejected`) and defaults to `open`;
 `resolution` separately records an outcome (`no_action`, `content_removed`,
 `user_warned`, `user_suspended`, or `user_banned`) and is nullable. A resolved
-report with `no_action` is distinct from a rejected report.
+report with `no_action` is distinct from a rejected report. `withdrawn_at`
+(nullable, migration `030_add_report_withdrawal`) records when the reporter
+withdrew an open report; it is independent of `status`. See
+[Reading and withdrawing your own reports](#reading-and-withdrawing-your-own-reports).
 
 Reports use deliberate account-deletion behavior: deleting a reporter or
 reviewer preserves the report and sets the corresponding reference to `NULL`;
@@ -1606,7 +1628,11 @@ the three-character username minimum instead, which hides a misordering.)
 authenticated user's own account. **New account-scoped sub-resources go under
 `/users/me/*`.** The existing `/subscriptions` and `/notifications` are
 resource-root routes that take the actor from the token; they are published
-API and stay where they are rather than being renamed.
+API and stay where they are rather than being renamed. The caller's own reports
+(`GET /reports`, `GET /reports/:id`, `DELETE /reports/:id`) are likewise on the
+`/reports` root, where `POST /reports` already lived. They are deliberately not
+duplicated under `/users/me/reports`; see
+[Reading and withdrawing your own reports](#reading-and-withdrawing-your-own-reports).
 
 ### Deleting your own account
 
@@ -1750,6 +1776,11 @@ fails safe.
   object contains only that account's ID and username. `last_seen_at` is
   private behavioral data, is not returned even by `GET /users/me`, and is only
   available through admin-authorized account detail and analytics.
+- **Moderation-only:** a report's `resolution`, `resolution_note`, reviewer
+  (`reviewed_by`) and `reviewed_at`, and the reported account. Only the admin
+  report routes return them. A reporter sees their report's `status` and nothing
+  more, both in the `report_resolved` notification and from `GET /reports`
+  ([Reading and withdrawing your own reports](#reading-and-withdrawing-your-own-reports)).
 - **Never returned or logged:** plaintext passwords, password hashes, salts,
   bearer/refresh tokens, token hashes, and session identifiers. Encoded
   password hashes remain database-only. Access and refresh credentials appear
@@ -1982,7 +2013,8 @@ in the system. `ReportsService` does not even depend on the acceptance service, 
 the tests pin it.
 
 **Duplicates.** An active duplicate report returns `409`; after the earlier report is
-resolved or rejected, another report may be filed. A duplicate is an active report
+resolved, rejected or [withdrawn](#reading-and-withdrawing-your-own-reports), another
+report may be filed. A duplicate is an active, non-withdrawn report
 by the same reporter with the same target (`target_type`, `target_id`) and the same
 evidence (`context_type`, `context_id`). Only a `user` target has evidence, so
 reporting the same account again with different evidence is a new report, while a
@@ -2016,6 +2048,147 @@ The response does not disclose the target's internal ID, email, report history,
 or moderation outcome. `reporter_id`, status, resolution fields, and all other
 undeclared body fields are rejected with `400`. Descriptions are stored as
 plain text and must be encoded by clients when rendered.
+
+### Reading and withdrawing your own reports
+
+Without these routes reporting was write-only: a reporter could not see what they
+had filed, check whether a report already existed before filing another (a
+duplicate is a bare `409`), or take back a report filed by mistake.
+
+| Route | Success | Description |
+| --- | --- | --- |
+| `GET /reports` | `200`, `{ "items", "page", "limit", "total" }` | The caller's own reports |
+| `GET /reports/:id` | `200`, one item | One of the caller's own reports |
+| `DELETE /reports/:id` | `204` | Withdraws one of the caller's own open reports |
+
+All three require a bearer token and take the reporter from it, like `POST
+/reports`, `GET /notifications` and `GET /subscriptions`. No route takes a reporter
+parameter, so one account can never read or withdraw another's reports.
+
+**`/users/me/reports` is deliberately not added.** It would be the same collection
+under a second path: two routes, two sets of tests and two things to keep
+consistent. The collection is rooted at `/reports`, where `POST /reports` already
+lives, as an exception to the
+[`/users/me/*` convention](#route-namespace-for-account-scoped-resources).
+
+#### `GET /reports`
+
+| Parameter | Accepted values |
+| --- | --- |
+| `status` | `open`, `under_review`, `resolved`, `rejected` |
+| `target_type` | `user`, `post`, `comment`, `community` |
+| `page` | Integer 1–10000; defaults to `1` |
+| `limit` | Integer 1–100; defaults to `20` |
+| `sort` | `new` (default) or `oldest`; ties use the report ID |
+
+Any other query parameter, or a value out of range, returns `400`. Withdrawn
+reports are listed too, with `withdrawn_at` set. A reporter with no reports gets
+`200` with `items: []` and `total: 0`. The listing is served by
+`idx_user_reports_reporter_created (reporter_id, created_at)`.
+
+#### The reporter-facing item
+
+Each item, from both read routes, is exactly:
+
+```json
+{
+  "id": "report-id",
+  "target_type": "post",
+  "target_label": "Post title",
+  "reason": "spam",
+  "description": "What I saw",
+  "status": "open",
+  "created_at": "2026-10-25T10:00:00.000Z",
+  "withdrawn_at": null
+}
+```
+
+- `status` is returned: a reporter may know whether their report is open, under
+  review or closed. That is only what the `report_resolved`
+  [notification](#moderation-notifications) already tells them, readable on demand.
+- `description` is the reporter's own text.
+- `target_label` is the username, community name, post title or the first 100
+  characters of the comment. It is `null` when the target no longer exists (it is
+  left-joined; `target_id` has no foreign key, see [Report targets](#report-targets))
+  **and when the target is no longer publicly readable**: an anonymised account, a
+  deleted community, or a removed post or comment. Otherwise this route would show
+  the reporter a removed post's title or comment text that `GET /posts/:id` hides
+  from everyone but reviewers. Removal and deletion are publicly observable anyway,
+  so a `null` label reveals nothing about the moderation outcome. The admin queue
+  keeps the label in those cases.
+- `withdrawn_at` is set once the reporter withdraws the report.
+
+**Withheld:** `resolution`, `resolution_note`, `reviewed_by` (and the reviewer's
+username), `reviewed_at` and `reported_user_id`, plus the internal `target_id`,
+`target_author_id` and context fields. `resolution` states what was done to another
+person's account, `resolution_note` is an internal moderation note, and naming the
+reviewer exposes a moderator to someone who may be hostile to the decision. The
+`report_resolved` notification already withholds these
+([Moderation notifications](#moderation-notifications)), and a reporter-facing read
+must not become a way around that. See also
+[Data classification](#data-classification-errors-and-logging). The columns are
+never selected, the OpenAPI schema (`OwnReportResponse`) is separate from the admin
+report classes, and tests pin each exclusion field by field and on the serialised
+body of all three routes.
+
+#### `GET /reports/:id`
+
+Returns the item above. **A report filed by someone else returns `404`, not
+`403`**, exactly like an unknown ID: a `403` would confirm the report exists. A
+malformed ID returns `400`. `GET /reports` is declared before `GET /reports/:id`.
+A literal-segment route added under `/reports` later must be declared above it, or
+`:id` captures it; `reports.controller.spec.ts` pins the order.
+
+#### `DELETE /reports/:id`: withdrawing a report
+
+**Withdrawal is a state change, not a deletion.** It sets `withdrawn_at` from the
+database clock (`UTC_TIMESTAMP()`) and keeps the row. The row cannot be deleted:
+`user_restrictions.report_id` references it, the `admin_actions` audit trail refers
+to it, and a reporter must not be able to erase a record a moderator has acted on.
+A link from a restriction stays intact.
+
+`withdrawn_at` (migration `030_add_report_withdrawal`) is a separate nullable
+timestamp, like `reviewed_at`, `lifted_at` and `removed_at`, rather than a new
+`withdrawn` value of `status`. `status` is the moderator's workflow, driven by
+`UpdateReportStatusDto` and the transition rules in
+`AdminReportsService.updateStatus`; a value the reporter could set would entangle
+two state machines. The column records whether the reporter stands behind the
+report, independent of where it is in the queue.
+
+**Only an `open` report can be withdrawn.** Once a moderator has moved it to
+`under_review`, work has started and the queue entry is no longer the reporter's
+alone; `resolved` and `rejected` are closed. So a withdrawn report always has
+status `open`.
+
+| Status | When |
+| --- | --- |
+| `204` | The report was open and not withdrawn; it is now withdrawn |
+| `400` | Malformed ID |
+| `404` | Unknown ID, or a report filed by someone else |
+| `409` | The report is `under_review`, `resolved` or `rejected`, or already withdrawn |
+
+The service locks the row (`SELECT … FOR UPDATE`), checks ownership and state, and
+then runs a conditional `UPDATE … WHERE withdrawn_at IS NULL AND status = 'open'`.
+An update that matches nothing returns `409`. A refused withdrawal changes nothing.
+
+**Effect on the admin queue.** `GET /admin/reports` leaves withdrawn reports out
+unless `withdrawn=include` or `withdrawn=only` is passed. `GET /admin/reports/:id`
+still returns one, with `withdrawn_at` set. `PATCH /admin/reports/:id` on a
+withdrawn report returns `409`. See [Admin report queue](#admin-report-queue).
+
+**Withdrawal frees the duplicate slot.** The duplicate check requires
+`withdrawn_at IS NULL` as well as an active status. A withdrawn report is still
+`open`, so without that predicate a reporter who withdrew could never report that
+target again.
+
+Withdrawal writes no `admin_actions` entry, since that log is scoped to platform
+admins and this is the reporter's own action; `withdrawn_at` is the record. Nobody
+is notified: the reporter is the actor, and the reported party was never told a
+report existed.
+
+**Rate limiting.** The report-creation buckets match `POST /reports` only, so these
+three routes fall under the general read and write buckets. The per-account
+creation bucket (10 per hour) bounds withdraw-and-resubmit cycling.
 
 ### Report targets
 
@@ -4829,7 +5002,9 @@ it.
 - **Reports.** `{ status }` answers "was my report acted on?" and nothing more.
   The notification never carries `resolution` (it describes what happened to
   another person's account), `resolution_note` (an internal note),
-  `reviewed_by` or the reviewer's username, or the reported user. A move to
+  `reviewed_by` or the reviewer's username, or the reported user. The
+  reporter's own read routes (`GET /reports`, `GET /reports/:id`) withhold the
+  same fields, so they are no route around this rule. A move to
   `under_review` writes nothing: it is a queue state, not an outcome. A repeated
   or otherwise refused transition is a `409` and writes nothing. A report whose
   reporter account was deleted (`reporter_id` is `NULL`) writes nothing and

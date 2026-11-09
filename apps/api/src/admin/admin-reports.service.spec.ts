@@ -27,6 +27,7 @@ describe('AdminReportsService', () => {
         reporter_id: string | null;
         reported_user_id: string | null;
         status: 'open' | 'under_review' | 'resolved' | 'rejected';
+        withdrawn_at?: string | null;
       }
     | undefined;
   let updateAffectedRows: number;
@@ -64,7 +65,11 @@ describe('AdminReportsService', () => {
           sql.startsWith('SELECT ur.id, reporter_user.username') &&
           !sql.includes('ur.description')
         ) {
-          return Promise.resolve([listRows, []]);
+          // MySQL always returns the column; fixtures that predate it stand.
+          return Promise.resolve([
+            listRows.map((row) => ({ withdrawn_at: null, ...row })),
+            [],
+          ]);
         }
         if (sql.startsWith('SELECT COUNT(*) AS total')) {
           return Promise.resolve([[{ total: count }], []]);
@@ -73,7 +78,10 @@ describe('AdminReportsService', () => {
           sql.startsWith('SELECT ur.id, reporter_user.username') &&
           sql.includes('ur.description')
         ) {
-          return Promise.resolve([detailRow ? [detailRow] : [], []]);
+          return Promise.resolve([
+            detailRow ? [{ withdrawn_at: null, ...detailRow }] : [],
+            [],
+          ]);
         }
         if (
           sql.startsWith('SELECT ') &&
@@ -121,7 +129,7 @@ describe('AdminReportsService', () => {
         calls.push({ sql, values });
         if (sql.startsWith('SELECT id, reporter_id, reported_user_id')) {
           return Promise.resolve([
-            transitionRow ? [{ ...transitionRow }] : [],
+            transitionRow ? [{ withdrawn_at: null, ...transitionRow }] : [],
             [],
           ]);
         }
@@ -469,6 +477,7 @@ describe('AdminReportsService', () => {
           has_context: false,
           created_at: '2026-10-25T10:00:00.000Z',
           reviewed_at: null,
+          withdrawn_at: null,
         },
       ],
       page: 1,
@@ -480,6 +489,7 @@ describe('AdminReportsService', () => {
         target_type: null,
         reported_username: null,
         reporter_username: null,
+        withdrawn: 'exclude',
         from: null,
         to: null,
         sort: 'oldest',
@@ -746,6 +756,173 @@ describe('AdminReportsService', () => {
 
     expect(transaction).toEqual({ commits: 0, rollbacks: 1, releases: 1 });
     expect(auditEntries).toHaveLength(0);
+  });
+
+  describe('withdrawn reports', () => {
+    const whereOf = (sql: string) =>
+      sql.slice(
+        sql.indexOf(' WHERE '),
+        sql.includes(' ORDER BY') ? sql.indexOf(' ORDER BY') : sql.length,
+      );
+
+    it('leaves withdrawn reports out of the queue by default, in page and count', async () => {
+      const result = await service.findAll({} as ListReportsDto);
+      const [list, countQuery] = calls;
+      for (const { sql } of [list, countQuery]) {
+        expect(whereOf(sql)).toContain('ur.withdrawn_at IS NULL');
+      }
+      expect(result.filters.withdrawn).toBe('exclude');
+    });
+
+    it('keeps the default exclusion alongside other filters, without a parameter', async () => {
+      await service.findAll({
+        status: 'open',
+        withdrawn: 'exclude',
+      } as ListReportsDto);
+      expect(whereOf(calls[0].sql)).toContain(
+        'ur.status = ? AND ur.withdrawn_at IS NULL',
+      );
+      expect(calls[1].values).toEqual(['open']);
+    });
+
+    it('includes withdrawn reports under withdrawn=include', async () => {
+      const result = await service.findAll({
+        withdrawn: 'include',
+      } as ListReportsDto);
+      for (const { sql } of calls) {
+        expect(sql).not.toContain('withdrawn_at IS NULL');
+        expect(sql).not.toContain('withdrawn_at IS NOT NULL');
+      }
+      expect(result.filters.withdrawn).toBe('include');
+    });
+
+    it('lists only withdrawn reports under withdrawn=only', async () => {
+      const result = await service.findAll({
+        withdrawn: 'only',
+      } as ListReportsDto);
+      for (const { sql } of calls.slice(0, 2)) {
+        expect(whereOf(sql)).toContain('ur.withdrawn_at IS NOT NULL');
+      }
+      expect(result.filters.withdrawn).toBe('only');
+    });
+
+    it('marks a withdrawn report in the list and the detail', async () => {
+      listRows = [
+        {
+          id: 'r1',
+          reporter_username: 'reporter',
+          reported_username: 'target',
+          target_type: 'user',
+          target_id: 'target-id',
+          target_label: 'target',
+          reason: 'spam',
+          status: 'open',
+          resolution: null,
+          context_type: null,
+          context_id: null,
+          created_at: '2026-10-25T10:00:00Z',
+          reviewed_at: null,
+          withdrawn_at: '2026-10-26T09:00:00Z',
+        },
+      ];
+      detailRow = {
+        ...listRows[0],
+        reported_user_id: 'target-id',
+        description: 'detail',
+        resolution_note: null,
+        reviewed_by_username: null,
+      };
+      const list = await service.findAll({
+        withdrawn: 'include',
+      } as ListReportsDto);
+      expect(list.items[0].withdrawn_at).toBe('2026-10-26T09:00:00.000Z');
+
+      const detail = await service.findOne('r1');
+      expect(detail.withdrawn_at).toBe('2026-10-26T09:00:00.000Z');
+      expect(calls.at(-3)?.sql).not.toContain('withdrawn_at IS NULL');
+    });
+
+    it('reads withdrawn_at as null for a report that stands', async () => {
+      listRows = [
+        {
+          id: 'r1',
+          reporter_username: null,
+          reported_username: null,
+          reason: 'spam',
+          status: 'open',
+          resolution: null,
+          context_type: null,
+          context_id: null,
+          created_at: '2026-10-25T10:00:00Z',
+          reviewed_at: null,
+        },
+      ];
+      const list = await service.findAll({} as ListReportsDto);
+      expect(list.items[0].withdrawn_at).toBeNull();
+    });
+
+    it.each(['under_review', 'resolved', 'rejected'] as const)(
+      'refuses to move a withdrawn report to %s with 409, writing nothing',
+      async (status) => {
+        transitionRow = {
+          ...transitionRow!,
+          withdrawn_at: '2026-10-26T09:00:00Z',
+        };
+        const body =
+          status === 'resolved'
+            ? { status, resolution: 'no_action' as const }
+            : { status };
+
+        await expect(
+          service.updateStatus('report-1', body, 'admin-id'),
+        ).rejects.toBeInstanceOf(ConflictException);
+
+        expect(calls[0].sql).toContain('withdrawn_at');
+        expect(calls[0].sql).toContain('FOR UPDATE');
+        expect(
+          calls.some((call) => call.sql.startsWith('UPDATE user_reports')),
+        ).toBe(false);
+        expect(auditEntries).toHaveLength(0);
+        expect(notificationEntries).toHaveLength(0);
+        expect(transaction).toEqual({ commits: 0, rollbacks: 1, releases: 1 });
+      },
+    );
+
+    it('guards the transition update itself against a withdrawal', async () => {
+      detailRow = {
+        id: 'report-1',
+        reporter_username: 'reporter',
+        reported_username: 'target',
+        reported_user_id: 'target-id',
+        reason: 'spam',
+        status: 'open',
+        resolution: null,
+        context_type: null,
+        context_id: null,
+        description: null,
+        resolution_note: null,
+        reviewed_by_username: null,
+        created_at: '2026-10-25T10:00:00Z',
+        reviewed_at: null,
+      };
+      await service.updateStatus(
+        'report-1',
+        { status: 'under_review' },
+        'admin-id',
+      );
+      const mutation = calls.find((call) =>
+        call.sql.startsWith('UPDATE user_reports'),
+      );
+      expect(mutation?.sql).toContain('AND withdrawn_at IS NULL');
+    });
+
+    it('answers a withdrawal that lands between the lock and the update with 409', async () => {
+      updateAffectedRows = 0;
+      await expect(
+        service.updateStatus('report-1', { status: 'rejected' }, 'admin-id'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(transaction.releases).toBe(1);
+    });
   });
 
   describe('reporter notifications', () => {

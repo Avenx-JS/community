@@ -13,12 +13,15 @@ import {
   type SafeRouteParamKind,
 } from '../common/safe-route-param.pipe';
 import { CreateReportDto } from './dto/create-report.dto';
+import { ListOwnReportsDto } from './dto/list-own-reports.dto';
 import { isReportReason } from './report.constants';
 import type {
   ReportContextType,
   ReportReason,
+  ReportStatus,
   ReportTargetType,
 } from './report.constants';
+import { REPORT_TARGET_JOINS_SQL } from './report-target.sql';
 
 interface ReportedUserRow extends RowDataPacket {
   id: string;
@@ -40,6 +43,85 @@ interface ExistingReportRow extends RowDataPacket {
 
 interface CreatedReportRow extends RowDataPacket {
   created_at: Date | string;
+}
+
+interface OwnReportRow extends RowDataPacket {
+  id: string;
+  target_type: ReportTargetType;
+  target_label: string | null;
+  reason: ReportReason;
+  description: string | null;
+  status: ReportStatus;
+  created_at: Date | string;
+  withdrawn_at: Date | string | null;
+}
+
+interface WithdrawalRow extends RowDataPacket {
+  reporter_id: string | null;
+  status: ReportStatus;
+  withdrawn_at: Date | string | null;
+}
+
+/**
+ * A report as its reporter sees it. Deliberately has no resolution,
+ * resolution_note, reviewed_by, reviewed_at or reported_user_id: the
+ * resolution describes what happened to another person's account, the note is
+ * internal, and the reviewer must not be named to someone who may be hostile
+ * to the decision (#44, "Data classification" in the README). status is the
+ * most a reporter learns about the outcome, as in the report_resolved
+ * notification.
+ */
+export interface OwnReportDto {
+  id: string;
+  target_type: ReportTargetType;
+  target_label: string | null;
+  reason: ReportReason;
+  description: string | null;
+  status: ReportStatus;
+  created_at: string;
+  withdrawn_at: string | null;
+}
+
+export interface OwnReportList {
+  items: OwnReportDto[];
+  page: number;
+  limit: number;
+  total: number;
+}
+
+// Only what the public can still read: an anonymised account, removed content
+// and a deleted community label as null, so this route never shows a removed
+// post's title or comment text that GET /posts/:id hides from everyone but
+// reviewers. Removal and deletion are publicly observable anyway, so the null
+// tells the reporter nothing about the moderation outcome.
+const OWN_REPORT_TARGET_LABEL_SQL = `CASE ur.target_type
+           WHEN 'user' THEN IF(target_user.deleted_at IS NULL, target_user.username, NULL)
+           WHEN 'post' THEN IF(target_post.removed_at IS NULL, target_post.title, NULL)
+           WHEN 'comment' THEN IF(target_comment.removed_at IS NULL, LEFT(target_comment.content, 100), NULL)
+           WHEN 'community' THEN IF(target_community.deleted_at IS NULL, target_community.name, NULL)
+         END AS target_label`;
+
+// The column list is the response's allow-list: nothing moderator-only is ever
+// selected, so nothing moderator-only can leak through a mapping mistake.
+const OWN_REPORT_SELECT_SQL = `SELECT ur.id, ur.target_type, ${OWN_REPORT_TARGET_LABEL_SQL},
+         ur.reason, ur.description, ur.status, ur.created_at, ur.withdrawn_at
+       FROM user_reports ur
+       ${REPORT_TARGET_JOINS_SQL}`;
+
+function toOwnReport(row: OwnReportRow): OwnReportDto {
+  return {
+    id: row.id,
+    target_type: row.target_type,
+    target_label: row.target_label,
+    reason: row.reason,
+    description: row.description,
+    status: row.status,
+    created_at: new Date(row.created_at).toISOString(),
+    withdrawn_at:
+      row.withdrawn_at === null
+        ? null
+        : new Date(row.withdrawn_at).toISOString(),
+  };
 }
 
 export interface CreatedReportDto {
@@ -107,11 +189,13 @@ export class ReportsService {
       // Keyed on the target plus the evidence: a report about the same account
       // with different evidence is a new report, and reports about two posts
       // by one author never collide. Only a user target has evidence, so any
-      // other target has one active report per reporter.
+      // other target has one active report per reporter. A withdrawn report
+      // keeps status 'open', so it is excluded explicitly: withdrawing frees
+      // the slot, or the reporter could never report that target again.
       const [existingReports] = await connection.execute<ExistingReportRow[]>(
         `SELECT id FROM user_reports
          WHERE reporter_id = ? AND target_type = ? AND target_id = ?
-           AND status IN ('open', 'under_review')
+           AND status IN ('open', 'under_review') AND withdrawn_at IS NULL
            AND context_type <=> ? AND context_id <=> ?
          FOR UPDATE`,
         [
@@ -163,6 +247,112 @@ export class ReportsService {
         status: 'open',
         created_at: new Date(reports[0].created_at).toISOString(),
       };
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  // The reporter is always the caller; nothing lets one account name another's.
+  // Served by idx_user_reports_reporter_created (reporter_id, created_at).
+  async listOwn(
+    reporterId: string,
+    query: ListOwnReportsDto,
+  ): Promise<OwnReportList> {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+    const offset = (page - 1) * limit;
+    const filters = ['ur.reporter_id = ?'];
+    const values: string[] = [reporterId];
+    if (query.status) {
+      filters.push('ur.status = ?');
+      values.push(query.status);
+    }
+    if (query.target_type) {
+      filters.push('ur.target_type = ?');
+      values.push(query.target_type);
+    }
+    const where = filters.join(' AND ');
+    const order = query.sort === 'oldest' ? 'ASC' : 'DESC';
+
+    const [rows] = await this.pool.execute<OwnReportRow[]>(
+      `${OWN_REPORT_SELECT_SQL}
+       WHERE ${where}
+       ORDER BY ur.created_at ${order}, ur.id ${order} LIMIT ? OFFSET ?`,
+      [...values, limit, offset],
+    );
+    const [countRows] = await this.pool.execute<
+      (RowDataPacket & { total: number | string })[]
+    >(`SELECT COUNT(*) AS total FROM user_reports ur WHERE ${where}`, values);
+
+    return {
+      items: rows.map(toOwnReport),
+      page,
+      limit,
+      total: Number(countRows[0]?.total ?? 0),
+    };
+  }
+
+  // Another reporter's report is 404, not 403: 403 would confirm it exists.
+  async findOwn(id: string, reporterId: string): Promise<OwnReportDto> {
+    const [rows] = await this.pool.execute<OwnReportRow[]>(
+      `${OWN_REPORT_SELECT_SQL}
+       WHERE ur.id = ? AND ur.reporter_id = ? LIMIT 1`,
+      [id, reporterId],
+    );
+    if (!rows[0]) {
+      throw new NotFoundException('Report not found');
+    }
+    return toOwnReport(rows[0]);
+  }
+
+  // A state change, never a DELETE: user_restrictions.report_id and the
+  // admin_actions audit trail refer to the row, and a reporter must not erase a
+  // record a moderator has acted on. Only an open report can be withdrawn; once
+  // under_review, a moderator's work has started. No audit entry (admin_actions
+  // is for platform admins) and no notification (the reporter is the actor, and
+  // the reported party was never told): withdrawn_at is the record.
+  async withdraw(id: string, reporterId: string): Promise<void> {
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+
+      const [rows] = await connection.execute<WithdrawalRow[]>(
+        `SELECT reporter_id, status, withdrawn_at FROM user_reports
+         WHERE id = ? LIMIT 1 FOR UPDATE`,
+        [id],
+      );
+      const report = rows[0];
+      if (!report || report.reporter_id !== reporterId) {
+        throw new NotFoundException('Report not found');
+      }
+      if (report.withdrawn_at !== null) {
+        throw new ConflictException('Report is already withdrawn');
+      }
+      if (report.status !== 'open') {
+        throw new ConflictException('Only an open report can be withdrawn');
+      }
+
+      const [result] = await connection.execute<ResultSetHeader>(
+        `UPDATE user_reports SET withdrawn_at = UTC_TIMESTAMP()
+         WHERE id = ? AND reporter_id = ? AND withdrawn_at IS NULL
+           AND status = 'open'`,
+        [id, reporterId],
+      );
+      // The row is locked, so this only fails if something bypassed the lock.
+      if (result.affectedRows !== 1) {
+        throw new ConflictException('Report changed concurrently');
+      }
+
+      await connection.commit();
+      transactionStarted = false;
     } catch (error) {
       if (transactionStarted) {
         await connection.rollback();

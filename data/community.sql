@@ -297,6 +297,7 @@ CREATE TABLE user_reports (
     target_type ENUM('user', 'post', 'comment', 'community') NOT NULL DEFAULT 'user',
     target_id VARCHAR(36) NOT NULL,
     target_author_id VARCHAR(36) NULL,
+    withdrawn_at TIMESTAMP NULL DEFAULT NULL,
     INDEX idx_user_reports_status_created (status, created_at),
     INDEX idx_user_reports_reported_user (reported_user_id, status),
     INDEX idx_user_reports_reporter_created (reporter_id, created_at),
@@ -602,4 +603,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('026_add_post_pinning'),
     ('027_create_saved_posts'),
     ('028_create_user_blocks'),
-    ('029_create_password_reset_tokens');
+    ('029_create_password_reset_tokens'),
+    ('030_add_report_withdrawal');

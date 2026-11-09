@@ -20,7 +20,18 @@ import { CommunityRuleAcceptanceService } from '../src/communities/community-rul
 import { SafeApiExceptionFilter } from '../src/common/safe-api-exception.filter';
 
 const REPORTER = 'token-user-id';
+const OTHER_REPORTER = 'other-user-id';
 const AUTHOR = 'target-user-id';
+const FIRST_CREATED_AT = Date.parse('2026-10-25T10:00:00.000Z');
+
+// What the target joins would resolve; anything absent reads as a missing target.
+const TARGET_LABELS: Record<string, string> = {
+  [AUTHOR]: 'target',
+  'post-1': 'Post one',
+  'post-2': 'Post two',
+  'comment-1': 'A comment',
+  'community-id': 'a-community',
+};
 
 interface StoredReport {
   id: unknown;
@@ -34,11 +45,19 @@ interface StoredReport {
   target_id: unknown;
   target_author_id: unknown;
   status: string;
+  created_at: string;
+  withdrawn_at: string | null;
+  // Moderator-only columns, set by tests to prove they never reach a reporter.
+  resolution: string | null;
+  resolution_note: string | null;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
 }
 
 describe('Report endpoint (e2e)', () => {
   let app: INestApplication<App>;
   let stored: StoredReport[];
+  let releases: number;
   let rateLimitRetry: number | null;
   let rateLimitCalls: Array<{
     ip: string;
@@ -49,6 +68,7 @@ describe('Report endpoint (e2e)', () => {
 
   beforeEach(async () => {
     stored = [];
+    releases = 0;
     rateLimitRetry = null;
     rateLimitCalls = [];
     const posts: Record<string, string> = {
@@ -70,10 +90,52 @@ describe('Report endpoint (e2e)', () => {
       'suspended-community': { id: 'suspended-id', creator_id: AUTHOR },
       'own-community': { id: 'own-id', creator_id: REPORTER },
     };
+    // Returns whole stored rows, moderator-only columns included, so the
+    // service's mapping is what keeps them out of a response.
+    const ownReportRow = (report: StoredReport) => ({
+      ...report,
+      target_label: TARGET_LABELS[report.target_id as string] ?? null,
+    });
+    const ownReports = (sql: string, values: unknown[]) => {
+      if (sql.includes('WHERE ur.id = ? AND ur.reporter_id = ?')) {
+        return stored.filter(
+          (report) =>
+            report.id === values[0] && report.reporter_id === values[1],
+        );
+      }
+      let parameter = 1;
+      let result = stored.filter((report) => report.reporter_id === values[0]);
+      if (sql.includes('ur.status = ?')) {
+        const status = values[parameter++];
+        result = result.filter((report) => report.status === status);
+      }
+      if (sql.includes('ur.target_type = ?')) {
+        const type = values[parameter++];
+        result = result.filter((report) => report.target_type === type);
+      }
+      const direction = sql.includes('ur.created_at ASC') ? 1 : -1;
+      return [...result].sort(
+        (left, right) =>
+          direction *
+          (left.created_at.localeCompare(right.created_at) ||
+            String(left.id).localeCompare(String(right.id))),
+      );
+    };
     const execute = (sql: string, values: unknown[]) => {
       const key = values[0] as string;
       let rows: unknown[] = [];
-      if (sql.startsWith('SELECT id, username FROM users')) {
+      if (sql.startsWith('SELECT ur.id, ur.target_type')) {
+        rows = ownReports(sql, values).map(ownReportRow);
+        if (sql.includes('LIMIT ? OFFSET ?')) {
+          const limit = Number(values[values.length - 2]);
+          const offset = Number(values[values.length - 1]);
+          rows = rows.slice(offset, offset + limit);
+        }
+      } else if (
+        sql.startsWith('SELECT COUNT(*) AS total FROM user_reports ur')
+      ) {
+        rows = [{ total: ownReports(sql, values).length }];
+      } else if (sql.startsWith('SELECT id, username FROM users')) {
         if (key !== 'unknown_user') {
           rows = [
             { id: key === 'reporter' ? REPORTER : AUTHOR, username: key },
@@ -92,14 +154,20 @@ describe('Report endpoint (e2e)', () => {
       beginTransaction: () => Promise.resolve(),
       commit: () => Promise.resolve(),
       rollback: () => Promise.resolve(),
-      release: () => undefined,
+      release: () => {
+        releases += 1;
+      },
       execute: (sql: string, values: unknown[]) => {
         if (sql.startsWith('SELECT id FROM user_reports')) {
           const [reporter, type, id, contextType, contextId] = values;
+          // Follows the real predicate: a withdrawn report only stops
+          // counting if the service's SQL says so.
+          const ignoresWithdrawn = sql.includes('withdrawn_at IS NULL');
           return Promise.resolve([
             stored.filter(
               (report) =>
                 ['open', 'under_review'].includes(report.status) &&
+                (!ignoresWithdrawn || report.withdrawn_at === null) &&
                 report.reporter_id === reporter &&
                 report.target_type === type &&
                 report.target_id === id &&
@@ -134,6 +202,14 @@ describe('Report endpoint (e2e)', () => {
             target_id,
             target_author_id,
             status: 'open',
+            created_at: new Date(
+              FIRST_CREATED_AT + stored.length * 60_000,
+            ).toISOString(),
+            withdrawn_at: null,
+            resolution: null,
+            resolution_note: null,
+            reviewed_by: null,
+            reviewed_at: null,
           });
           return Promise.resolve([{ affectedRows: 1 }, []] as [
             unknown,
@@ -142,9 +218,36 @@ describe('Report endpoint (e2e)', () => {
         }
         if (sql.startsWith('SELECT created_at FROM user_reports')) {
           return Promise.resolve([
-            [{ created_at: '2026-10-25T10:00:00.000Z' }],
+            stored
+              .filter((report) => report.id === values[0])
+              .map((report) => ({ created_at: report.created_at })),
             [],
           ] as [unknown, unknown]);
+        }
+        if (sql.startsWith('SELECT reporter_id, status, withdrawn_at')) {
+          return Promise.resolve([
+            stored.filter((report) => report.id === values[0]),
+            [],
+          ] as [unknown, unknown]);
+        }
+        if (sql.startsWith('UPDATE user_reports SET withdrawn_at')) {
+          const report = stored.find(
+            (row) =>
+              row.id === values[0] &&
+              row.reporter_id === values[1] &&
+              row.withdrawn_at === null &&
+              row.status === 'open',
+          );
+          if (report) {
+            report.withdrawn_at = '2026-10-27T08:00:00.000Z';
+          }
+          return Promise.resolve([{ affectedRows: report ? 1 : 0 }, []] as [
+            unknown,
+            unknown,
+          ]);
+        }
+        if (/^\s*DELETE\b/i.test(sql)) {
+          return Promise.reject(new Error('Reports must never be deleted'));
         }
         return Promise.resolve([[], []] as [unknown, unknown]);
       },
@@ -161,7 +264,9 @@ describe('Report endpoint (e2e)', () => {
           Promise.resolve(
             token === 'valid-token'
               ? { kind: 'valid', userId: REPORTER }
-              : { kind: 'invalid' },
+              : token === 'other-token'
+                ? { kind: 'valid', userId: OTHER_REPORTER }
+                : { kind: 'invalid' },
           ),
       })
       .overrideProvider(AuthRateLimitService)
@@ -465,5 +570,302 @@ describe('Report endpoint (e2e)', () => {
         /email|password|token|session|target-user-id|community-id/,
       );
     }
+  });
+
+  describe('the reporter’s own reports', () => {
+    const as = (token: string) => ({
+      get: (path: string) =>
+        request(app.getHttpServer())
+          .get(path)
+          .set('Authorization', `Bearer ${token}`),
+      delete: (path: string) =>
+        request(app.getHttpServer())
+          .delete(path)
+          .set('Authorization', `Bearer ${token}`),
+    });
+    const mine = as('valid-token');
+    const theirs = as('other-token');
+    const list = async (query = '') =>
+      (await mine.get(`/reports${query}`).expect(200)).body as {
+        items: Array<Record<string, unknown>>;
+        page: number;
+        limit: number;
+        total: number;
+      };
+    const file = async (type: string, target: string) =>
+      ((await reportOf(type, target).expect(201)).body as { id: string }).id;
+    // Every field a reporter must never see, as a JSON key.
+    const FORBIDDEN_KEYS =
+      /"(resolution|resolution_note|reviewed_by|reviewed_by_username|reviewed_at|reported_user_id|reporter_id|target_id|target_author_id)"/;
+    const moderated = (id: string) => {
+      Object.assign(
+        stored.find((report) => report.id === id)!,
+        {
+          status: 'resolved',
+          resolution: 'user_banned',
+          resolution_note: 'Internal: banned after three warnings',
+          reviewed_by: 'admin-id',
+          reviewed_at: '2026-10-26T12:00:00.000Z',
+        },
+      );
+    };
+
+    it('requires authentication on all three routes', async () => {
+      await request(app.getHttpServer()).get('/reports').expect(401);
+      await request(app.getHttpServer()).get('/reports/report-1').expect(401);
+      await request(app.getHttpServer())
+        .delete('/reports/report-1')
+        .expect(401);
+    });
+
+    it('answers a reporter with no reports with an empty page', async () => {
+      await expect(list()).resolves.toEqual({
+        items: [],
+        page: 1,
+        limit: 20,
+        total: 0,
+      });
+    });
+
+    it('lists the caller’s reports newest first, in the reporter-facing shape', async () => {
+      const first = await file('user', 'target');
+      const second = await file('post', 'post-1');
+      const body = await list();
+
+      expect(body.total).toBe(2);
+      expect(body.items.map((item) => item.id)).toEqual([second, first]);
+      expect(body.items[1]).toEqual({
+        id: first,
+        target_type: 'user',
+        target_label: 'target',
+        reason: 'spam',
+        description: null,
+        status: 'open',
+        created_at: '2026-10-25T10:00:00.000Z',
+        withdrawn_at: null,
+      });
+      expect((await list('?sort=oldest')).items[0].id).toBe(first);
+    });
+
+    it('labels each target type, and a missing target as null without failing', async () => {
+      await file('user', 'target');
+      await file('post', 'post-1');
+      await file('comment', 'comment-1');
+      await file('community', 'a-community');
+      await file('post', 'removed-post');
+
+      const labels = Object.fromEntries(
+        (await list('?sort=oldest')).items.map((item) => [
+          `${String(item.target_type)}:${String(item.id)}`,
+          item.target_label,
+        ]),
+      );
+      expect(Object.values(labels)).toEqual([
+        'target',
+        'Post one',
+        'A comment',
+        'a-community',
+        null,
+      ]);
+    });
+
+    it('filters on status and target_type, with a matching total', async () => {
+      const post = await file('post', 'post-1');
+      await file('comment', 'comment-1');
+      await file('community', 'a-community');
+      moderated(post);
+
+      const resolved = await list('?status=resolved');
+      expect(resolved.items.map((item) => item.id)).toEqual([post]);
+      expect(resolved.total).toBe(1);
+
+      const comments = await list('?target_type=comment');
+      expect(comments.items.map((item) => item.target_type)).toEqual([
+        'comment',
+      ]);
+      expect(comments.total).toBe(1);
+
+      expect((await list('?status=open&target_type=post')).total).toBe(0);
+    });
+
+    it('pages within its bounds', async () => {
+      for (const target of ['post-1', 'post-2', 'comment-1']) {
+        await file(target.startsWith('post') ? 'post' : 'comment', target);
+      }
+      const page = await list('?limit=2&page=2');
+      expect(page).toMatchObject({ page: 2, limit: 2, total: 3 });
+      expect(page.items).toHaveLength(1);
+    });
+
+    it.each([
+      '?page=0',
+      '?page=10001',
+      '?limit=0',
+      '?limit=101',
+      '?status=withdrawn',
+      '?target_type=account',
+      '?sort=random',
+      '?reporter_id=other-user-id',
+      '?unexpected=1',
+    ])('answers %s with 400', async (query) => {
+      await mine.get(`/reports${query}`).expect(400);
+    });
+
+    it('never returns another reporter’s reports, on any route', async () => {
+      const id = await file('post', 'post-1');
+
+      const other = (await theirs.get('/reports').expect(200)).body as {
+        items: unknown[];
+        total: number;
+      };
+      expect(other).toMatchObject({ items: [], total: 0 });
+
+      // 404, never 403: a 403 would confirm the report exists.
+      await theirs.get(`/reports/${id}`).expect(404);
+      await theirs.delete(`/reports/${id}`).expect(404);
+      expect(stored[0].withdrawn_at).toBeNull();
+
+      await mine.get(`/reports/${id}`).expect(200);
+    });
+
+    it('reads one report, 404 for an unknown id, 400 for a malformed one', async () => {
+      const id = await file('community', 'a-community');
+      const response = await mine.get(`/reports/${id}`).expect(200);
+      expect(response.body).toMatchObject({
+        id,
+        target_type: 'community',
+        target_label: 'a-community',
+        status: 'open',
+      });
+
+      await mine.get('/reports/no-such-report').expect(404);
+      await mine.get(`/reports/${'x'.repeat(37)}`).expect(400);
+      await mine.get('/reports/bad.id').expect(400);
+      await mine.delete('/reports/no-such-report').expect(404);
+      await mine.delete(`/reports/${'x'.repeat(37)}`).expect(400);
+    });
+
+    it('serialises no moderator-only field from any of the three routes', async () => {
+      const decided = await file('user', 'target');
+      moderated(decided);
+      const open = await file('post', 'post-1');
+
+      const listed = await mine.get('/reports').expect(200);
+      const one = await mine.get(`/reports/${decided}`).expect(200);
+      const withdrawn = await mine.delete(`/reports/${open}`).expect(204);
+
+      for (const response of [listed, one, withdrawn]) {
+        expect(response.text).not.toMatch(FORBIDDEN_KEYS);
+        expect(response.text).not.toMatch(
+          /user_banned|Internal: banned|admin-id|target-user-id/,
+        );
+      }
+      expect(withdrawn.text).toBe('');
+      // status is the one thing a reporter learns about the outcome.
+      expect(one.body).toMatchObject({ status: 'resolved' });
+    });
+
+    it('round-trips submit, list, withdraw, list', async () => {
+      const id = await file('post', 'post-1');
+      expect((await list()).items[0]).toMatchObject({
+        id,
+        status: 'open',
+        withdrawn_at: null,
+      });
+
+      await mine.delete(`/reports/${id}`).expect(204);
+
+      // Kept, not deleted, and shown to its reporter as withdrawn.
+      expect(stored).toHaveLength(1);
+      const after = await list();
+      expect(after.total).toBe(1);
+      expect(after.items[0]).toMatchObject({
+        id,
+        status: 'open',
+        withdrawn_at: '2026-10-27T08:00:00.000Z',
+      });
+    });
+
+    describe('the withdrawal status matrix', () => {
+      it('withdraws an open report with 204', async () => {
+        const id = await file('post', 'post-1');
+        await mine.delete(`/reports/${id}`).expect(204);
+        expect(stored[0]).toMatchObject({
+          status: 'open',
+          withdrawn_at: '2026-10-27T08:00:00.000Z',
+        });
+      });
+
+      it.each(['under_review', 'resolved', 'rejected'])(
+        'answers a %s report with 409 and changes nothing',
+        async (status) => {
+          const id = await file('post', 'post-1');
+          stored[0].status = status;
+          const before = { ...stored[0] };
+
+          await mine.delete(`/reports/${id}`).expect(409);
+          expect(stored).toEqual([before]);
+        },
+      );
+
+      it('answers a second withdrawal with 409 and keeps the first time', async () => {
+        const id = await file('post', 'post-1');
+        await mine.delete(`/reports/${id}`).expect(204);
+        stored[0].withdrawn_at = '2026-10-27T07:00:00.000Z';
+
+        await mine.delete(`/reports/${id}`).expect(409);
+        expect(stored[0].withdrawn_at).toBe('2026-10-27T07:00:00.000Z');
+      });
+    });
+
+    // The behaviour most likely to be missed: a withdrawn report keeps status
+    // 'open', so the duplicate check must ignore it explicitly.
+    it('frees the duplicate slot: report, 409, withdraw, report again', async () => {
+      const id = await file('post', 'post-1');
+      await reportOf('post', 'post-1').expect(409);
+
+      await mine.delete(`/reports/${id}`).expect(204);
+      await reportOf('post', 'post-1').expect(201);
+
+      expect(stored).toHaveLength(2);
+      expect(stored.map((report) => report.withdrawn_at)).toEqual([
+        '2026-10-27T08:00:00.000Z',
+        null,
+      ]);
+      // The new report holds the slot again.
+      await reportOf('post', 'post-1').expect(409);
+    });
+
+    it('releases the connection on every withdrawal path', async () => {
+      const id = await file('post', 'post-1');
+      const afterCreate = releases;
+      await mine.delete(`/reports/${id}`).expect(204);
+      await mine.delete(`/reports/${id}`).expect(409);
+      await theirs.delete(`/reports/${id}`).expect(404);
+      await mine.delete('/reports/no-such-report').expect(404);
+      expect(releases - afterCreate).toBe(4);
+    });
+
+    it('reaches the general rate limiter, with the account, on every route', async () => {
+      const id = await file('post', 'post-1');
+      rateLimitCalls = [];
+      await mine.get('/reports').expect(200);
+      await mine.get(`/reports/${id}`).expect(200);
+      await mine.delete(`/reports/${id}`).expect(204);
+
+      expect(rateLimitCalls.map(({ method }) => method)).toEqual([
+        'GET',
+        'GET',
+        'DELETE',
+      ]);
+      for (const call of rateLimitCalls) {
+        expect(call.accountId).toBe(REPORTER);
+      }
+
+      rateLimitRetry = 30;
+      const limited = await mine.delete(`/reports/${id}`).expect(429);
+      expect(limited.headers['retry-after']).toBe('30');
+      await mine.get('/reports').expect(429);
+    });
   });
 });

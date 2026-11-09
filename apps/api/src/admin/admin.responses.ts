@@ -37,6 +37,10 @@ import type {
 } from './admin-users.service';
 import type { AnalyticsGranularity, SeriesPoint } from './analytics-range';
 import {
+  REPORT_WITHDRAWN_FILTERS,
+  type ReportWithdrawnFilter,
+} from './dto/list-reports.dto';
+import {
   ADMIN_ACTIONS,
   ADMIN_ACTION_TARGETS,
   type AdminAction,
@@ -266,6 +270,16 @@ export class AdminReportListItemResponse implements AdminReportListItem {
 
   @ApiProperty({ type: String, format: 'date-time', nullable: true })
   reviewed_at!: string | null;
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description:
+      'When the reporter withdrew the report; null while it stands. A ' +
+      'withdrawn report cannot be transitioned.',
+  })
+  withdrawn_at!: string | null;
 }
 
 export class AdminReportFiltersResponse {
@@ -283,6 +297,9 @@ export class AdminReportFiltersResponse {
 
   @ApiProperty({ type: String, nullable: true })
   reporter_username!: string | null;
+
+  @ApiProperty({ enum: REPORT_WITHDRAWN_FILTERS })
+  withdrawn!: ReportWithdrawnFilter;
 
   @ApiProperty({ type: String, format: 'date-time', nullable: true })
   from!: string | null;
