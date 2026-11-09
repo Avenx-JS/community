@@ -37,7 +37,9 @@ import type {
 } from './admin-users.service';
 import type { AnalyticsGranularity, SeriesPoint } from './analytics-range';
 import {
+  REPORT_ASSIGNED_FILTERS,
   REPORT_WITHDRAWN_FILTERS,
+  type ReportAssignedFilter,
   type ReportWithdrawnFilter,
 } from './dto/list-reports.dto';
 import {
@@ -280,6 +282,25 @@ export class AdminReportListItemResponse implements AdminReportListItem {
       'withdrawn report cannot be transitioned.',
   })
   withdrawn_at!: string | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'The administrator who owns the work on this report, not necessarily ' +
+      'who decides it (that is the reviewer). Null when unassigned, ' +
+      'including after the assignee account was deleted.',
+  })
+  assigned_to_username!: string | null;
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description:
+      'When the current assignee took the report. Null when unassigned.',
+  })
+  assigned_at!: string | null;
 }
 
 export class AdminReportFiltersResponse {
@@ -300,6 +321,12 @@ export class AdminReportFiltersResponse {
 
   @ApiProperty({ enum: REPORT_WITHDRAWN_FILTERS })
   withdrawn!: ReportWithdrawnFilter;
+
+  @ApiProperty({ enum: REPORT_ASSIGNED_FILTERS })
+  assigned!: ReportAssignedFilter;
+
+  @ApiProperty({ type: String, nullable: true })
+  assigned_to!: string | null;
 
   @ApiProperty({ type: String, format: 'date-time', nullable: true })
   from!: string | null;

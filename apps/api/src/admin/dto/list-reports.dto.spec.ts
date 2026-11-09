@@ -23,6 +23,21 @@ describe('ListReportsDto', () => {
     },
   );
 
+  it.each([
+    { assigned: 'any' },
+    { assigned: 'me' },
+    { assigned: 'none' },
+    { assigned_to: 'second_admin' },
+    { assigned: 'me', assigned_to: 'second_admin' },
+  ])('accepts the assignment filter %o', async (query) => {
+    await expect(
+      validate(plainToInstance(ListReportsDto, query), {
+        whitelist: true,
+        forbidNonWhitelisted: true,
+      }),
+    ).resolves.toHaveLength(0);
+  });
+
   it('applies pagination and sort defaults', () => {
     const dto = plainToInstance(ListReportsDto, {});
     expect(dto).toMatchObject({
@@ -30,6 +45,7 @@ describe('ListReportsDto', () => {
       limit: 20,
       sort: 'new',
       withdrawn: 'exclude',
+      assigned: 'any',
     });
   });
 
@@ -44,6 +60,12 @@ describe('ListReportsDto', () => {
     { target_type: 'POST' },
     { sort: 'random' },
     { withdrawn: 'true' },
+    { assigned: 'mine' },
+    { assigned: 'ME' },
+    { assigned: 'admin-id' },
+    { assigned_to: 'ab' },
+    { assigned_to: 'has-hyphen' },
+    { assigned_to_id: 'admin-id' },
     { withdrawn: 'INCLUDE' },
     { include_withdrawn: 'true' },
     { reported_username: 'bad-name' },

@@ -1,11 +1,17 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
+import type {
+  Pool,
+  PoolConnection,
+  ResultSetHeader,
+  RowDataPacket,
+} from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import type {
@@ -16,8 +22,13 @@ import type {
 } from '../reports/report.constants';
 import { REPORT_TARGET_JOINS_SQL } from '../reports/report-target.sql';
 import { AuditLogService } from './audit-log.service';
+import type { PlatformRole } from '../users/users.service';
+import { AssignReportDto } from './dto/assign-report.dto';
 import { ListReportsDto } from './dto/list-reports.dto';
-import type { ReportWithdrawnFilter } from './dto/list-reports.dto';
+import type {
+  ReportAssignedFilter,
+  ReportWithdrawnFilter,
+} from './dto/list-reports.dto';
 import { UpdateReportStatusDto } from './dto/update-report-status.dto';
 
 interface ReportListRow extends RowDataPacket {
@@ -35,6 +46,8 @@ interface ReportListRow extends RowDataPacket {
   created_at: Date | string;
   reviewed_at: Date | string | null;
   withdrawn_at: Date | string | null;
+  assigned_to_username: string | null;
+  assigned_at: Date | string | null;
 }
 
 export interface AdminReportDetailRecord extends ReportListRow {
@@ -50,6 +63,16 @@ interface ReportTransitionRow extends RowDataPacket {
   reported_user_id: string | null;
   status: ReportStatus;
   withdrawn_at: Date | string | null;
+}
+
+interface AssignmentLockRow extends ReportTransitionRow {
+  assigned_to: string | null;
+}
+
+interface AssigneeRow extends RowDataPacket {
+  id: string;
+  username: string;
+  role: PlatformRole;
 }
 
 interface ReportContextRow extends RowDataPacket {
@@ -89,6 +112,11 @@ export interface AdminReportListItem {
   reviewed_at: string | null;
   // Set when the reporter withdrew the report (DELETE /reports/:id).
   withdrawn_at: string | null;
+  // Who owns the work, not who decided it (that is reviewed_by). Both null
+  // when the report is unassigned, including after the assignee's account
+  // was deleted.
+  assigned_to_username: string | null;
+  assigned_at: string | null;
 }
 
 export interface AdminReportList {
@@ -103,6 +131,8 @@ export interface AdminReportList {
     reported_username: string | null;
     reporter_username: string | null;
     withdrawn: ReportWithdrawnFilter;
+    assigned: ReportAssignedFilter;
+    assigned_to: string | null;
     from: string | null;
     to: string | null;
     sort: 'new' | 'oldest';
@@ -144,6 +174,36 @@ const REPORT_TARGET_LABEL_SQL = `CASE ur.target_type
            WHEN 'community' THEN target_community.name
          END AS target_label`;
 
+// The platform roles AdminGuard admits on AdminReportsController, which sets
+// no @RequiresRole and so gets AdminGuard's default. An assignee must be able
+// to open the report they own; admin-reports.controller.spec.ts keeps the two
+// in step.
+export const REPORT_ASSIGNEE_ROLES: readonly PlatformRole[] = ['admin'];
+
+// A report with no assignee reads as unassigned whatever assigned_at holds: a
+// hard-deleted assignee leaves assigned_at behind (ON DELETE SET NULL), and an
+// anonymised one is never shown by its placeholder name.
+const REPORT_ASSIGNMENT_SQL = `CASE WHEN assignee_user.deleted_at IS NULL
+           THEN assignee_user.username END AS assigned_to_username,
+         CASE WHEN ur.assigned_to IS NULL THEN NULL ELSE ur.assigned_at END AS assigned_at`;
+const REPORT_ASSIGNEE_JOIN_SQL =
+  'LEFT JOIN users assignee_user ON assignee_user.id = ur.assigned_to';
+
+// Assignment is for work still to do: a closed or withdrawn report needs no
+// owner.
+function assertAssignable(report: ReportTransitionRow): void {
+  if (report.status === 'resolved' || report.status === 'rejected') {
+    throw new ConflictException('A closed report cannot be assigned');
+  }
+  if (report.withdrawn_at !== null) {
+    throw new ConflictException('Report was withdrawn by its reporter');
+  }
+}
+
+function isPartyTo(report: ReportTransitionRow, userId: string): boolean {
+  return report.reporter_id === userId || report.reported_user_id === userId;
+}
+
 function toIsoString(value: Date | string | null): string | null {
   return value === null ? null : new Date(value).toISOString();
 }
@@ -170,6 +230,8 @@ function toListItem(report: ReportListRow): AdminReportListItem {
     created_at: new Date(report.created_at).toISOString(),
     reviewed_at: toIsoString(report.reviewed_at),
     withdrawn_at: toIsoString(report.withdrawn_at),
+    assigned_to_username: report.assigned_to_username,
+    assigned_at: toIsoString(report.assigned_at),
   };
 }
 
@@ -201,7 +263,10 @@ export class AdminReportsService {
     private readonly notificationsService: NotificationsService,
   ) {}
 
-  async findAll(query: ListReportsDto): Promise<AdminReportList> {
+  async findAll(
+    query: ListReportsDto,
+    callerId: string,
+  ): Promise<AdminReportList> {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
     const offset = (page - 1) * limit;
@@ -249,6 +314,18 @@ export class AdminReportsService {
     } else if (withdrawn === 'only') {
       filters.push('ur.withdrawn_at IS NOT NULL');
     }
+    // me compares the id, so "my reports" can use idx_user_reports_assigned.
+    const assigned = query.assigned ?? 'any';
+    if (assigned === 'me') {
+      filters.push('ur.assigned_to = ?');
+      values.push(callerId);
+    } else if (assigned === 'none') {
+      filters.push('ur.assigned_to IS NULL');
+    }
+    if (query.assigned_to) {
+      filters.push('assignee_user.username = ?');
+      values.push(query.assigned_to);
+    }
     const where = filters.length > 0 ? ` WHERE ${filters.join(' AND ')}` : '';
     const order = query.sort === 'oldest' ? 'ASC' : 'DESC';
 
@@ -257,10 +334,11 @@ export class AdminReportsService {
          reported_user.username AS reported_username, ur.target_type, ur.target_id,
          ${REPORT_TARGET_LABEL_SQL}, ur.reason, ur.status,
          ur.resolution, ur.context_type, ur.context_id, ur.created_at, ur.reviewed_at,
-         ur.withdrawn_at
+         ur.withdrawn_at, ${REPORT_ASSIGNMENT_SQL}
        FROM user_reports ur
        LEFT JOIN users reporter_user ON reporter_user.id = ur.reporter_id
        LEFT JOIN users reported_user ON reported_user.id = ur.reported_user_id
+       ${REPORT_ASSIGNEE_JOIN_SQL}
        ${REPORT_TARGET_JOINS_SQL}${where}
        ORDER BY ur.created_at ${order}, ur.id ${order} LIMIT ? OFFSET ?`,
       [...values, limit, offset],
@@ -271,7 +349,8 @@ export class AdminReportsService {
       `SELECT COUNT(*) AS total
        FROM user_reports ur
        LEFT JOIN users reporter_user ON reporter_user.id = ur.reporter_id
-       LEFT JOIN users reported_user ON reported_user.id = ur.reported_user_id${where}`,
+       LEFT JOIN users reported_user ON reported_user.id = ur.reported_user_id
+       ${REPORT_ASSIGNEE_JOIN_SQL}${where}`,
       values,
     );
 
@@ -287,6 +366,8 @@ export class AdminReportsService {
         reported_username: query.reported_username ?? null,
         reporter_username: query.reporter_username ?? null,
         withdrawn,
+        assigned,
+        assigned_to: query.assigned_to ?? null,
         from: query.from ?? null,
         to: query.to ?? null,
         sort: query.sort ?? 'new',
@@ -301,11 +382,13 @@ export class AdminReportsService {
          ur.target_type, ur.target_id, ${REPORT_TARGET_LABEL_SQL},
          ur.reason, ur.status, ur.resolution, ur.context_type, ur.context_id,
          ur.description, ur.resolution_note, ur.created_at, ur.reviewed_at,
-         ur.withdrawn_at, reviewer_user.username AS reviewed_by_username
+         ur.withdrawn_at, reviewer_user.username AS reviewed_by_username,
+         ${REPORT_ASSIGNMENT_SQL}
        FROM user_reports ur
        LEFT JOIN users reporter_user ON reporter_user.id = ur.reporter_id
        LEFT JOIN users reported_user ON reported_user.id = ur.reported_user_id
        LEFT JOIN users reviewer_user ON reviewer_user.id = ur.reviewed_by
+       ${REPORT_ASSIGNEE_JOIN_SQL}
        ${REPORT_TARGET_JOINS_SQL}
        WHERE ur.id = ? LIMIT 1`,
       [id],
@@ -490,6 +573,160 @@ export class AdminReportsService {
     }
 
     return this.findOne(id);
+  }
+
+  // Assignment says who owns the work; it never changes status, which stays
+  // entirely the decision state machine in updateStatus. Omitting the username
+  // assigns the report to the caller. A repeat of the current assignment is a
+  // no-op: assigned_at keeps the time the work was taken, and no entry is
+  // written. A different assignee replaces the current one (a handover).
+  async assign(
+    id: string,
+    input: AssignReportDto,
+    actorId: string,
+  ): Promise<AdminReportDetail> {
+    await this.inTransaction(async (connection) => {
+      const report = await this.lockForAssignment(connection, id, actorId);
+      const assignee = await this.resolveAssignee(
+        connection,
+        input.username,
+        actorId,
+      );
+      // An owner who cannot open the report would make the assignment useless.
+      if (!REPORT_ASSIGNEE_ROLES.includes(assignee.role)) {
+        throw new BadRequestException(
+          'Reports can only be assigned to an administrator',
+        );
+      }
+      // The same conflict-of-interest rule as updateStatus, applied to the
+      // owner as well as to the caller.
+      if (isPartyTo(report, assignee.id)) {
+        throw new ForbiddenException(
+          'A report cannot be assigned to its reporter or the reported user',
+        );
+      }
+      assertAssignable(report);
+      if (report.assigned_to === assignee.id) {
+        return;
+      }
+
+      const [result] = await connection.execute<ResultSetHeader>(
+        `UPDATE user_reports
+         SET assigned_to = ?, assigned_at = UTC_TIMESTAMP()
+         WHERE id = ? AND status IN ('open', 'under_review')
+           AND withdrawn_at IS NULL`,
+        [assignee.id, id],
+      );
+      if (result.affectedRows !== 1) {
+        throw new ConflictException('Report changed concurrently');
+      }
+      await this.auditLogService.record(connection, {
+        actorId,
+        action: 'report_assigned',
+        targetType: 'report',
+        targetId: id,
+        metadata: { assignee_username: assignee.username.slice(0, 50) },
+      });
+    });
+    return this.findOne(id);
+  }
+
+  // Idempotent: an unassigned report answers success and writes nothing.
+  async unassign(id: string, actorId: string): Promise<void> {
+    await this.inTransaction(async (connection) => {
+      const report = await this.lockForAssignment(connection, id, actorId);
+      assertAssignable(report);
+      if (report.assigned_to === null) {
+        return;
+      }
+      const [previous] = await connection.execute<
+        (RowDataPacket & { username: string })[]
+      >('SELECT username FROM users WHERE id = ? LIMIT 1', [
+        report.assigned_to,
+      ]);
+
+      const [result] = await connection.execute<ResultSetHeader>(
+        `UPDATE user_reports SET assigned_to = NULL, assigned_at = NULL
+         WHERE id = ? AND assigned_to = ?`,
+        [id, report.assigned_to],
+      );
+      if (result.affectedRows !== 1) {
+        throw new ConflictException('Report changed concurrently');
+      }
+      await this.auditLogService.record(connection, {
+        actorId,
+        action: 'report_unassigned',
+        targetType: 'report',
+        targetId: id,
+        metadata: previous[0]
+          ? { assignee_username: previous[0].username.slice(0, 50) }
+          : {},
+      });
+    });
+  }
+
+  // Locks the report and refuses a caller who is party to it, as updateStatus
+  // does: the caller must not steer the handling of their own report.
+  private async lockForAssignment(
+    connection: PoolConnection,
+    id: string,
+    actorId: string,
+  ): Promise<AssignmentLockRow> {
+    const [reports] = await connection.execute<AssignmentLockRow[]>(
+      `SELECT id, reporter_id, reported_user_id, status, withdrawn_at, assigned_to
+       FROM user_reports
+       WHERE id = ? LIMIT 1 FOR UPDATE`,
+      [id],
+    );
+    const report = reports[0];
+    if (!report) {
+      throw new NotFoundException('Report not found');
+    }
+    if (isPartyTo(report, actorId)) {
+      throw new ForbiddenException(
+        'Administrators cannot handle their own reports',
+      );
+    }
+    return report;
+  }
+
+  // An anonymised account cannot be assigned: it can no longer sign in.
+  private async resolveAssignee(
+    connection: PoolConnection,
+    username: string | undefined,
+    actorId: string,
+  ): Promise<AssigneeRow> {
+    const [users] = await connection.execute<AssigneeRow[]>(
+      username === undefined
+        ? 'SELECT id, username, role FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1'
+        : 'SELECT id, username, role FROM users WHERE username = ? AND deleted_at IS NULL LIMIT 1',
+      [username ?? actorId],
+    );
+    if (!users[0]) {
+      throw new NotFoundException('User not found');
+    }
+    return users[0];
+  }
+
+  private async inTransaction(
+    work: (connection: PoolConnection) => Promise<void>,
+  ): Promise<void> {
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+      await work(connection);
+      await connection.commit();
+      transactionStarted = false;
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
   }
 
   // In full, unlike the context excerpt: this is the thing being judged. Removed

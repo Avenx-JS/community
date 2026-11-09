@@ -38,7 +38,24 @@ export function typeFixtures(): AuditEntry[] {
     targetId: 't',
   };
 
+  // @ts-expect-error report assignment targets the report, not a user.
+  const assignedUser: AuditEntry = {
+    actorId: 'a',
+    action: 'report_assigned',
+    targetType: 'user',
+    targetId: 't',
+  };
+
   return [
+    assignedUser,
+    {
+      actorId: 'a',
+      action: 'report_unassigned',
+      targetType: 'report',
+      targetId: 't',
+      // @ts-expect-error assignment metadata never carries the assignee's id.
+      metadata: { assignee_username: 'admin', assignee_id: 'x' },
+    },
     suspendedUser,
     restoredReport,
     updatedRestriction,
@@ -88,6 +105,6 @@ describe('AuditEntry type', () => {
       );
 
     expect(diagnostics).toEqual([]);
-    expect(typeFixtures()).toHaveLength(7);
+    expect(typeFixtures()).toHaveLength(9);
   }, 60_000);
 });

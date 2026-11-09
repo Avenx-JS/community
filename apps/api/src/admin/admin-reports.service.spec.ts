@@ -1,8 +1,10 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
+import type { Pool } from 'mysql2/promise';
 import { beforeEach, describe, expect, it } from '@jest/globals';
 import { Test, TestingModule } from '@nestjs/testing';
 import { MYSQL_POOL } from '../auth/auth.service';
@@ -10,7 +12,10 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { AuditLogService } from './audit-log.service';
 import { ListReportsDto } from './dto/list-reports.dto';
 import { UpdateReportStatusDto } from './dto/update-report-status.dto';
-import { AdminReportsService } from './admin-reports.service';
+import {
+  AdminReportsService,
+  REPORT_ASSIGNEE_ROLES,
+} from './admin-reports.service';
 
 describe('AdminReportsService', () => {
   let service: AdminReportsService;
@@ -67,7 +72,12 @@ describe('AdminReportsService', () => {
         ) {
           // MySQL always returns the column; fixtures that predate it stand.
           return Promise.resolve([
-            listRows.map((row) => ({ withdrawn_at: null, ...row })),
+            listRows.map((row) => ({
+              withdrawn_at: null,
+              assigned_to_username: null,
+              assigned_at: null,
+              ...row,
+            })),
             [],
           ]);
         }
@@ -79,7 +89,16 @@ describe('AdminReportsService', () => {
           sql.includes('ur.description')
         ) {
           return Promise.resolve([
-            detailRow ? [{ withdrawn_at: null, ...detailRow }] : [],
+            detailRow
+              ? [
+                  {
+                    withdrawn_at: null,
+                    assigned_to_username: null,
+                    assigned_at: null,
+                    ...detailRow,
+                  },
+                ]
+              : [],
             [],
           ]);
         }
@@ -204,7 +223,7 @@ describe('AdminReportsService', () => {
       limit: 10,
       sort: 'new',
     } as ListReportsDto;
-    await service.findAll(query);
+    await service.findAll(query, 'admin-id');
 
     const list = calls[0];
     const countQuery = calls[1];
@@ -228,7 +247,7 @@ describe('AdminReportsService', () => {
     // A community report has no reported account, and target_id has no foreign
     // key, so an inner join on either would lose a report.
     it('reads the queue with left joins only, in both the page and its count', async () => {
-      await service.findAll({} as ListReportsDto);
+      await service.findAll({} as ListReportsDto, 'admin-id');
       const [list, countQuery] = calls;
 
       for (const { sql } of [list, countQuery]) {
@@ -251,10 +270,13 @@ describe('AdminReportsService', () => {
     });
 
     it('applies target_type to the page and its count, and reports the filter', async () => {
-      const result = await service.findAll({
-        target_type: 'post',
-        reason: 'spam',
-      } as ListReportsDto);
+      const result = await service.findAll(
+        {
+          target_type: 'post',
+          reason: 'spam',
+        } as ListReportsDto,
+        'admin-id',
+      );
       const [list, countQuery] = calls;
       for (const { sql } of [list, countQuery]) {
         expect(sql).toContain('ur.target_type = ?');
@@ -265,16 +287,19 @@ describe('AdminReportsService', () => {
     });
 
     it('applies no target filter by default', async () => {
-      const result = await service.findAll({} as ListReportsDto);
+      const result = await service.findAll({} as ListReportsDto, 'admin-id');
       expect(calls[1].sql).not.toContain('ur.target_type = ?');
       expect(result.filters.target_type).toBeNull();
     });
 
     it('still reads reported_username through the reported account, for content reports too', async () => {
-      await service.findAll({
-        reported_username: 'content_author',
-        target_type: 'comment',
-      } as ListReportsDto);
+      await service.findAll(
+        {
+          reported_username: 'content_author',
+          target_type: 'comment',
+        } as ListReportsDto,
+        'admin-id',
+      );
       expect(calls[0].sql).toContain('reported_user.username = ?');
       expect(calls[1].values).toEqual(['content_author', 'comment']);
     });
@@ -306,7 +331,10 @@ describe('AdminReportsService', () => {
           },
         ];
         count = 1;
-        const { items } = await service.findAll({} as ListReportsDto);
+        const { items } = await service.findAll(
+          {} as ListReportsDto,
+          'admin-id',
+        );
         expect(items[0]).toMatchObject({
           target_type,
           target_id,
@@ -316,7 +344,7 @@ describe('AdminReportsService', () => {
     );
 
     it('builds the label per kind, excerpting a comment', async () => {
-      await service.findAll({} as ListReportsDto);
+      await service.findAll({} as ListReportsDto, 'admin-id');
       const { sql } = calls[0];
       expect(sql).toContain("WHEN 'user' THEN target_user.username");
       expect(sql).toContain("WHEN 'post' THEN target_post.title");
@@ -462,7 +490,10 @@ describe('AdminReportsService', () => {
     ];
     count = 1;
 
-    const result = await service.findAll({ sort: 'oldest' } as ListReportsDto);
+    const result = await service.findAll(
+      { sort: 'oldest' } as ListReportsDto,
+      'admin-id',
+    );
 
     expect(calls[0].sql).toContain('created_at ASC, ur.id ASC');
     expect(result).toEqual({
@@ -478,6 +509,8 @@ describe('AdminReportsService', () => {
           created_at: '2026-10-25T10:00:00.000Z',
           reviewed_at: null,
           withdrawn_at: null,
+          assigned_to_username: null,
+          assigned_at: null,
         },
       ],
       page: 1,
@@ -490,6 +523,8 @@ describe('AdminReportsService', () => {
         reported_username: null,
         reporter_username: null,
         withdrawn: 'exclude',
+        assigned: 'any',
+        assigned_to: null,
         from: null,
         to: null,
         sort: 'oldest',
@@ -498,10 +533,13 @@ describe('AdminReportsService', () => {
   });
 
   it('interprets date-only ISO filters as UTC', async () => {
-    await service.findAll({
-      from: '2026-01-01T00:00:00',
-      to: '2026-01-02T00:00:00',
-    } as ListReportsDto);
+    await service.findAll(
+      {
+        from: '2026-01-01T00:00:00',
+        to: '2026-01-02T00:00:00',
+      } as ListReportsDto,
+      'admin-id',
+    );
 
     expect(calls[0].values.slice(0, 2)).toEqual([
       '2026-01-01 00:00:00',
@@ -523,7 +561,10 @@ describe('AdminReportsService', () => {
       reviewed_at: null,
     }));
 
-    const result = await service.findAll({ limit: 100 } as ListReportsDto);
+    const result = await service.findAll(
+      { limit: 100 } as ListReportsDto,
+      'admin-id',
+    );
 
     expect(result.items).toHaveLength(100);
     expect(calls).toHaveLength(2);
@@ -766,7 +807,7 @@ describe('AdminReportsService', () => {
       );
 
     it('leaves withdrawn reports out of the queue by default, in page and count', async () => {
-      const result = await service.findAll({} as ListReportsDto);
+      const result = await service.findAll({} as ListReportsDto, 'admin-id');
       const [list, countQuery] = calls;
       for (const { sql } of [list, countQuery]) {
         expect(whereOf(sql)).toContain('ur.withdrawn_at IS NULL');
@@ -775,10 +816,13 @@ describe('AdminReportsService', () => {
     });
 
     it('keeps the default exclusion alongside other filters, without a parameter', async () => {
-      await service.findAll({
-        status: 'open',
-        withdrawn: 'exclude',
-      } as ListReportsDto);
+      await service.findAll(
+        {
+          status: 'open',
+          withdrawn: 'exclude',
+        } as ListReportsDto,
+        'admin-id',
+      );
       expect(whereOf(calls[0].sql)).toContain(
         'ur.status = ? AND ur.withdrawn_at IS NULL',
       );
@@ -786,9 +830,12 @@ describe('AdminReportsService', () => {
     });
 
     it('includes withdrawn reports under withdrawn=include', async () => {
-      const result = await service.findAll({
-        withdrawn: 'include',
-      } as ListReportsDto);
+      const result = await service.findAll(
+        {
+          withdrawn: 'include',
+        } as ListReportsDto,
+        'admin-id',
+      );
       for (const { sql } of calls) {
         expect(sql).not.toContain('withdrawn_at IS NULL');
         expect(sql).not.toContain('withdrawn_at IS NOT NULL');
@@ -797,9 +844,12 @@ describe('AdminReportsService', () => {
     });
 
     it('lists only withdrawn reports under withdrawn=only', async () => {
-      const result = await service.findAll({
-        withdrawn: 'only',
-      } as ListReportsDto);
+      const result = await service.findAll(
+        {
+          withdrawn: 'only',
+        } as ListReportsDto,
+        'admin-id',
+      );
       for (const { sql } of calls.slice(0, 2)) {
         expect(whereOf(sql)).toContain('ur.withdrawn_at IS NOT NULL');
       }
@@ -832,9 +882,12 @@ describe('AdminReportsService', () => {
         resolution_note: null,
         reviewed_by_username: null,
       };
-      const list = await service.findAll({
-        withdrawn: 'include',
-      } as ListReportsDto);
+      const list = await service.findAll(
+        {
+          withdrawn: 'include',
+        } as ListReportsDto,
+        'admin-id',
+      );
       expect(list.items[0].withdrawn_at).toBe('2026-10-26T09:00:00.000Z');
 
       const detail = await service.findOne('r1');
@@ -857,7 +910,7 @@ describe('AdminReportsService', () => {
           reviewed_at: null,
         },
       ];
-      const list = await service.findAll({} as ListReportsDto);
+      const list = await service.findAll({} as ListReportsDto, 'admin-id');
       expect(list.items[0].withdrawn_at).toBeNull();
     });
 
@@ -1032,6 +1085,583 @@ describe('AdminReportsService', () => {
       ).rejects.toThrow('Notification insert failed');
 
       expect(transaction).toEqual({ commits: 0, rollbacks: 1, releases: 1 });
+    });
+  });
+});
+
+describe('AdminReportsService: assignment', () => {
+  let service: AdminReportsService;
+  let calls: Array<{ sql: string; values: unknown[] }>;
+  let locked: Record<string, unknown> | undefined;
+  let users: Array<{ id: string; username: string; role: string }>;
+  let updateAffectedRows: number;
+  let audits: Array<{ connection: unknown; entry: Record<string, unknown> }>;
+  let failAudit: boolean;
+  let notifications: unknown[];
+  let tx: {
+    begins: number;
+    commits: number;
+    rollbacks: number;
+    releases: number;
+  };
+  let connection: Record<string, unknown>;
+
+  const openReport = (overrides: Record<string, unknown> = {}) => ({
+    id: 'report-1',
+    reporter_id: 'reporter-id',
+    reported_user_id: 'target-id',
+    status: 'open',
+    withdrawn_at: null,
+    assigned_to: null,
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    calls = [];
+    locked = openReport();
+    users = [
+      { id: 'admin-id', username: 'admin', role: 'admin' },
+      { id: 'admin2-id', username: 'second_admin', role: 'admin' },
+      { id: 'mod-id', username: 'a_moderator', role: 'moderator' },
+      { id: 'user-id', username: 'plain_user', role: 'user' },
+      { id: 'reporter-id', username: 'reporter_admin', role: 'admin' },
+      { id: 'target-id', username: 'target_admin', role: 'admin' },
+    ];
+    updateAffectedRows = 1;
+    audits = [];
+    failAudit = false;
+    notifications = [];
+    tx = { begins: 0, commits: 0, rollbacks: 0, releases: 0 };
+    connection = {
+      beginTransaction: () => {
+        tx.begins += 1;
+        return Promise.resolve();
+      },
+      commit: () => {
+        tx.commits += 1;
+        return Promise.resolve();
+      },
+      rollback: () => {
+        tx.rollbacks += 1;
+        return Promise.resolve();
+      },
+      release: () => {
+        tx.releases += 1;
+      },
+      execute: (sql: string, values: unknown[]) => {
+        calls.push({ sql, values });
+        if (sql.startsWith('SELECT id, reporter_id, reported_user_id')) {
+          return Promise.resolve([locked ? [{ ...locked }] : [], []]);
+        }
+        if (sql.startsWith('SELECT id, username, role FROM users')) {
+          const byId = sql.includes('WHERE id = ?');
+          const user = users.find((row) =>
+            byId ? row.id === values[0] : row.username === values[0],
+          );
+          return Promise.resolve([user ? [user] : [], []]);
+        }
+        if (sql === 'SELECT username FROM users WHERE id = ? LIMIT 1') {
+          const user = users.find((row) => row.id === values[0]);
+          return Promise.resolve([
+            user ? [{ username: user.username }] : [],
+            [],
+          ]);
+        }
+        if (sql.startsWith('UPDATE user_reports')) {
+          return Promise.resolve([{ affectedRows: updateAffectedRows }, []]);
+        }
+        return Promise.reject(
+          new Error(`Unexpected transaction query: ${sql}`),
+        );
+      },
+    };
+    const pool = {
+      getConnection: () => Promise.resolve(connection),
+      // findOne after a successful assign.
+      execute: (sql: string, values: unknown[]) => {
+        calls.push({ sql, values });
+        if (sql.startsWith('SELECT ur.id, reporter_user.username')) {
+          return Promise.resolve([
+            [
+              {
+                id: 'report-1',
+                reporter_username: 'reporter_admin',
+                reported_username: 'target_admin',
+                reported_user_id: null,
+                target_type: 'user',
+                target_id: 'target-id',
+                target_label: 'target_admin',
+                reason: 'spam',
+                status: 'open',
+                resolution: null,
+                context_type: null,
+                context_id: null,
+                description: null,
+                resolution_note: null,
+                reviewed_by_username: null,
+                created_at: '2026-10-25T10:00:00Z',
+                reviewed_at: null,
+                withdrawn_at: null,
+                assigned_to_username: 'admin',
+                assigned_at: '2026-10-27T09:00:00Z',
+              },
+            ],
+            [],
+          ]);
+        }
+        return Promise.reject(new Error(`Unexpected query: ${sql}`));
+      },
+    };
+    service = new AdminReportsService(
+      pool as unknown as Pool,
+      {
+        record: (onConnection: unknown, entry: Record<string, unknown>) => {
+          audits.push({ connection: onConnection, entry });
+          return failAudit
+            ? Promise.reject(new Error('Audit insert failed'))
+            : Promise.resolve();
+        },
+      } as unknown as AuditLogService,
+      {
+        record: (...args: unknown[]) => {
+          notifications.push(args);
+          return Promise.resolve();
+        },
+      } as unknown as NotificationsService,
+    );
+  });
+
+  const updates = () =>
+    calls.filter((call) => call.sql.startsWith('UPDATE user_reports'));
+  const assigneeLookup = () =>
+    calls.find((call) => call.sql.startsWith('SELECT id, username, role'));
+  // Nothing written, everything released.
+  const refusedCleanly = () => {
+    expect(updates()).toHaveLength(0);
+    expect(audits).toHaveLength(0);
+    expect(tx).toMatchObject({ commits: 0, rollbacks: 1, releases: 1 });
+  };
+
+  describe('assign', () => {
+    it('assigns to the caller by default, by id, and returns the detail', async () => {
+      const detail = await service.assign('report-1', {}, 'admin-id');
+
+      expect(assigneeLookup()?.sql).toContain(
+        'WHERE id = ? AND deleted_at IS NULL',
+      );
+      expect(assigneeLookup()?.values).toEqual(['admin-id']);
+      expect(updates()).toHaveLength(1);
+      expect(updates()[0].sql).toContain(
+        'SET assigned_to = ?, assigned_at = UTC_TIMESTAMP()',
+      );
+      expect(updates()[0].sql).toMatch(
+        /WHERE id = \? AND status IN \('open', 'under_review'\)\s+AND withdrawn_at IS NULL/,
+      );
+      expect(updates()[0].values).toEqual(['admin-id', 'report-1']);
+      expect(detail).toMatchObject({
+        id: 'report-1',
+        assigned_to_username: 'admin',
+        assigned_at: '2026-10-27T09:00:00.000Z',
+      });
+      expect(tx).toEqual({ begins: 1, commits: 1, rollbacks: 0, releases: 1 });
+    });
+
+    it('locks the report before anything else', async () => {
+      await service.assign('report-1', {}, 'admin-id');
+      expect(calls[0].sql).toMatch(
+        /^SELECT id, reporter_id, reported_user_id, status, withdrawn_at, assigned_to\s+FROM user_reports\s+WHERE id = \? LIMIT 1 FOR UPDATE$/,
+      );
+    });
+
+    it('assigns to a named administrator, resolved by username', async () => {
+      await service.assign(
+        'report-1',
+        { username: 'second_admin' },
+        'admin-id',
+      );
+      expect(assigneeLookup()?.sql).toContain(
+        'WHERE username = ? AND deleted_at IS NULL',
+      );
+      expect(updates()[0].values).toEqual(['admin2-id', 'report-1']);
+    });
+
+    it('records one report_assigned entry on the transaction connection', async () => {
+      await service.assign(
+        'report-1',
+        { username: 'second_admin' },
+        'admin-id',
+      );
+      expect(audits).toEqual([
+        {
+          connection,
+          entry: {
+            actorId: 'admin-id',
+            action: 'report_assigned',
+            targetType: 'report',
+            targetId: 'report-1',
+            metadata: { assignee_username: 'second_admin' },
+          },
+        },
+      ]);
+      expect(notifications).toHaveLength(0);
+    });
+
+    it('answers an unknown or anonymised username with 404', async () => {
+      await expect(
+        service.assign('report-1', { username: 'nobody' }, 'admin-id'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      refusedCleanly();
+    });
+
+    it('answers an unknown report with 404 before resolving anyone', async () => {
+      locked = undefined;
+      await expect(
+        service.assign('missing', {}, 'admin-id'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(assigneeLookup()).toBeUndefined();
+      refusedCleanly();
+    });
+
+    it.each([
+      ['plain_user', 'user'],
+      ['a_moderator', 'moderator'],
+    ])(
+      'refuses %s, whose %s role AdminGuard does not admit, with 400',
+      async (username) => {
+        await expect(
+          service.assign('report-1', { username }, 'admin-id'),
+        ).rejects.toBeInstanceOf(BadRequestException);
+        refusedCleanly();
+      },
+    );
+
+    it('admits exactly the roles AdminGuard admits by default', () => {
+      expect(REPORT_ASSIGNEE_ROLES).toEqual(['admin']);
+    });
+
+    it.each([
+      ['the reporter', 'reporter_admin'],
+      ['the reported user', 'target_admin'],
+    ])('refuses an assignee who is %s with 403', async (_role, username) => {
+      await expect(
+        service.assign('report-1', { username }, 'admin-id'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      refusedCleanly();
+    });
+
+    it.each(['reporter-id', 'target-id'])(
+      'refuses a caller (%s) party to the report, assigning anyone, with 403',
+      async (caller) => {
+        await expect(
+          service.assign('report-1', {}, caller),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        await expect(
+          service.assign('report-1', { username: 'admin' }, caller),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(updates()).toHaveLength(0);
+        expect(tx.releases).toBe(2);
+      },
+    );
+
+    it.each([
+      ['resolved', null],
+      ['rejected', null],
+      ['open', '2026-10-27T08:00:00Z'],
+    ])(
+      'refuses a %s report (withdrawn_at %s) with 409',
+      async (status, withdrawnAt) => {
+        locked = openReport({ status, withdrawn_at: withdrawnAt });
+        await expect(
+          service.assign('report-1', {}, 'admin-id'),
+        ).rejects.toBeInstanceOf(ConflictException);
+        refusedCleanly();
+      },
+    );
+
+    it('assigns an under_review report and never touches status', async () => {
+      locked = openReport({ status: 'under_review' });
+      await service.assign('report-1', {}, 'admin-id');
+      for (const { sql } of updates()) {
+        expect(sql).not.toMatch(/\bstatus\s*=/);
+        expect(sql).not.toContain('reviewed_by');
+      }
+    });
+
+    it('hands a report over to a new assignee', async () => {
+      locked = openReport({ assigned_to: 'admin2-id' });
+      await service.assign('report-1', {}, 'admin-id');
+      expect(updates()[0].values).toEqual(['admin-id', 'report-1']);
+      expect(audits).toHaveLength(1);
+    });
+
+    // assigned_at keeps the time the work was first taken.
+    it('treats a repeat of the current assignment as a no-op', async () => {
+      locked = openReport({ assigned_to: 'admin-id' });
+      await service.assign('report-1', {}, 'admin-id');
+      expect(updates()).toHaveLength(0);
+      expect(audits).toHaveLength(0);
+      expect(tx).toEqual({ begins: 1, commits: 1, rollbacks: 0, releases: 1 });
+    });
+
+    it('answers 409 when the guarded update matches nothing', async () => {
+      updateAffectedRows = 0;
+      await expect(
+        service.assign('report-1', {}, 'admin-id'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(audits).toHaveLength(0);
+      expect(tx).toMatchObject({ commits: 0, rollbacks: 1, releases: 1 });
+    });
+
+    it('rolls the assignment back when the audit write fails', async () => {
+      failAudit = true;
+      await expect(service.assign('report-1', {}, 'admin-id')).rejects.toThrow(
+        'Audit insert failed',
+      );
+      expect(updates()).toHaveLength(1);
+      expect(tx).toMatchObject({ commits: 0, rollbacks: 1, releases: 1 });
+    });
+
+    it('releases the connection when the lock itself fails', async () => {
+      connection.execute = () => Promise.reject(new Error('lock wait timeout'));
+      await expect(service.assign('report-1', {}, 'admin-id')).rejects.toThrow(
+        'lock wait timeout',
+      );
+      expect(tx).toMatchObject({ rollbacks: 1, releases: 1 });
+    });
+  });
+
+  describe('unassign', () => {
+    beforeEach(() => {
+      locked = openReport({ assigned_to: 'admin2-id' });
+    });
+
+    it('clears both columns, guarded on the assignee it read, and records who was dropped', async () => {
+      await service.unassign('report-1', 'admin-id');
+      expect(updates()).toHaveLength(1);
+      expect(updates()[0].sql).toMatch(
+        /SET assigned_to = NULL, assigned_at = NULL\s+WHERE id = \? AND assigned_to = \?/,
+      );
+      expect(updates()[0].values).toEqual(['report-1', 'admin2-id']);
+      expect(audits).toEqual([
+        {
+          connection,
+          entry: {
+            actorId: 'admin-id',
+            action: 'report_unassigned',
+            targetType: 'report',
+            targetId: 'report-1',
+            metadata: { assignee_username: 'second_admin' },
+          },
+        },
+      ]);
+      expect(tx).toEqual({ begins: 1, commits: 1, rollbacks: 0, releases: 1 });
+    });
+
+    it('lets any administrator unassign someone else', async () => {
+      locked = openReport({ assigned_to: 'admin-id' });
+      await service.unassign('report-1', 'admin2-id');
+      expect(audits[0].entry).toMatchObject({
+        actorId: 'admin2-id',
+        metadata: { assignee_username: 'admin' },
+      });
+    });
+
+    it('answers an unassigned report with success, writing nothing', async () => {
+      locked = openReport();
+      await service.unassign('report-1', 'admin-id');
+      expect(updates()).toHaveLength(0);
+      expect(audits).toHaveLength(0);
+      expect(tx).toMatchObject({ commits: 1, releases: 1 });
+    });
+
+    it('answers an unknown report with 404', async () => {
+      locked = undefined;
+      await expect(
+        service.unassign('missing', 'admin-id'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      refusedCleanly();
+    });
+
+    it('refuses a caller party to the report with 403', async () => {
+      await expect(
+        service.unassign('report-1', 'reporter-id'),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      refusedCleanly();
+    });
+
+    it.each([
+      ['resolved', null],
+      ['rejected', null],
+      ['open', '2026-10-27T08:00:00Z'],
+    ])(
+      'refuses a %s report (withdrawn_at %s) with 409, even unassigned',
+      async (status, withdrawnAt) => {
+        for (const assignedTo of ['admin2-id', null]) {
+          locked = openReport({
+            status,
+            withdrawn_at: withdrawnAt,
+            assigned_to: assignedTo,
+          });
+          await expect(
+            service.unassign('report-1', 'admin-id'),
+          ).rejects.toBeInstanceOf(ConflictException);
+        }
+        expect(updates()).toHaveLength(0);
+        expect(audits).toHaveLength(0);
+      },
+    );
+
+    it('answers 409 when the assignee changed under it', async () => {
+      updateAffectedRows = 0;
+      await expect(
+        service.unassign('report-1', 'admin-id'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(audits).toHaveLength(0);
+    });
+
+    it('rolls the unassignment back when the audit write fails', async () => {
+      failAudit = true;
+      await expect(service.unassign('report-1', 'admin-id')).rejects.toThrow(
+        'Audit insert failed',
+      );
+      expect(tx).toMatchObject({ commits: 0, rollbacks: 1, releases: 1 });
+    });
+  });
+
+  describe('the queue', () => {
+    let listCalls: Array<{ sql: string; values: unknown[] }>;
+    let listService: AdminReportsService;
+    let rows: Array<Record<string, unknown>>;
+
+    beforeEach(() => {
+      listCalls = [];
+      rows = [];
+      listService = new AdminReportsService(
+        {
+          execute: (sql: string, values: unknown[]) => {
+            listCalls.push({ sql, values });
+            return Promise.resolve(
+              sql.startsWith('SELECT COUNT(*)')
+                ? [[{ total: rows.length }], []]
+                : [rows, []],
+            );
+          },
+        } as unknown as Pool,
+        {} as AuditLogService,
+        {} as NotificationsService,
+      );
+    });
+
+    const list = (query: Partial<ListReportsDto>) =>
+      listService.findAll(
+        Object.assign(new ListReportsDto(), query),
+        'caller-id',
+      );
+    const where = (sql: string) =>
+      sql.slice(
+        sql.indexOf(' WHERE '),
+        sql.includes(' ORDER BY') ? sql.indexOf(' ORDER BY') : sql.length,
+      );
+
+    it('does not filter on assignment by default', async () => {
+      const result = await list({});
+      for (const { sql } of listCalls) {
+        expect(where(sql)).not.toContain('assigned_to');
+      }
+      expect(result.filters).toMatchObject({
+        assigned: 'any',
+        assigned_to: null,
+      });
+    });
+
+    it('binds the caller id for assigned=me, in page and count', async () => {
+      const result = await list({ assigned: 'me' });
+      for (const { sql, values } of listCalls) {
+        expect(where(sql)).toContain('ur.assigned_to = ?');
+        expect(values).toContain('caller-id');
+      }
+      expect(listCalls[1].values).toEqual(['caller-id']);
+      expect(result.filters.assigned).toBe('me');
+    });
+
+    it('lists only unassigned reports for assigned=none', async () => {
+      await list({ assigned: 'none' });
+      for (const { sql, values } of listCalls.slice(0, 2)) {
+        expect(where(sql)).toContain('ur.assigned_to IS NULL');
+        expect(values).not.toContain('caller-id');
+      }
+    });
+
+    it('filters by assignee username through the left join', async () => {
+      const result = await list({ assigned_to: 'second_admin' });
+      for (const { sql } of listCalls) {
+        expect(sql).toContain(
+          'LEFT JOIN users assignee_user ON assignee_user.id = ur.assigned_to',
+        );
+        expect(where(sql)).toContain('assignee_user.username = ?');
+      }
+      expect(listCalls[1].values).toEqual(['second_admin']);
+      expect(result.filters.assigned_to).toBe('second_admin');
+    });
+
+    it('combines with other filters in parameter order', async () => {
+      await list({
+        status: 'open',
+        assigned: 'me',
+        assigned_to: 'second_admin',
+      });
+      expect(listCalls[1].values).toEqual([
+        'open',
+        'caller-id',
+        'second_admin',
+      ]);
+    });
+
+    it('reads an anonymised or missing assignee as unassigned', async () => {
+      await list({});
+      const sql = listCalls[0].sql;
+      expect(sql).toContain(
+        'CASE WHEN assignee_user.deleted_at IS NULL\n           THEN assignee_user.username END AS assigned_to_username',
+      );
+      expect(sql).toContain(
+        'CASE WHEN ur.assigned_to IS NULL THEN NULL ELSE ur.assigned_at END AS assigned_at',
+      );
+      expect(sql).not.toMatch(/\bINNER JOIN\b/);
+    });
+
+    it('renders an unassigned row with nulls, and an assigned one in ISO', async () => {
+      const base = {
+        id: 'r1',
+        reporter_username: null,
+        reported_username: null,
+        target_type: 'user',
+        target_id: 't',
+        target_label: null,
+        reason: 'spam',
+        status: 'open',
+        resolution: null,
+        context_type: null,
+        context_id: null,
+        created_at: '2026-10-25T10:00:00Z',
+        reviewed_at: null,
+        withdrawn_at: null,
+      };
+      rows = [
+        { ...base, assigned_to_username: null, assigned_at: null },
+        {
+          ...base,
+          id: 'r2',
+          assigned_to_username: 'admin',
+          assigned_at: '2026-10-27T09:00:00Z',
+        },
+      ];
+      const { items } = await list({});
+      expect(
+        items.map((item) => [item.assigned_to_username, item.assigned_at]),
+      ).toEqual([
+        [null, null],
+        ['admin', '2026-10-27T09:00:00.000Z'],
+      ]);
     });
   });
 });

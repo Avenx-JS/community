@@ -24,6 +24,9 @@ import type {
 export const REPORT_WITHDRAWN_FILTERS = ['exclude', 'include', 'only'] as const;
 export type ReportWithdrawnFilter = (typeof REPORT_WITHDRAWN_FILTERS)[number];
 
+export const REPORT_ASSIGNED_FILTERS = ['any', 'me', 'none'] as const;
+export type ReportAssignedFilter = (typeof REPORT_ASSIGNED_FILTERS)[number];
+
 export class ListReportsDto {
   @IsOptional()
   @IsIn(REPORT_STATUSES)
@@ -50,6 +53,23 @@ export class ListReportsDto {
   @IsString()
   @Matches(/^[a-zA-Z0-9_]{3,50}$/)
   reporter_username?: string;
+
+  /** Reports assigned to this administrator. */
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-zA-Z0-9_]{3,50}$/)
+  assigned_to?: string;
+
+  @ApiPropertyOptional({
+    enum: REPORT_ASSIGNED_FILTERS,
+    default: 'any',
+    description:
+      '`me` lists the reports assigned to you, `none` the unassigned ones, ' +
+      '`any` (default) does not filter on assignment.',
+  })
+  @IsOptional()
+  @IsIn(REPORT_ASSIGNED_FILTERS)
+  assigned: ReportAssignedFilter = 'any';
 
   @ApiPropertyOptional({
     enum: REPORT_WITHDRAWN_FILTERS,

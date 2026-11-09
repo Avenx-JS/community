@@ -160,6 +160,8 @@ describe('AccountDeletionService', () => {
       'DELETE FROM user_blocks WHERE blocker_id = ?',
       'DELETE FROM user_blocks WHERE blocked_id = ?',
       'DELETE FROM password_reset_tokens WHERE user_id = ?',
+      // Unassigns, never deletes: the reports themselves are kept.
+      'UPDATE user_reports SET assigned_to = NULL, assigned_at = NULL WHERE assigned_to = ?',
     ]);
     const statements = [
       LOCK_ACCOUNT_SQL,

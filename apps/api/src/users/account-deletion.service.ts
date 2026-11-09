@@ -46,6 +46,9 @@ export const DELETE_PRIVATE_STATE_SQL = [
   // Anonymising would not fire the cascade, and a live link must not outlive
   // the account.
   'DELETE FROM password_reset_tokens WHERE user_id = ?',
+  // Not a deletion: the reports stay, unassigned. Anonymising would not fire
+  // fk_user_reports_assigned_to, and a deleted account cannot work a report.
+  'UPDATE user_reports SET assigned_to = NULL, assigned_at = NULL WHERE assigned_to = ?',
 ] as const;
 
 export const COMMUNITY_CREATOR_MESSAGE =

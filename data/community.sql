@@ -298,6 +298,8 @@ CREATE TABLE user_reports (
     target_id VARCHAR(36) NOT NULL,
     target_author_id VARCHAR(36) NULL,
     withdrawn_at TIMESTAMP NULL DEFAULT NULL,
+    assigned_to VARCHAR(36) NULL,
+    assigned_at TIMESTAMP NULL DEFAULT NULL,
     INDEX idx_user_reports_status_created (status, created_at),
     INDEX idx_user_reports_reported_user (reported_user_id, status),
     INDEX idx_user_reports_reporter_created (reporter_id, created_at),
@@ -307,6 +309,7 @@ CREATE TABLE user_reports (
     INDEX idx_user_reports_reviewed (reviewed_at, status, resolution, created_at),
     INDEX idx_user_reports_target (target_type, target_id, status),
     INDEX idx_user_reports_target_type_created (target_type, created_at),
+    INDEX idx_user_reports_assigned (assigned_to, status, created_at),
     CONSTRAINT chk_user_reports_context CHECK (
         (context_type IS NULL AND context_id IS NULL) OR
         (context_type IS NOT NULL AND context_id IS NOT NULL)
@@ -316,7 +319,9 @@ CREATE TABLE user_reports (
         FOREIGN KEY (reported_user_id) REFERENCES users(id) ON DELETE SET NULL,
     FOREIGN KEY (reviewed_by) REFERENCES users(id) ON DELETE SET NULL,
     CONSTRAINT fk_user_reports_target_author
-        FOREIGN KEY (target_author_id) REFERENCES users(id) ON DELETE SET NULL
+        FOREIGN KEY (target_author_id) REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT fk_user_reports_assigned_to
+        FOREIGN KEY (assigned_to) REFERENCES users(id) ON DELETE SET NULL
 );
 
 CREATE TABLE user_restrictions (
@@ -359,7 +364,9 @@ CREATE TABLE admin_actions (
         'user_role_changed',
         'community_suspended',
         'community_restored',
-        'community_updated'
+        'community_updated',
+        'report_assigned',
+        'report_unassigned'
     ) NOT NULL,
     target_type ENUM('user', 'report', 'restriction', 'community') NOT NULL,
     target_id VARCHAR(36) NOT NULL,
@@ -568,6 +575,24 @@ BEGIN
 END$$
 DELIMITER ;
 
+-- chk_user_reports_assignment (031_add_report_assignment): enforced by triggers, see the README.
+DELIMITER $$
+CREATE TRIGGER trg_user_reports_assignment_insert BEFORE INSERT ON user_reports FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.assigned_to IS NULL AND NEW.assigned_at IS NULL) OR NEW.assigned_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_user_reports_assignment'' is violated.';
+  END IF;
+END$$
+CREATE TRIGGER trg_user_reports_assignment_update BEFORE UPDATE ON user_reports FOR EACH ROW
+BEGIN
+  IF NOT ((NEW.assigned_to IS NULL AND NEW.assigned_at IS NULL) OR NEW.assigned_at IS NOT NULL) THEN
+    SIGNAL SQLSTATE 'HY000'
+      SET MYSQL_ERRNO = 3819, MESSAGE_TEXT = 'Check constraint ''chk_user_reports_assignment'' is violated.';
+  END IF;
+END$$
+DELIMITER ;
+
 CREATE TABLE schema_migrations (
     version VARCHAR(64) PRIMARY KEY,
     applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -604,4 +629,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('027_create_saved_posts'),
     ('028_create_user_blocks'),
     ('029_create_password_reset_tokens'),
-    ('030_add_report_withdrawal');
+    ('030_add_report_withdrawal'),
+    ('031_add_report_assignment');

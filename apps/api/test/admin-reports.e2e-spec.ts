@@ -28,6 +28,10 @@ interface ReportFixture {
   reviewed_at: string | null;
   resolution_note: string | null;
   withdrawn_at: string | null;
+  // The assignee's id, and what the assignee join would resolve.
+  assigned_to: string | null;
+  assigned_to_username: string | null;
+  assigned_at: string | null;
 }
 
 interface AdminListResponse {
@@ -65,6 +69,18 @@ describe('Admin reports API (e2e)', () => {
   let notificationRows: Array<Record<string, unknown>>;
   let failNotificationInsert: boolean;
   let transactionNotificationStart: number;
+  // id -> username of every account the fake knows. deleted marks an
+  // anonymised account, which cannot be assigned.
+  let directory: Map<string, { username: string; deleted?: boolean }>;
+  let assignmentClock: number;
+  let previousAssignment:
+    | {
+        report: ReportFixture;
+        assigned_to: string | null;
+        assigned_to_username: string | null;
+        assigned_at: string | null;
+      }
+    | undefined;
   let previousReportState:
     | {
         report: ReportFixture;
@@ -92,6 +108,9 @@ describe('Admin reports API (e2e)', () => {
       reviewed_at: null,
       resolution_note: null,
       withdrawn_at: null,
+      assigned_to: null,
+      assigned_to_username: null,
+      assigned_at: null,
     }));
     roles = new Map([
       ['admin-id', 'admin'],
@@ -107,6 +126,18 @@ describe('Admin reports API (e2e)', () => {
     failNotificationInsert = false;
     transactionNotificationStart = 0;
     previousReportState = undefined;
+    previousAssignment = undefined;
+    assignmentClock = 0;
+    directory = new Map([
+      ['admin-id', { username: 'admin' }],
+      ['admin2-id', { username: 'second_admin' }],
+      ['user-id', { username: 'plain_user' }],
+      ['reporter-id', { username: 'reporter_admin' }],
+      ['target-id', { username: 'target_user' }],
+      ['gone-admin-id', { username: 'gone_admin', deleted: true }],
+    ]);
+    roles.set('admin2-id', 'admin');
+    roles.set('gone-admin-id', 'admin');
 
     const matchingReports = (sql: string, values: unknown[]) => {
       const where = sql.includes(' WHERE ')
@@ -168,6 +199,17 @@ describe('Admin reports API (e2e)', () => {
       }
       if (where.includes('ur.withdrawn_at IS NOT NULL')) {
         result = result.filter((row) => row.withdrawn_at !== null);
+      }
+      if (where.includes('ur.assigned_to = ?')) {
+        const value = values[parameter++];
+        result = result.filter((row) => row.assigned_to === value);
+      }
+      if (where.includes('ur.assigned_to IS NULL')) {
+        result = result.filter((row) => row.assigned_to === null);
+      }
+      if (where.includes('assignee_user.username = ?')) {
+        const value = values[parameter++];
+        result = result.filter((row) => row.assigned_to_username === value);
       }
       return result;
     };
@@ -286,6 +328,8 @@ describe('Admin reports API (e2e)', () => {
       },
       commit: () => {
         transactionCounts.commits += 1;
+        // A rollback only undoes its own transaction's assignment change.
+        previousAssignment = undefined;
         return Promise.resolve();
       },
       rollback: () => {
@@ -301,6 +345,14 @@ describe('Admin reports API (e2e)', () => {
           previousReportState.report.resolution_note = previousReportState.note;
           previousReportState.report.reviewed_at =
             previousReportState.reviewedAt;
+        }
+        if (previousAssignment) {
+          Object.assign(previousAssignment.report, {
+            assigned_to: previousAssignment.assigned_to,
+            assigned_to_username: previousAssignment.assigned_to_username,
+            assigned_at: previousAssignment.assigned_at,
+          });
+          previousAssignment = undefined;
         }
         return Promise.resolve();
       },
@@ -324,11 +376,73 @@ describe('Admin reports API (e2e)', () => {
                       : null,
                     status: report.status,
                     withdrawn_at: report.withdrawn_at,
+                    assigned_to: report.assigned_to,
                   },
                 ]
               : [],
             [],
           ]);
+        }
+        if (sql.startsWith('SELECT id, username, role FROM users')) {
+          const byId = sql.includes('WHERE id = ?');
+          const entry = [...directory.entries()].find(([id, user]) =>
+            byId ? id === values[0] : user.username === values[0],
+          );
+          return Promise.resolve([
+            entry && !entry[1].deleted
+              ? [
+                  {
+                    id: entry[0],
+                    username: entry[1].username,
+                    role: roles.get(entry[0]) ?? 'user',
+                  },
+                ]
+              : [],
+            [],
+          ]);
+        }
+        if (
+          sql.includes('SET assigned_to = ?, assigned_at = UTC_TIMESTAMP()')
+        ) {
+          const report = reports.find((row) => row.id === values[1]);
+          if (
+            !report ||
+            report.withdrawn_at !== null ||
+            !['open', 'under_review'].includes(report.status)
+          ) {
+            return Promise.resolve([{ affectedRows: 0 }, []]);
+          }
+          previousAssignment = {
+            report,
+            assigned_to: report.assigned_to,
+            assigned_to_username: report.assigned_to_username,
+            assigned_at: report.assigned_at,
+          };
+          report.assigned_to = String(values[0]);
+          report.assigned_to_username =
+            directory.get(String(values[0]))?.username ?? null;
+          report.assigned_at = `2026-10-27T09:0${assignmentClock++}:00.000Z`;
+          return Promise.resolve([{ affectedRows: 1 }, []]);
+        }
+        if (sql.includes('SET assigned_to = NULL, assigned_at = NULL')) {
+          const report = reports.find(
+            (row) => row.id === values[0] && row.assigned_to === values[1],
+          );
+          if (!report) {
+            return Promise.resolve([{ affectedRows: 0 }, []]);
+          }
+          previousAssignment = {
+            report,
+            assigned_to: report.assigned_to,
+            assigned_to_username: report.assigned_to_username,
+            assigned_at: report.assigned_at,
+          };
+          Object.assign(report, {
+            assigned_to: null,
+            assigned_to_username: null,
+            assigned_at: null,
+          });
+          return Promise.resolve([{ affectedRows: 1 }, []]);
         }
         if (sql.startsWith('UPDATE user_reports')) {
           const report = reports.find((row) => row.id === values[4]);
@@ -351,8 +465,8 @@ describe('Admin reports API (e2e)', () => {
         }
         if (sql === 'SELECT username FROM users WHERE id = ? LIMIT 1') {
           return Promise.resolve([
-            values[0] === 'admin-id' || values[0] === 'target-id'
-              ? [{ username: 'admin' }]
+            directory.has(String(values[0]))
+              ? [{ username: directory.get(String(values[0]))!.username }]
               : [],
             [],
           ]);
@@ -406,6 +520,7 @@ describe('Admin reports API (e2e)', () => {
             'target-token': 'target-id',
             'user-token': 'user-id',
             'reporter-token': 'reporter-id',
+            'admin2-token': 'admin2-id',
           }[token];
           return Promise.resolve(
             userId ? { kind: 'valid', userId } : { kind: 'invalid' },
@@ -681,6 +796,9 @@ describe('Admin reports API (e2e)', () => {
       reviewed_at: null,
       resolution_note: null,
       withdrawn_at: null,
+      assigned_to: null,
+      assigned_to_username: null,
+      assigned_at: null,
       ...overrides,
     });
     const listed = async (query: string) =>
@@ -1016,6 +1134,375 @@ describe('Admin reports API (e2e)', () => {
       await adminPatch('/admin/reports/report-05')
         .send({ status: 'under_review' })
         .expect(200);
+    });
+  });
+
+  describe('assignment', () => {
+    const as = (token: string) => ({
+      assign: (id: string, body?: object) => {
+        const call = request(app.getHttpServer())
+          .post(`/admin/reports/${id}/assign`)
+          .set('Authorization', `Bearer ${token}`);
+        return body === undefined ? call : call.send(body);
+      },
+      unassign: (id: string) =>
+        request(app.getHttpServer())
+          .delete(`/admin/reports/${id}/assign`)
+          .set('Authorization', `Bearer ${token}`),
+      list: async (query: string) =>
+        (
+          await request(app.getHttpServer())
+            .get(`/admin/reports?limit=100${query}`)
+            .set('Authorization', `Bearer ${token}`)
+            .expect(200)
+        ).body as AdminListResponse & {
+          items: Array<ReportFixture & Record<string, unknown>>;
+        },
+    });
+    const admin = as('admin-token');
+    const second = as('admin2-token');
+    const report = (id: string) => reports.find((row) => row.id === id)!;
+    const actions = () => auditRows.map((row) => row[3]);
+    const metadataOf = (index: number) =>
+      JSON.parse(String(auditRows[index][6])) as Record<string, unknown>;
+    // Nothing about the report or the log moved.
+    const unchanged = (id: string) => {
+      expect(report(id)).toMatchObject({
+        assigned_to: null,
+        assigned_to_username: null,
+        assigned_at: null,
+      });
+      expect(auditRows).toHaveLength(0);
+    };
+
+    describe('POST /admin/reports/:id/assign', () => {
+      it('assigns to the caller when no body is sent, without changing status', async () => {
+        const response = await admin.assign('report-02').expect(200);
+
+        expect(response.body).toMatchObject({
+          id: 'report-02',
+          status: 'open',
+          assigned_to_username: 'admin',
+          assigned_at: '2026-10-27T09:00:00.000Z',
+          reviewed_by_username: null,
+        });
+        expect(report('report-02').status).toBe('open');
+        expect(actions()).toEqual(['report_assigned']);
+        expect(auditRows[0].slice(4, 6)).toEqual(['report', 'report-02']);
+        expect(metadataOf(0)).toEqual({ assignee_username: 'admin' });
+        expect(transactionCounts).toEqual({
+          commits: 1,
+          rollbacks: 0,
+          releases: 1,
+        });
+      });
+
+      it('assigns to a named administrator, and an empty body means the caller', async () => {
+        await admin
+          .assign('report-02', { username: 'second_admin' })
+          .expect(200);
+        expect(report('report-02').assigned_to).toBe('admin2-id');
+        await second.assign('report-04', {}).expect(200);
+        expect(report('report-04').assigned_to).toBe('admin2-id');
+      });
+
+      it('assigns an under_review report', async () => {
+        report('report-02').status = 'under_review';
+        await admin.assign('report-02').expect(200);
+        expect(report('report-02').status).toBe('under_review');
+      });
+
+      it('answers an unknown or deleted username with 404, writing nothing', async () => {
+        await admin
+          .assign('report-02', { username: 'nobody_here' })
+          .expect(404);
+        await admin.assign('report-02', { username: 'gone_admin' }).expect(404);
+        unchanged('report-02');
+      });
+
+      // An owner who cannot open the report would make assignment useless.
+      it('refuses an assignee who is not an administrator with 400, writing nothing', async () => {
+        await admin.assign('report-02', { username: 'plain_user' }).expect(400);
+        roles.set('user-id', 'moderator');
+        await admin.assign('report-02', { username: 'plain_user' }).expect(400);
+        unchanged('report-02');
+      });
+
+      it.each([
+        { username: 'ab' },
+        { username: 'has-hyphen' },
+        { username: 'x'.repeat(51) },
+        { username: 42 },
+        { assignee_id: 'admin2-id' },
+        { username: 'second_admin', status: 'under_review' },
+      ])('answers the body %o with 400', async (body) => {
+        await admin.assign('report-02', body).expect(400);
+        unchanged('report-02');
+      });
+
+      describe('conflicts of interest', () => {
+        beforeEach(() => {
+          roles.set('reporter-id', 'admin');
+          roles.set('target-id', 'admin');
+        });
+
+        it('refuses an assignee who filed the report with 403', async () => {
+          await admin
+            .assign('report-02', { username: 'reporter_admin' })
+            .expect(403);
+          unchanged('report-02');
+        });
+
+        it('refuses an assignee who is the reported user with 403', async () => {
+          await admin
+            .assign('report-02', { username: 'target_user' })
+            .expect(403);
+          unchanged('report-02');
+        });
+
+        it('refuses self-assignment by a party to the report with 403', async () => {
+          for (const token of ['reporter-token', 'target-token']) {
+            await as(token).assign('report-02').expect(403);
+          }
+          unchanged('report-02');
+        });
+
+        it('refuses a party handing their own report to someone else with 403', async () => {
+          await as('reporter-token')
+            .assign('report-02', { username: 'admin' })
+            .expect(403);
+          unchanged('report-02');
+        });
+      });
+
+      it.each(['resolved', 'rejected'])(
+        'refuses a %s report with 409, writing nothing',
+        async (status) => {
+          report('report-02').status = status;
+          await admin.assign('report-02').expect(409);
+          unchanged('report-02');
+        },
+      );
+
+      it('refuses a withdrawn report with 409, writing nothing', async () => {
+        report('report-02').withdrawn_at = '2026-10-27T08:00:00.000Z';
+        await admin.assign('report-02').expect(409);
+        unchanged('report-02');
+      });
+
+      it('hands over on re-assignment, and treats a repeat as a no-op', async () => {
+        await admin.assign('report-02').expect(200);
+        const handedOver = await admin
+          .assign('report-02', { username: 'second_admin' })
+          .expect(200);
+        expect(handedOver.body).toMatchObject({
+          assigned_to_username: 'second_admin',
+          assigned_at: '2026-10-27T09:01:00.000Z',
+        });
+
+        const repeated = await admin
+          .assign('report-02', { username: 'second_admin' })
+          .expect(200);
+        expect(repeated.body).toMatchObject({
+          assigned_to_username: 'second_admin',
+          assigned_at: '2026-10-27T09:01:00.000Z',
+        });
+        expect(actions()).toEqual(['report_assigned', 'report_assigned']);
+        expect(metadataOf(1)).toEqual({ assignee_username: 'second_admin' });
+      });
+
+      it('rolls the assignment back when the audit entry cannot be written', async () => {
+        failAuditInsert = true;
+        await admin.assign('report-02').expect(500);
+        expect(report('report-02').assigned_to).toBeNull();
+        expect(transactionCounts).toEqual({
+          commits: 0,
+          rollbacks: 1,
+          releases: 1,
+        });
+      });
+    });
+
+    describe('DELETE /admin/reports/:id/assign', () => {
+      it('clears both columns, records who was dropped, and answers 204', async () => {
+        await second.assign('report-02').expect(200);
+        const response = await admin.unassign('report-02').expect(204);
+
+        expect(response.text).toBe('');
+        expect(report('report-02')).toMatchObject({
+          assigned_to: null,
+          assigned_at: null,
+          status: 'open',
+        });
+        expect(actions()).toEqual(['report_assigned', 'report_unassigned']);
+        expect(auditRows[1][2]).toBe('admin');
+        expect(metadataOf(1)).toEqual({ assignee_username: 'second_admin' });
+      });
+
+      it('answers an unassigned report with 204 and writes nothing', async () => {
+        await admin.unassign('report-02').expect(204);
+        await admin.unassign('report-02').expect(204);
+        unchanged('report-02');
+      });
+
+      it.each(['resolved', 'rejected'])(
+        'refuses a %s report with 409',
+        async (status) => {
+          await admin.assign('report-02').expect(200);
+          report('report-02').status = status;
+          await admin.unassign('report-02').expect(409);
+          expect(report('report-02').assigned_to).toBe('admin-id');
+          expect(actions()).toEqual(['report_assigned']);
+        },
+      );
+
+      it('refuses a withdrawn report with 409', async () => {
+        report('report-02').withdrawn_at = '2026-10-27T08:00:00.000Z';
+        await admin.unassign('report-02').expect(409);
+      });
+
+      it('refuses a party to the report with 403', async () => {
+        roles.set('reporter-id', 'admin');
+        await admin.assign('report-02').expect(200);
+        await as('reporter-token').unassign('report-02').expect(403);
+        expect(report('report-02').assigned_to).toBe('admin-id');
+      });
+
+      it('rolls the unassignment back when the audit entry cannot be written', async () => {
+        await admin.assign('report-02').expect(200);
+        failAuditInsert = true;
+        await admin.unassign('report-02').expect(500);
+        expect(report('report-02').assigned_to).toBe('admin-id');
+      });
+    });
+
+    it('guards both routes like every admin route, and validates the id', async () => {
+      for (const [method, path] of [
+        ['post', '/admin/reports/report-02/assign'],
+        ['delete', '/admin/reports/report-02/assign'],
+      ] as const) {
+        await request(app.getHttpServer())[method](path).expect(401);
+        await request(app.getHttpServer())
+          [method](path)
+          .set('Authorization', 'Bearer user-token')
+          .expect(403);
+      }
+      await admin.assign('no-such-report').expect(404);
+      await admin.unassign('no-such-report').expect(404);
+      await admin.assign('x'.repeat(37)).expect(400);
+      await admin.unassign('bad.id').expect(400);
+      expect(auditRows).toHaveLength(0);
+    });
+
+    it('releases the connection on every path of both routes', async () => {
+      await admin.assign('report-02').expect(200);
+      await admin.assign('report-02').expect(200);
+      await admin.assign('report-04', { username: 'plain_user' }).expect(400);
+      await admin.assign('no-such-report').expect(404);
+      report('report-06').status = 'resolved';
+      await admin.assign('report-06').expect(409);
+      await admin.unassign('report-02').expect(204);
+      await admin.unassign('report-02').expect(204);
+      await admin.unassign('report-06').expect(409);
+      expect(transactionCounts.releases).toBe(8);
+    });
+
+    it('leaves PATCH transitions exactly as before, and keeps the assignee', async () => {
+      await second.assign('report-02').expect(200);
+      await adminPatch('/admin/reports/report-02')
+        .send({ status: 'resolved', resolution: 'no_action' })
+        .expect(200);
+      expect(report('report-02')).toMatchObject({
+        status: 'resolved',
+        assigned_to: 'admin2-id',
+      });
+      // Assignment is no permission: an unassigned or someone else's report
+      // transitions as it always did.
+      await adminPatch('/admin/reports/report-04')
+        .send({ status: 'under_review' })
+        .expect(200);
+      await adminPatch('/admin/reports/report-04')
+        .send({ status: 'under_review' })
+        .expect(409);
+    });
+
+    describe('the queue', () => {
+      beforeEach(async () => {
+        await admin.assign('report-02').expect(200);
+        await admin.assign('report-03').expect(200);
+        await second.assign('report-04').expect(200);
+      });
+
+      it('lists only the caller’s reports under assigned=me', async () => {
+        const mine = await admin.list('&assigned=me');
+        expect(mine.items.map((item) => item.id)).toEqual([
+          'report-03',
+          'report-02',
+        ]);
+        expect(mine.total).toBe(2);
+        expect(mine.filters).toMatchObject({
+          assigned: 'me',
+          assigned_to: null,
+        });
+
+        const theirs = await second.list('&assigned=me');
+        expect(theirs.items.map((item) => item.id)).toEqual(['report-04']);
+      });
+
+      it('lists only unassigned reports under assigned=none', async () => {
+        const none = await admin.list('&assigned=none');
+        expect(none.total).toBe(22);
+        expect(
+          none.items.every((item) => item.assigned_to_username === null),
+        ).toBe(true);
+        expect(none.items.map((item) => item.id)).not.toContain('report-02');
+      });
+
+      it('filters on the assignee by username', async () => {
+        const body = await admin.list('&assigned_to=second_admin');
+        expect(body.items.map((item) => item.id)).toEqual(['report-04']);
+        expect(body.filters.assigned_to).toBe('second_admin');
+      });
+
+      it('lists everything under the default assigned=any', async () => {
+        const body = await admin.list('');
+        expect(body.total).toBe(25);
+        expect(body.filters.assigned).toBe('any');
+        expect(
+          body.items.find((item) => item.id === 'report-04'),
+        ).toMatchObject({
+          assigned_to_username: 'second_admin',
+          assigned_at: '2026-10-27T09:02:00.000Z',
+        });
+      });
+
+      it.each(['?assigned=mine', '?assigned=ME', '?assigned_to=has-hyphen'])(
+        'answers %s with 400',
+        async (query) => {
+          await adminRequest(`/admin/reports${query}`).expect(400);
+        },
+      );
+
+      // assigned_to went to NULL with the account, or the join found an
+      // anonymised one: either way the report reads as unassigned.
+      it('renders a deleted assignee as unassigned, without throwing', async () => {
+        Object.assign(report('report-05'), {
+          assigned_to: 'gone-admin-id',
+          assigned_to_username: null,
+          assigned_at: null,
+        });
+        const listed = await admin.list('');
+        expect(
+          listed.items.find((item) => item.id === 'report-05'),
+        ).toMatchObject({ assigned_to_username: null, assigned_at: null });
+        const detail = await adminRequest('/admin/reports/report-05').expect(
+          200,
+        );
+        expect(detail.body).toMatchObject({
+          assigned_to_username: null,
+          assigned_at: null,
+        });
+      });
     });
   });
 });

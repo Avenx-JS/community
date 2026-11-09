@@ -84,6 +84,13 @@ export const CHECK_TRIGGER_RULES: readonly CheckTriggerRule[] = [
     expression:
       '(NEW.pinned_at IS NULL AND NEW.pinned_by IS NULL) OR NEW.pinned_at IS NOT NULL',
   },
+  {
+    name: 'chk_user_reports_assignment',
+    table: 'user_reports',
+    migration: '031_add_report_assignment',
+    expression:
+      '(NEW.assigned_to IS NULL AND NEW.assigned_at IS NULL) OR NEW.assigned_at IS NOT NULL',
+  },
 ];
 
 export function checkTriggerRule(name: string): CheckTriggerRule {

@@ -476,6 +476,9 @@ describe('Admin audit log API (e2e)', () => {
     'action=community_updated',
     'target_type=community',
     'target_type=community&target_id=community-1',
+    // Migration 031.
+    'action=report_assigned',
+    'action=report_unassigned',
   ])('accepts the community filter %s', async (query) => {
     const body = await list(`/admin/audit-log?${query}`);
     expect(body).toMatchObject({ items: [], total: 0 });

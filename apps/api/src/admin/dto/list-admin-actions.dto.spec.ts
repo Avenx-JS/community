@@ -43,6 +43,10 @@ describe('ListAdminActionsDto', () => {
     { target_type: 'community' },
     { target_type: 'community', target_id: 'community-1' },
     { action: 'community_suspended', target_type: 'community' },
+    // Migration 031.
+    { action: 'report_assigned' },
+    { action: 'report_unassigned' },
+    { action: 'report_assigned', target_type: 'report', target_id: 'r-1' },
   ])('accepts the community filter %o', async (query) => {
     await expect(validateQuery(query)).resolves.toMatchObject(query);
   });

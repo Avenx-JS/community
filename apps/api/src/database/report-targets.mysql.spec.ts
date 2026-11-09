@@ -63,7 +63,7 @@ integration('report targets (MySQL)', () => {
       )
     )[0];
   const list = (query: Partial<ListReportsDto> = {}) =>
-    queue.findAll({ limit: 100, ...query } as ListReportsDto);
+    queue.findAll({ limit: 100, ...query } as ListReportsDto, 'admin');
 
   beforeAll(async () => {
     connection = await createConnection({

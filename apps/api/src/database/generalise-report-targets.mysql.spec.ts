@@ -81,7 +81,7 @@ integration('generalised report targets (MySQL)', () => {
       pool,
       {} as AuditLogService,
       {} as NotificationsService,
-    ).findAll({ limit: 100 } as ListReportsDto);
+    ).findAll({ limit: 100 } as ListReportsDto, 'admin');
 
   // Column shape, named indexes, foreign-key rules and checks of user_reports.
   const shape = async (schema: string) => ({

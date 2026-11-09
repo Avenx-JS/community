@@ -160,6 +160,7 @@ pair of `BEFORE INSERT` and `BEFORE UPDATE` triggers instead of a `CHECK`:
 | `chk_communities_deletion` | `communities` | `022_add_community_deletion` |
 | `chk_communities_suspension` | `communities` | `025_add_community_suspension` |
 | `chk_posts_pin` | `posts` | `026_add_post_pinning` |
+| `chk_user_reports_assignment` | `user_reports` | `031_add_report_assignment` |
 
 Each trigger is named after its rule (`trg_posts_pin_insert`,
 `trg_posts_pin_update`) and raises exactly what the `CHECK` would have: error
@@ -394,6 +395,8 @@ Only the following metadata keys may be recorded:
 | `community_suspended`   | `community`   | `community_name`, `reason`                  |
 | `community_restored`    | `community`   | `community_name`                            |
 | `community_updated`     | `community`   | `community_name`, `fields`                  |
+| `report_assigned`       | `report`      | `assignee_username`                         |
+| `report_unassigned`     | `report`      | `assignee_username`                         |
 
 The three `community_*` actions and the `community` target were added by
 migration `025_add_community_suspension`. No endpoint writes them yet; they
@@ -406,6 +409,12 @@ which fields changed, as a comma-separated list of editable fields (today only
 `description`), never their old or new values: the log records that a change
 happened, not a content diff. The `AuditEntry` type pairs each action with its
 target, so a community action with any other `target_type` does not compile.
+
+`report_assigned` and `report_unassigned` were appended by migration
+`031_add_report_assignment` and are written by
+[report assignment](#assigning-reports). `assignee_username` snapshots the
+assignee, or for `report_unassigned` the administrator the report was taken
+from, capped at the 50-character column width.
 
 **Both enums are append-only.** `admin_actions.action` and `target_type` may
 only ever gain members at the end, in the same order as `ADMIN_ACTIONS` and
@@ -895,6 +904,8 @@ envelope. Optional query parameters:
 | `reported_username` | Exact username, 3–50 letters, digits, or underscores. Does not match community reports       |
 | `reporter_username` | Exact username, 3–50 letters, digits, or underscores                                         |
 | `withdrawn`         | `exclude` (default) hides reports their reporter withdrew; `include` lists them too; `only` lists nothing else |
+| `assigned`          | `any` (default), `me` or `none`; see [Assigning reports](#assigning-reports)                   |
+| `assigned_to`       | Exact assignee username, 3–50 letters, digits, or underscores                                |
 | `from` / `to`       | ISO 8601 timestamps; UTC half-open range `created_at >= from AND created_at < to`            |
 | `page`              | Integer 1–10000; defaults to `1`                                                             |
 | `limit`             | Integer 1–100; defaults to `20`                                                              |
@@ -959,7 +970,9 @@ lose a report.
       "has_context": true,
       "created_at": "2026-10-25T10:00:00.000Z",
       "reviewed_at": null,
-      "withdrawn_at": null
+      "withdrawn_at": null,
+      "assigned_to_username": "admin",
+      "assigned_at": "2026-10-26T09:00:00.000Z"
     }
   ],
   "page": 1,
@@ -972,6 +985,8 @@ lose a report.
     "reported_username": null,
     "reporter_username": null,
     "withdrawn": "exclude",
+    "assigned": "any",
+    "assigned_to": null,
     "from": null,
     "to": null,
     "sort": "new"
@@ -1009,6 +1024,9 @@ report with no account.
   "has_context": true,
   "created_at": "2026-10-25T10:00:00.000Z",
   "reviewed_at": null,
+  "withdrawn_at": null,
+  "assigned_to_username": null,
+  "assigned_at": null,
   "description": "Repeated spam posts",
   "resolution_note": null,
   "reviewed_by_username": null,
@@ -1081,6 +1099,118 @@ Administrators cannot review reports where they are the reporter or the
 reported user; those requests return `403`. Reopening reports and changing
 terminal decisions are not supported; appeals or a reopening workflow require
 a separate policy and state-machine change.
+
+**There are deliberately no `POST /admin/reports/:id/resolve` or `/dismiss`
+routes.** `PATCH /admin/reports/:id` already performs both (`status: "resolved"`
+with a `resolution`, or `status: "rejected"`), with the resolution rules in
+`UpdateReportStatusDto` and the transitions above. A second pair of routes would
+be a second code path for one state machine.
+
+#### Assigning reports
+
+`under_review` records that somebody started looking, not who. `reviewed_by` is
+only written when the status changes. Assignment records who owns the work, so two
+administrators do not work the same report unknowingly, each has a queue of their
+own, and nothing sits under review with no one accountable for it.
+
+| Route | Success | Description |
+| --- | --- | --- |
+| `POST /admin/reports/:id/assign` | `200`, the report detail | Assigns the report |
+| `DELETE /admin/reports/:id/assign` | `204` | Unassigns the report |
+
+Both require a platform administrator, like every route here, and are subject to
+the global write buckets with no dedicated bucket. Nobody is notified: assignment
+is internal workflow, and a reporter only ever learns the outcome
+([Moderation notifications](#moderation-notifications)).
+
+**Assignment is separate from `reviewed_by` and from `status`.** `assigned_to` is
+who owns the work and `reviewed_by` is who made the decision. They are usually the
+same person but must not share a column, since a report can be assigned to one
+administrator and decided by another. Assignment never changes `status` either:
+a report can be claimed while still `open`, and `status` stays entirely the
+decision state machine of `PATCH /admin/reports/:id`, whose transitions behave
+exactly as before whoever is assigned. Assignment grants no permission, so any
+administrator may still transition any report they are not party to. A client
+that wants "claim and start reviewing" makes two calls: the assign, then a
+`PATCH` to `under_review`.
+
+`POST /admin/reports/:id/assign` takes an optional body:
+
+```json
+{ "username": "second_admin" }
+```
+
+- **Omit `username` (or send `{}`) to assign the report to yourself.** That is the
+  common case: an administrator picking up a report. `username` is 3–50 letters,
+  digits or underscores, like `ManageModeratorDto`. An explicit `null` and any
+  other property return `400`.
+- **The assignee must be an administrator.** It must hold a role `AdminGuard`
+  admits on these routes (today only `admin`; `REPORT_ASSIGNEE_ROLES` mirrors the
+  guard and `admin-reports.controller.spec.ts` keeps them in step). Assigning a
+  moderator or ordinary member returns `400` and writes nothing, since they could
+  not open the report they would own.
+- **Conflict of interest applies to the assignee as well as to the caller.** The
+  rule `PATCH` enforces is reused: if the assignee filed the report or is the
+  reported user, the request returns `403`, including when the assignee is the
+  caller. A caller who is party to the report is refused even when naming someone
+  else, since they must not steer the handling of their own report.
+- **Re-assigning hands over.** Assigning an already-assigned report to someone else
+  replaces the assignee and sets a new `assigned_at`, with no unassign step needed.
+  Repeating the current assignment is a no-op: it returns `200`, keeps the original
+  `assigned_at` (when the work was taken) and writes no audit entry.
+
+| Status | When |
+| --- | --- |
+| `200` | Assigned, handed over, or already assigned to that administrator |
+| `400` | Malformed report ID or body, or the assignee is not an administrator |
+| `403` | The caller is not an administrator, or the caller or the assignee is party to the report |
+| `404` | Unknown report, or an unknown or deleted account |
+| `409` | The report is `resolved`, `rejected` or [withdrawn](#reading-and-withdrawing-your-own-reports), or changed concurrently |
+
+`DELETE /admin/reports/:id/assign` clears both columns and returns `204`. Any
+administrator not party to the report may unassign it, including from someone
+else. Unassigning an unassigned report also returns `204` and writes nothing, like
+`DELETE /communities/:name/subscribe`. A closed or withdrawn report returns `409`
+for both routes: closed work needs no owner. The `403`, `404` and `400` cases match
+`POST`.
+
+Each route locks the report (`SELECT … FOR UPDATE`), runs the checks above, writes
+a guarded `UPDATE`, and records one `admin_actions` entry in the same transaction:
+`report_assigned` or `report_unassigned`, with only `assignee_username`
+([audit log](#administrative-action-audit-log)). A failure writing the entry rolls
+the change back. These are two actions rather than one with a direction field, so
+the filterable log answers "who dropped reports" with
+`GET /admin/audit-log?action=report_unassigned`.
+
+**The queue.** List and detail items carry `assigned_to_username` and
+`assigned_at`, both `null` for an unassigned report. `GET /admin/reports` takes:
+
+| Parameter | Accepted values |
+| --- | --- |
+| `assigned` | `any` (default), `me` (assigned to the caller: your queue, in one request) or `none` (unassigned, for triage) |
+| `assigned_to` | An exact username, 3–50 letters, digits or underscores |
+
+They combine with every other filter and with each other (with `AND`), and both
+are echoed in `filters`. `assigned=me&status=open` is "my open reports, newest
+first", served by `idx_user_reports_assigned (assigned_to, status, created_at)`;
+`report-assignment.mysql.spec.ts` checks the plan.
+
+**A report can become unassigned without anyone unassigning it.** `assigned_to`
+is `ON DELETE SET NULL`, not `CASCADE`, so a report survives its assignee's account.
+Account deletion anonymises rather than deletes, which fires no foreign key, so
+`DELETE /users/me` clears the account's assignments itself. A hard delete leaves
+`assigned_at` behind with a `NULL` `assigned_to`. Readers treat `assigned_to IS
+NULL` as unassigned whatever `assigned_at` holds: the queue renders both fields
+`null`, `assigned=none` includes the report, and nothing throws. The rule
+`chk_user_reports_assignment`, "no assignee without a timestamp", is a
+[trigger pair](#rules-enforced-by-triggers) rather than a `CHECK` because of that
+foreign key. It deliberately allows `assigned_at` without an assignee, which is
+exactly what the `SET NULL` leaves. A rule requiring both or neither would refuse
+every later update of such a row.
+
+Assignment is checked when it is made. An administrator who is later demoted
+keeps the reports already assigned to them until someone reassigns or unassigns
+them.
 
 ### Account restrictions (suspensions and bans)
 
@@ -1214,6 +1344,9 @@ report with `no_action` is distinct from a rejected report. `withdrawn_at`
 (nullable, migration `030_add_report_withdrawal`) records when the reporter
 withdrew an open report; it is independent of `status`. See
 [Reading and withdrawing your own reports](#reading-and-withdrawing-your-own-reports).
+`assigned_to` and `assigned_at` (migration `031_add_report_assignment`) record
+which administrator owns the work on a report, separately from `reviewed_by`;
+see [Assigning reports](#assigning-reports).
 
 Reports use deliberate account-deletion behavior: deleting a reporter or
 reviewer preserves the report and sets the corresponding reference to `NULL`;
@@ -1686,7 +1819,10 @@ whole operation back and the account stays fully intact):
    `community_notification_preferences`, the `notifications` it received, its
    `saved_posts`, and its `user_blocks` in both directions. The account row is
    anonymised, not deleted, so the `ON DELETE CASCADE` on those foreign keys
-   would never fire: the deletion removes them explicitly.
+   would never fire: the deletion removes them explicitly. Reports assigned to
+   the account are unassigned (`assigned_to` and `assigned_at` cleared, the
+   reports kept), for the same reason: anonymising does not fire
+   `fk_user_reports_assigned_to`. See [Assigning reports](#assigning-reports).
 6. Every session and refresh token is revoked.
 
 **Kept:** posts, comments, votes, `community_rule_acceptances`,

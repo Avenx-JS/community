@@ -185,7 +185,16 @@ describe('User profile endpoints (e2e)', () => {
         },
       ],
       votes: [{ user_id: 'user-a', target_type: 'post', target_id: 'post-a' }],
-      user_reports: [{ id: 'report-1', reported_user_id: 'user-a' }],
+      user_reports: [
+        { id: 'report-1', reported_user_id: 'user-a' },
+        // A report about B that A, as an administrator, was working.
+        {
+          id: 'report-2',
+          reported_user_id: 'user-b',
+          assigned_to: 'user-a',
+          assigned_at: '2026-10-27T09:00:00.000Z',
+        },
+      ],
       user_restrictions: [{ id: 'restriction-1', user_id: 'user-a' }],
       community_rule_acceptances: [
         { user_id: 'user-a', community_id: 'community-b' },
@@ -243,6 +252,20 @@ describe('User profile endpoints (e2e)', () => {
           deleted_at: new Date('2026-11-02T12:00:00.000Z'),
         });
         return Promise.resolve([{ affectedRows: 1 }, []]);
+      }
+      if (
+        sql ===
+        'UPDATE user_reports SET assigned_to = NULL, assigned_at = NULL WHERE assigned_to = ?'
+      ) {
+        let affectedRows = 0;
+        for (const report of tables.user_reports) {
+          if (report.assigned_to === values[0]) {
+            report.assigned_to = null;
+            report.assigned_at = null;
+            affectedRows += 1;
+          }
+        }
+        return Promise.resolve([{ affectedRows }, []]);
       }
       const remove = /^DELETE FROM (\w+) WHERE (\w+) = \?$/.exec(sql);
       if (remove) {
@@ -823,6 +846,13 @@ describe('User profile endpoints (e2e)', () => {
       expect(tables.user_blocks).toEqual([
         { blocker_id: 'user-b', blocked_id: 'user-suspended' },
       ]);
+      // A report A was assigned stays, unassigned: no one is left to work it.
+      expect(tables.user_reports).toContainEqual({
+        id: 'report-2',
+        reported_user_id: 'user-b',
+        assigned_to: null,
+        assigned_at: null,
+      });
       // A live reset link must not outlive the account.
       expect(tables.password_reset_tokens).toEqual([
         { token_hash: 'hash-b', user_id: 'user-b' },

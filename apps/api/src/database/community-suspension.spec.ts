@@ -22,6 +22,14 @@ const ORIGINAL_ACTIONS = [
   'user_role_changed',
 ];
 const ORIGINAL_TARGETS = ['user', 'report', 'restriction'];
+// What migration 025 appended. Later migrations append further members, so
+// 025's own MODIFY is pinned to its list, not to the current ADMIN_ACTIONS.
+const ACTIONS_ADDED_BY_025 = [
+  'community_suspended',
+  'community_restored',
+  'community_updated',
+];
+const ACTIONS_AFTER_025 = [...ORIGINAL_ACTIONS, ...ACTIONS_ADDED_BY_025];
 
 describe('migration 025 (community suspension)', () => {
   const migration = read(
@@ -46,7 +54,7 @@ describe('migration 025 (community suspension)', () => {
         'ADD CONSTRAINT fk_communities_suspended_by FOREIGN KEY (suspended_by) REFERENCES users(id) ON DELETE SET NULL; ' +
         'CREATE INDEX idx_communities_suspended_at ON communities (suspended_at); ' +
         'ALTER TABLE admin_actions ' +
-        `MODIFY COLUMN action ENUM( ${enumList(ADMIN_ACTIONS)} ) NOT NULL, ` +
+        `MODIFY COLUMN action ENUM( ${enumList(ACTIONS_AFTER_025)} ) NOT NULL, ` +
         `MODIFY COLUMN target_type ENUM(${enumList(ADMIN_ACTION_TARGETS)}) NOT NULL;`,
     );
   });
@@ -55,11 +63,9 @@ describe('migration 025 (community suspension)', () => {
     expect(ADMIN_ACTIONS.slice(0, ORIGINAL_ACTIONS.length)).toEqual(
       ORIGINAL_ACTIONS,
     );
-    expect(ADMIN_ACTIONS.slice(ORIGINAL_ACTIONS.length)).toEqual([
-      'community_suspended',
-      'community_restored',
-      'community_updated',
-    ]);
+    expect(
+      ADMIN_ACTIONS.slice(ORIGINAL_ACTIONS.length, ACTIONS_AFTER_025.length),
+    ).toEqual(ACTIONS_ADDED_BY_025);
     expect(ADMIN_ACTION_TARGETS).toEqual([...ORIGINAL_TARGETS, 'community']);
     const original = read(
       '../../../../data/migrations/004_create_admin_actions.sql',

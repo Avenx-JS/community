@@ -164,6 +164,94 @@ describe('AuditLogService', () => {
     ).toThrow('Invalid audit metadata field: expires_at');
   });
 
+  describe('report assignment actions', () => {
+    const leaked = {
+      assignee_id: 'admin2-id',
+      email: 'private@example.com',
+      resolution_note: 'internal',
+      previous_assignee: 'admin',
+      unexpected: 'discard me',
+    };
+
+    it.each(['report_assigned', 'report_unassigned'] as const)(
+      'writes %s against the report with only assignee_username',
+      async (action) => {
+        const calls: Array<{ sql: string; values?: unknown[] }> = [];
+        const connection = fakeConnection((sql, values) => {
+          calls.push({ sql, values });
+          return Promise.resolve(
+            sql.startsWith('SELECT username')
+              ? [actorRow, []]
+              : [{ affectedRows: 1 }, []],
+          );
+        });
+
+        await service.record(connection, {
+          actorId: 'admin-1',
+          action,
+          targetType: 'report',
+          targetId: 'report-1',
+          metadata: { assignee_username: 'second_admin', ...leaked },
+        } as unknown as AuditEntry);
+
+        expect(calls[1]?.values).toEqual([
+          expect.any(String),
+          'admin-1',
+          'moderator',
+          action,
+          'report',
+          'report-1',
+          JSON.stringify({ assignee_username: 'second_admin' }),
+        ]);
+      },
+    );
+
+    it.each(['report_assigned', 'report_unassigned'] as const)(
+      'accepts a username snapshot of up to 50 characters for %s',
+      (action) => {
+        const entry = (assignee_username: string) => ({
+          actorId: 'admin-1',
+          action,
+          targetType: 'report' as const,
+          targetId: 'report-1',
+          metadata: { assignee_username },
+        });
+        expect(buildAuditMetadata(entry('a'.repeat(50)))).toEqual({
+          assignee_username: 'a'.repeat(50),
+        });
+        // A deleted account's placeholder, deleted_<uuid>, has hyphens.
+        expect(
+          buildAuditMetadata(
+            entry('deleted_123e4567-e89b-12d3-a456-426614174000'),
+          ),
+        ).not.toBeNull();
+        for (const bad of ['', 'a'.repeat(51), 'has space', 'a\u0000b']) {
+          expect(() => buildAuditMetadata(entry(bad))).toThrow(
+            'Invalid audit metadata field: assignee_username',
+          );
+        }
+        expect(() =>
+          buildAuditMetadata({
+            ...entry('x'),
+            metadata: { assignee_username: 42 },
+          } as never),
+        ).toThrow('Invalid audit metadata field: assignee_username');
+      },
+    );
+
+    it('stores NULL metadata when no assignee is given', () => {
+      expect(
+        buildAuditMetadata({
+          actorId: 'admin-1',
+          action: 'report_unassigned',
+          targetType: 'report',
+          targetId: 'report-1',
+          metadata: {},
+        }),
+      ).toBeNull();
+    });
+  });
+
   describe('community actions', () => {
     // Keys a caller might pass through; none may be stored for any action.
     const leaked = {

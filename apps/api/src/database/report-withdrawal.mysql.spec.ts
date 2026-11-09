@@ -59,6 +59,7 @@ integration('report withdrawal (MySQL)', () => {
     (
       await queue.findAll(
         Object.assign(new ListReportsDto(), { limit: 100, ...query }),
+        'admin',
       )
     ).items.map((item) => item.id);
 

@@ -20,6 +20,9 @@ export const ADMIN_ACTIONS = [
   'community_suspended',
   'community_restored',
   'community_updated',
+  // 031_add_report_assignment.
+  'report_assigned',
+  'report_unassigned',
 ] as const;
 
 export type AdminAction = (typeof ADMIN_ACTIONS)[number];
@@ -123,10 +126,23 @@ export type AuditEntry =
         // Which fields changed, never their old or new values.
         fields?: string;
       };
+    }
+  // assignee_username snapshots the account the report was assigned to, or,
+  // for report_unassigned, the one it was taken from.
+  | {
+      actorId: string;
+      action: 'report_assigned' | 'report_unassigned';
+      targetType: 'report';
+      targetId: string;
+      metadata?: {
+        assignee_username?: string;
+      };
     };
 
 // communities.name is VARCHAR(50) with the route-name character set.
 const COMMUNITY_NAME = /^[A-Za-z0-9_-]{1,50}$/;
+// users.username is VARCHAR(50); a deleted account's placeholder adds hyphens.
+const USERNAME_SNAPSHOT = /^[A-Za-z0-9_-]{1,50}$/;
 // The suspension reason, bounded like a restriction reason.
 const MAX_REASON_LENGTH = 2000;
 
@@ -249,6 +265,17 @@ function communityNameValue(
   return value;
 }
 
+function usernameSnapshotValue(
+  metadata: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const value = requiredString(metadata, key);
+  if (value !== undefined && !USERNAME_SNAPSHOT.test(value)) {
+    throw new TypeError(`Invalid audit metadata field: ${key}`);
+  }
+  return value;
+}
+
 function reasonValue(metadata: Record<string, unknown>): string | undefined {
   const value = requiredString(metadata, 'reason');
   if (
@@ -351,6 +378,12 @@ export function buildAuditMetadata(
       const fields = fieldsValue(metadata);
       if (communityName !== undefined) result.community_name = communityName;
       if (fields !== undefined) result.fields = fields;
+      break;
+    }
+    case 'report_assigned':
+    case 'report_unassigned': {
+      const assignee = usernameSnapshotValue(metadata, 'assignee_username');
+      if (assignee !== undefined) result.assignee_username = assignee;
       break;
     }
   }
