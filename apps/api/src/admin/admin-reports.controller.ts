@@ -29,9 +29,11 @@ import {
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
 import { AdminReportsService } from './admin-reports.service';
 import { ADMIN_ONLY } from './admin.openapi';
+import { NoQueryParamsGuard } from '../common/no-query-params.guard';
 import {
   AdminReportDetailResponse,
   AdminReportListResponse,
+  ReportQueueStatsResponse,
 } from './admin.responses';
 import { AssignReportDto } from './dto/assign-report.dto';
 import { ListReportsDto } from './dto/list-reports.dto';
@@ -62,6 +64,27 @@ export class AdminReportsController {
     @Req() request: AdminAuthenticatedRequest,
   ) {
     return this.reportsService.findAll(query, request.user.id);
+  }
+
+  // Must stay above GET :id: SafeRouteParamPipe('id') accepts "stats", so a
+  // later declaration would answer with a confusing 404 for report "stats".
+  // admin-reports.controller.spec.ts pins the order.
+  @Get('stats')
+  @UseGuards(NoQueryParamsGuard)
+  @ApiOperation({
+    summary: 'Count the live report queue',
+    description:
+      'The backlog as it stands: what is waiting, how it is spread, and the ' +
+      'oldest open report. Takes no query parameters. Counts apply the ' +
+      "queue's default visibility, so open equals the total of " +
+      '`GET /admin/reports?status=open`. History over a window (submission ' +
+      'rates, outcomes, review latency) is `GET /admin/analytics/moderation`.',
+  })
+  @ApiAuthenticated(ADMIN_ONLY)
+  @ApiOkResponse({ type: ReportQueueStatsResponse })
+  @ApiErrorResponses({ 400: 'The route takes no query parameters.' })
+  queueStats(@Req() request: AdminAuthenticatedRequest) {
+    return this.reportsService.queueStats(request.user.id);
   }
 
   @Get(':id')

@@ -21,10 +21,12 @@ import type {
   AdminActionItem,
   AdminActionList,
 } from './admin-audit-log.service';
-import type {
-  AdminReportDetail,
-  AdminReportList,
-  AdminReportListItem,
+import {
+  REPORT_QUEUE_STATS_SCOPES,
+  type AdminReportDetail,
+  type AdminReportList,
+  type AdminReportListItem,
+  type ReportQueueStats,
 } from './admin-reports.service';
 import type {
   AdminRestriction,
@@ -431,6 +433,83 @@ export class AdminReportDetailResponse
 
   @ApiProperty({ type: [AdminPriorResolutionResponse] })
   prior_resolutions_against_user!: AdminPriorResolutionResponse[];
+}
+
+// The live queue. Counts and one timestamp only: no report id, username or
+// other per-row datum.
+export class ReportQueueStatsMetaResponse {
+  @ApiProperty({
+    type: 'object',
+    description: 'Every figure is point_in_time: the queue as it stands.',
+    properties: Object.fromEntries(
+      Object.keys(REPORT_QUEUE_STATS_SCOPES).map((key) => [
+        key,
+        { type: 'string', enum: ['point_in_time'] },
+      ]),
+    ),
+    required: Object.keys(REPORT_QUEUE_STATS_SCOPES),
+  })
+  scopes!: Record<string, MetricScope>;
+}
+
+export class ReportQueueStatsResponse implements ReportQueueStats {
+  @ApiProperty({
+    type: 'integer',
+    description: 'Open reports, as the queue shows them (not withdrawn).',
+  })
+  open!: number;
+
+  @ApiProperty({
+    type: 'integer',
+    description: 'Reports under review, as the queue shows them.',
+  })
+  under_review!: number;
+
+  @ApiProperty({
+    type: 'integer',
+    description: 'Open reports with no assignee: the triage number.',
+  })
+  unassigned_open!: number;
+
+  @ApiProperty({
+    type: 'integer',
+    description: 'Open reports assigned to you.',
+  })
+  assigned_to_me_open!: number;
+
+  @ApiProperty({
+    type: 'integer',
+    description:
+      'Open reports their reporter withdrew. Not in any other figure, and ' +
+      'not work: a withdrawn report cannot be transitioned.',
+  })
+  withdrawn_open!: number;
+
+  @ApiProperty({
+    ...countsByKey(REPORT_REASONS),
+    description:
+      'Open reports per reason; every reason present, summing to open.',
+  })
+  by_reason!: Record<ReportReason, number>;
+
+  @ApiProperty({
+    ...countsByKey(REPORT_TARGET_TYPES),
+    description:
+      'Open reports per target type; every type present, summing to open.',
+  })
+  by_target_type!: Record<ReportTargetType, number>;
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description:
+      'When the oldest open report was filed; null when none is open.',
+  })
+  oldest_open_at!: string | null;
+
+  @ApiProperty({ type: ReportQueueStatsMetaResponse })
+  meta!: ReportQueueStatsMetaResponse;
 }
 
 // Audit log

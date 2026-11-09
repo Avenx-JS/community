@@ -257,6 +257,68 @@ describe('Admin reports API (e2e)', () => {
           unknown,
         ]);
       }
+      // GET /admin/reports/stats: unaliased statements over user_reports,
+      // evaluated against the same fixtures as the queue, by the predicates
+      // their SQL states, so a mismatch between the two shows up as numbers.
+      // The detail route's per-account aggregates read the same table.
+      if (
+        /FROM user_reports\s+WHERE/.test(sql) &&
+        !sql.includes('reported_user_id')
+      ) {
+        const where = sql.replace(/\s+/g, ' ');
+        let rows = reports.filter((row) => {
+          if (
+            where.includes('withdrawn_at IS NULL') &&
+            row.withdrawn_at !== null
+          )
+            return false;
+          if (
+            where.includes('withdrawn_at IS NOT NULL') &&
+            row.withdrawn_at === null
+          )
+            return false;
+          if (
+            where.includes("status IN ('open', 'under_review')") &&
+            !['open', 'under_review'].includes(row.status)
+          )
+            return false;
+          if (where.includes("status = 'open'") && row.status !== 'open')
+            return false;
+          if (where.includes('assigned_to IS NULL') && row.assigned_to !== null)
+            return false;
+          if (
+            where.includes('assigned_to = ?') &&
+            row.assigned_to !== values[0]
+          )
+            return false;
+          return true;
+        });
+        const group = /GROUP BY (\w+)/.exec(where)?.[1] as
+          'status' | 'reason' | 'target_type' | undefined;
+        if (group) {
+          const counts = new Map<string, number>();
+          for (const row of rows) {
+            counts.set(row[group], (counts.get(row[group]) ?? 0) + 1);
+          }
+          return Promise.resolve([
+            [...counts].map(([key, total]) => ({ key, total })),
+            [],
+          ] as [unknown, unknown]);
+        }
+        if (where.includes('ORDER BY created_at ASC LIMIT 1')) {
+          rows = [...rows].sort((a, b) =>
+            a.created_at.localeCompare(b.created_at),
+          );
+          return Promise.resolve([
+            rows.slice(0, 1).map((row) => ({ created_at: row.created_at })),
+            [],
+          ] as [unknown, unknown]);
+        }
+        return Promise.resolve([[{ total: rows.length }], []] as [
+          unknown,
+          unknown,
+        ]);
+      }
       if (sql.startsWith('SELECT COUNT(*) AS total')) {
         return Promise.resolve([
           [{ total: matchingReports(sql, values).length }],
@@ -1503,6 +1565,231 @@ describe('Admin reports API (e2e)', () => {
           assigned_at: null,
         });
       });
+    });
+  });
+
+  describe('GET /admin/reports/stats', () => {
+    interface Stats {
+      open: number;
+      under_review: number;
+      unassigned_open: number;
+      assigned_to_me_open: number;
+      withdrawn_open: number;
+      by_reason: Record<string, number>;
+      by_target_type: Record<string, number>;
+      oldest_open_at: string | null;
+      meta: { scopes: Record<string, string> };
+    }
+    const statsAs = async (token = 'admin-token') =>
+      (
+        await request(app.getHttpServer())
+          .get('/admin/reports/stats')
+          .set('Authorization', `Bearer ${token}`)
+          .expect(200)
+      ).body as Stats;
+    const totalOf = async (query: string, token = 'admin-token') =>
+      (
+        (
+          await request(app.getHttpServer())
+            .get(`/admin/reports?${query}`)
+            .set('Authorization', `Bearer ${token}`)
+            .expect(200)
+        ).body as AdminListResponse
+      ).total;
+    const sum = (counts: Record<string, number>) =>
+      Object.values(counts).reduce((total, count) => total + count, 0);
+    const report = (id: string) => reports.find((row) => row.id === id)!;
+
+    // A queue with every kind of state in it: the fixture's 12 open and 13
+    // resolved reports, plus review, withdrawal, assignment and other targets.
+    const mixQueue = () => {
+      report('report-02').status = 'under_review';
+      report('report-03').status = 'under_review';
+      report('report-04').withdrawn_at = '2026-10-27T08:00:00.000Z';
+      report('report-01').withdrawn_at = '2026-10-27T08:00:00.000Z';
+      Object.assign(report('report-05'), {
+        assigned_to: 'admin-id',
+        assigned_to_username: 'admin',
+        assigned_at: '2026-10-27T09:00:00.000Z',
+      });
+      Object.assign(report('report-06'), {
+        assigned_to: 'admin2-id',
+        assigned_to_username: 'second_admin',
+        assigned_at: '2026-10-27T09:00:00.000Z',
+      });
+      Object.assign(report('report-07'), {
+        assigned_to: 'admin2-id',
+        assigned_to_username: 'second_admin',
+        assigned_at: '2026-10-27T09:00:00.000Z',
+      });
+      report('report-08').target_type = 'post';
+      report('report-09').target_type = 'community';
+      report('report-10').reason = 'self_harm';
+    };
+
+    it('requires an administrator', async () => {
+      await request(app.getHttpServer())
+        .get('/admin/reports/stats')
+        .expect(401);
+      await request(app.getHttpServer())
+        .get('/admin/reports/stats')
+        .set('Authorization', 'Bearer user-token')
+        .expect(403);
+      await statsAs();
+    });
+
+    // SafeRouteParamPipe('id') accepts "stats": declared after GET :id the
+    // route would look up report "stats" and answer 404.
+    it('is its own route, never a lookup of report "stats"', async () => {
+      const stats = await statsAs();
+      expect(stats).toHaveProperty('open');
+      expect(stats).not.toHaveProperty('id');
+      expect(poolCalls.some(({ sql }) => sql.includes('ur.description'))).toBe(
+        false,
+      );
+    });
+
+    it.each([
+      'status=open',
+      'from=2026-01-01T00:00:00Z',
+      'withdrawn=include',
+      'unexpected=1',
+    ])('answers ?%s with 400, running no query', async (query) => {
+      await request(app.getHttpServer())
+        .get(`/admin/reports/stats?${query}`)
+        .set('Authorization', 'Bearer admin-token')
+        .expect(400);
+      expect(poolCalls).toHaveLength(0);
+    });
+
+    // The bar this endpoint has to clear: a figure that differs from the
+    // queue the moderator is looking at is worse than no figure.
+    it('matches the queue’s own totals for the same data', async () => {
+      mixQueue();
+      const stats = await statsAs();
+
+      expect(stats.open).toBe(await totalOf('status=open'));
+      expect(stats.under_review).toBe(await totalOf('status=under_review'));
+      expect(stats.unassigned_open).toBe(
+        await totalOf('status=open&assigned=none'),
+      );
+      expect(stats.assigned_to_me_open).toBe(
+        await totalOf('status=open&assigned=me'),
+      );
+      expect(stats.withdrawn_open).toBe(
+        await totalOf('status=open&withdrawn=only'),
+      );
+      for (const [reason, count] of Object.entries(stats.by_reason)) {
+        expect([reason, count]).toEqual([
+          reason,
+          await totalOf(`status=open&reason=${reason}`),
+        ]);
+      }
+      for (const [type, count] of Object.entries(stats.by_target_type)) {
+        expect([type, count]).toEqual([
+          type,
+          await totalOf(`status=open&target_type=${type}`),
+        ]);
+      }
+      expect(sum(stats.by_reason)).toBe(stats.open);
+      expect(sum(stats.by_target_type)).toBe(stats.open);
+
+      // And the values themselves, for this mix.
+      expect(stats).toMatchObject({
+        open: 8,
+        under_review: 2,
+        unassigned_open: 5,
+        assigned_to_me_open: 1,
+        withdrawn_open: 2,
+      });
+    });
+
+    it('reports the oldest open report the queue shows', async () => {
+      mixQueue();
+      const stats = await statsAs();
+      const oldest = (
+        await request(app.getHttpServer())
+          .get('/admin/reports?status=open&sort=oldest&limit=1')
+          .set('Authorization', 'Bearer admin-token')
+          .expect(200)
+      ).body as AdminListResponse;
+      expect(stats.oldest_open_at).toBe(oldest.items[0].created_at);
+      // report-01 is older but withdrawn, so it is not in the queue.
+      expect(stats.oldest_open_at).toBe(report('report-05').created_at);
+    });
+
+    it('answers an empty queue with zeros and a null oldest_open_at', async () => {
+      reports.splice(0, reports.length);
+      const stats = await statsAs();
+      expect(stats).toEqual({
+        open: 0,
+        under_review: 0,
+        unassigned_open: 0,
+        assigned_to_me_open: 0,
+        withdrawn_open: 0,
+        by_reason: {
+          spam: 0,
+          harassment: 0,
+          hate_speech: 0,
+          sexual_content: 0,
+          self_harm: 0,
+          impersonation: 0,
+          other: 0,
+        },
+        by_target_type: { user: 0, post: 0, comment: 0, community: 0 },
+        oldest_open_at: null,
+        meta: { scopes: expect.any(Object) as unknown },
+      });
+      expect(Object.keys(stats)).toContain('oldest_open_at');
+    });
+
+    it('gives each administrator their own assigned_to_me_open', async () => {
+      mixQueue();
+      expect((await statsAs('admin-token')).assigned_to_me_open).toBe(1);
+      expect((await statsAs('admin2-token')).assigned_to_me_open).toBe(2);
+      const binding = poolCalls.filter(({ sql }) =>
+        sql.includes('assigned_to = ?'),
+      );
+      expect(binding.map(({ values }) => values)).toEqual([
+        ['admin-id'],
+        ['admin2-id'],
+      ]);
+    });
+
+    it('labels every figure point_in_time', async () => {
+      const { meta, ...figures } = await statsAs();
+      expect(Object.keys(meta.scopes).sort()).toEqual(
+        Object.keys(figures).sort(),
+      );
+      expect(new Set(Object.values(meta.scopes))).toEqual(
+        new Set(['point_in_time']),
+      );
+    });
+
+    it('serialises counts and one timestamp only, never a per-row datum', async () => {
+      mixQueue();
+      const response = await request(app.getHttpServer())
+        .get('/admin/reports/stats')
+        .set('Authorization', 'Bearer admin-token')
+        .expect(200);
+      expect(response.text).not.toMatch(
+        /report-\d|reporter_|target_user|target-id|admin2?-id|second_admin|"admin"|@|email|password|token/,
+      );
+      const scalars = Object.entries(response.body as Stats).filter(
+        ([key]) => !['by_reason', 'by_target_type', 'meta'].includes(key),
+      );
+      for (const [key, value] of scalars) {
+        expect([key, typeof value]).toEqual([
+          key,
+          key === 'oldest_open_at' ? 'string' : 'number',
+        ]);
+      }
+    });
+
+    it('leaves the queue routes answering as before', async () => {
+      await adminRequest('/admin/reports').expect(200);
+      await adminRequest('/admin/reports/report-02').expect(200);
+      await adminRequest('/admin/reports/no-such-report').expect(404);
     });
   });
 });

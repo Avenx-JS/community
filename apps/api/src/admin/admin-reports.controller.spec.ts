@@ -15,7 +15,10 @@ const handlers = Object.getOwnPropertyNames(prototype).filter(
 );
 const routes = handlers.map((name) => ({
   name,
-  method: Reflect.getMetadata(METHOD_METADATA, prototype[name]) as number,
+  method: Reflect.getMetadata(
+    METHOD_METADATA,
+    prototype[name],
+  ) as RequestMethod,
   path: Reflect.getMetadata(PATH_METADATA, prototype[name]) as string,
 }));
 
@@ -51,7 +54,20 @@ describe('AdminReportsController', () => {
       expect(path).not.toMatch(/resolve|dismiss/);
     }
     expect(routes.map(({ path }) => path).sort()).toEqual(
-      ['/', ':id', ':id', ':id/assign', ':id/assign'].sort(),
+      ['/', 'stats', ':id', ':id', ':id/assign', ':id/assign'].sort(),
     );
+  });
+
+  // Nest matches in declaration order, and SafeRouteParamPipe('id') accepts
+  // "stats", so GET stats declared after GET :id would be read as report
+  // "stats" and answer 404. The e2e suite checks the same thing over HTTP.
+  it('declares GET stats before GET :id', () => {
+    const gets = routes.filter(({ method }) => method === RequestMethod.GET);
+    expect(gets.map(({ path }) => path)).toEqual(['/', 'stats', ':id']);
+    expect(gets.map(({ name }) => name)).toEqual([
+      'findAll',
+      'queueStats',
+      'findOne',
+    ]);
   });
 });

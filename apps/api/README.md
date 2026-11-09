@@ -680,6 +680,11 @@ writes nothing, and audits nothing. Query parameters, defaults, and `400`
 rules are identical to `/admin/analytics/users`; both routes share
 `AnalyticsQueryDto` and `resolveAnalyticsRange`.
 
+This endpoint reports history over a window. The live queue (what is waiting now,
+unassigned, assigned to you, and the oldest open report, all matching the queue's
+own totals) is [`GET /admin/reports/stats`](#queue-statistics-get-adminreportsstats).
+Each kind of figure belongs on one of the two, never both.
+
 **Submitted and decided reports are different populations.** A report
 submitted last month and decided today counts in `reports_reviewed` and not in
 `reports_submitted`. The two figures come from different columns and are not
@@ -1211,6 +1216,102 @@ every later update of such a row.
 Assignment is checked when it is made. An administrator who is later demoted
 keeps the reports already assigned to them until someone reassigns or unassigns
 them.
+
+#### Queue statistics: `GET /admin/reports/stats`
+
+The question a moderator on shift asks: how much work is waiting right now, how is
+it spread, and how old is the oldest untouched item. The queue route cannot answer
+that without fetching every page.
+
+**This endpoint reports the live queue; [`GET
+/admin/analytics/moderation`](#admin-moderation-analytics) reports history over a
+window.** Submission rates, outcome mixes, resolved and rejected totals and review
+latency belong there and must not be added here. A second endpoint reporting the
+same figures under another path would only add its own tests, shape and drift.
+Lifetime resolved/rejected totals say nothing about today's work, and per-reporter
+or per-reported-account breakdowns are a moderation profile with their own privacy
+questions (`GET /admin/users/:id` already shows an account's report counts). Both
+are excluded on purpose.
+
+It requires a platform administrator, like every route here. **It takes no query
+parameters:** a time range would turn it into a duplicate of the analytics endpoint,
+so any parameter returns `400` (`NoQueryParamsGuard`, as on
+`GET /communities/:name/stats`). It is declared before `GET /admin/reports/:id`,
+because `SafeRouteParamPipe('id')` accepts `stats` and the detail route would
+otherwise answer with a confusing `404`. `admin-reports.controller.spec.ts` and the
+e2e suite pin the order.
+
+```json
+{
+  "open": 8,
+  "under_review": 2,
+  "unassigned_open": 5,
+  "assigned_to_me_open": 1,
+  "withdrawn_open": 2,
+  "by_reason": {
+    "spam": 4, "harassment": 3, "hate_speech": 0, "sexual_content": 0,
+    "self_harm": 1, "impersonation": 0, "other": 0
+  },
+  "by_target_type": { "user": 6, "post": 1, "comment": 0, "community": 1 },
+  "oldest_open_at": "2026-01-05T00:00:00.000Z",
+  "meta": { "scopes": { "open": "point_in_time", "…": "point_in_time" } }
+}
+```
+
+| Field | Definition |
+| --- | --- |
+| `open` | Reports with `status = 'open'` that are not withdrawn |
+| `under_review` | Reports with `status = 'under_review'` that are not withdrawn |
+| `unassigned_open` | Of `open`, those with no assignee (`assigned_to IS NULL`): the triage number |
+| `assigned_to_me_open` | Of `open`, those assigned to the caller, bound from the bearer token only |
+| `withdrawn_open` | Reports their reporter withdrew (always `open`), counted in no other figure |
+| `by_reason` | `open` per reason. Every `REPORT_REASONS` value is present, `0` when none, and the values sum to `open` |
+| `by_target_type` | `open` per target type. Every type is present, `0` when none, and the values sum to `open` |
+| `oldest_open_at` | `created_at` of the oldest report counted in `open`. `null` when there is none, and always present as a key |
+| `meta.scopes` | Every figure is `point_in_time`, as in the analytics responses |
+
+**The counts must match the queue the moderator is looking at.** Every figure
+except `withdrawn_open` applies the queue's default visibility (`withdrawn=exclude`).
+So `open` equals the `total` of `GET /admin/reports?status=open`, `unassigned_open`
+equals `?status=open&assigned=none`, `assigned_to_me_open` equals
+`?status=open&assigned=me`, each `by_reason` and `by_target_type` entry equals the
+matching `reason=` or `target_type=` total, and `withdrawn_open` equals
+`?status=open&withdrawn=only`. The e2e suite and
+`report-queue-stats.mysql.spec.ts` assert each of these by calling both routes. A
+statistics endpoint that disagrees with the queue is worse than none. Keep the two
+in step if the queue's default visibility ever changes.
+
+**Withdrawn reports** are out of every figure but `withdrawn_open`. That figure is
+not work: a withdrawn report cannot be transitioned (`PATCH` returns `409`). It
+shows how much the default queue is hiding. The analytics endpoint's
+`point_in_time.backlog_by_status` predates withdrawal and still counts withdrawn
+reports, so the two `open` figures can differ by `withdrawn_open`.
+
+The response holds counts and one timestamp only: no report ID, username, email or
+other per-row data. No clock or window is computed; every figure is what the table
+holds. It runs seven small statements in parallel, each on its own index, rather
+than one query of correlated subqueries, following `AdminAnalyticsService`:
+
+| Figure | Served by |
+| --- | --- |
+| `open`, `under_review` | `idx_user_reports_status_created` |
+| `by_reason`, `by_target_type` | `idx_user_reports_status_created` (`status = 'open'`), grouped on the rows it yields |
+| `unassigned_open`, `assigned_to_me_open` | `idx_user_reports_assigned (assigned_to, status, created_at)` |
+| `withdrawn_open` | `idx_user_reports_status_created` |
+| `oldest_open_at` | `idx_user_reports_status_created`, read in order with `LIMIT 1`, not a `MIN` over every open row |
+
+`withdrawn_at` is in none of these indexes, so each one reads the matching open
+rows. That is the size of the backlog, not of the table. No index was added for
+`by_target_type`: `idx_user_reports_target_type_created` leads on `target_type`,
+not `status`, so the status index is the better path. `report-queue-stats.mysql.spec.ts`
+asserts that no statement scans.
+
+**Rate limiting.** The global read buckets apply; `/admin` is not exempt. A
+dashboard is likely to poll this route. If one polls hard enough to meet the
+120-per-IP-per-minute read limit, raise it explicitly with `API_READ_IP_MAX` /
+`API_READ_IP_WINDOW_SECONDS` ([API abuse controls](#api-abuse-controls-and-request-bounds))
+rather than exempting the route or adding a cache, which nothing else in this
+project has.
 
 ### Account restrictions (suspensions and bans)
 

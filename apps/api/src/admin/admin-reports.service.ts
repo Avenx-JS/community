@@ -14,12 +14,17 @@ import type {
 } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import {
+  REPORT_REASONS,
+  REPORT_TARGET_TYPES,
+} from '../reports/report.constants';
 import type {
   ReportContextType,
   ReportReason,
   ReportStatus,
   ReportTargetType,
 } from '../reports/report.constants';
+import type { MetricScope } from './admin-analytics.service';
 import { REPORT_TARGET_JOINS_SQL } from '../reports/report-target.sql';
 import { AuditLogService } from './audit-log.service';
 import type { PlatformRole } from '../users/users.service';
@@ -179,6 +184,75 @@ const REPORT_TARGET_LABEL_SQL = `CASE ur.target_type
 // to open the report they own; admin-reports.controller.spec.ts keeps the two
 // in step.
 export const REPORT_ASSIGNEE_ROLES: readonly PlatformRole[] = ['admin'];
+
+/**
+ * The live queue, as GET /admin/reports/stats reports it. Every figure is a
+ * count of what is waiting now; history over a window (submission rates,
+ * outcome mixes, review latency) is GET /admin/analytics/moderation's, and
+ * must not be added here.
+ */
+export interface ReportQueueStats {
+  open: number;
+  under_review: number;
+  unassigned_open: number;
+  assigned_to_me_open: number;
+  withdrawn_open: number;
+  by_reason: Record<ReportReason, number>;
+  by_target_type: Record<ReportTargetType, number>;
+  oldest_open_at: string | null;
+  meta: { scopes: Record<string, MetricScope> };
+}
+
+// Every figure is the queue as it stands; none takes a range.
+export const REPORT_QUEUE_STATS_SCOPES: Record<
+  Exclude<keyof ReportQueueStats, 'meta'>,
+  MetricScope
+> = {
+  open: 'point_in_time',
+  under_review: 'point_in_time',
+  unassigned_open: 'point_in_time',
+  assigned_to_me_open: 'point_in_time',
+  withdrawn_open: 'point_in_time',
+  by_reason: 'point_in_time',
+  by_target_type: 'point_in_time',
+  oldest_open_at: 'point_in_time',
+};
+
+// The queue's own default visibility (GET /admin/reports, withdrawn=exclude).
+// Every figure but withdrawn_open applies it, so each one equals the total the
+// queue shows for the matching filter.
+const QUEUE_VISIBLE_SQL = 'withdrawn_at IS NULL';
+
+interface KeyCountRow extends RowDataPacket {
+  key: string;
+  total: number | string;
+}
+
+interface CountRow extends RowDataPacket {
+  total: number | string;
+}
+
+interface OldestRow extends RowDataPacket {
+  created_at: Date | string;
+}
+
+function keyedCounts<K extends string>(
+  keys: readonly K[],
+  rows: KeyCountRow[],
+): Record<K, number> {
+  const counts = Object.fromEntries(keys.map((key) => [key, 0])) as Record<
+    K,
+    number
+  >;
+  for (const row of rows) {
+    if (row.key in counts) {
+      counts[row.key as K] = Number(row.total);
+    }
+  }
+  return counts;
+}
+
+const countOf = (rows: CountRow[]) => Number(rows[0]?.total ?? 0);
 
 // A report with no assignee reads as unassigned whatever assigned_at holds: a
 // hard-deleted assignee leaves assigned_at behind (ON DELETE SET NULL), and an
@@ -372,6 +446,82 @@ export class AdminReportsService {
         to: query.to ?? null,
         sort: query.sort ?? 'new',
       },
+    };
+  }
+
+  // Small, separately indexed statements rather than one query of correlated
+  // subqueries, as in AdminAnalyticsService: each can use its own index. No
+  // clock or window is computed here; every figure is what the table holds.
+  async queueStats(callerId: string): Promise<ReportQueueStats> {
+    const [
+      [statusRows],
+      [reasonRows],
+      [targetTypeRows],
+      [unassignedRows],
+      [mineRows],
+      [withdrawnRows],
+      [oldestRows],
+    ] = await Promise.all([
+      // idx_user_reports_status_created.
+      this.pool.execute<KeyCountRow[]>(
+        `SELECT status AS \`key\`, COUNT(*) AS total FROM user_reports
+         WHERE status IN ('open', 'under_review') AND ${QUEUE_VISIBLE_SQL}
+         GROUP BY status`,
+        [],
+      ),
+      this.pool.execute<KeyCountRow[]>(
+        `SELECT reason AS \`key\`, COUNT(*) AS total FROM user_reports
+         WHERE status = 'open' AND ${QUEUE_VISIBLE_SQL}
+         GROUP BY reason`,
+        [],
+      ),
+      this.pool.execute<KeyCountRow[]>(
+        `SELECT target_type AS \`key\`, COUNT(*) AS total FROM user_reports
+         WHERE status = 'open' AND ${QUEUE_VISIBLE_SQL}
+         GROUP BY target_type`,
+        [],
+      ),
+      // idx_user_reports_assigned, for both assignment counts.
+      this.pool.execute<CountRow[]>(
+        `SELECT COUNT(*) AS total FROM user_reports
+         WHERE assigned_to IS NULL AND status = 'open' AND ${QUEUE_VISIBLE_SQL}`,
+        [],
+      ),
+      this.pool.execute<CountRow[]>(
+        `SELECT COUNT(*) AS total FROM user_reports
+         WHERE assigned_to = ? AND status = 'open' AND ${QUEUE_VISIBLE_SQL}`,
+        [callerId],
+      ),
+      // What withdrawn=only would list. A withdrawn report always has status
+      // open, and is out of every figure above.
+      this.pool.execute<CountRow[]>(
+        `SELECT COUNT(*) AS total FROM user_reports
+         WHERE status = 'open' AND withdrawn_at IS NOT NULL`,
+        [],
+      ),
+      // The first row in idx_user_reports_status_created order that the queue
+      // shows, rather than a MIN that would read every open row.
+      this.pool.execute<OldestRow[]>(
+        `SELECT created_at FROM user_reports
+         WHERE status = 'open' AND ${QUEUE_VISIBLE_SQL}
+         ORDER BY created_at ASC LIMIT 1`,
+        [],
+      ),
+    ]);
+
+    const statuses = keyedCounts(['open', 'under_review'] as const, statusRows);
+    return {
+      open: statuses.open,
+      under_review: statuses.under_review,
+      unassigned_open: countOf(unassignedRows),
+      assigned_to_me_open: countOf(mineRows),
+      withdrawn_open: countOf(withdrawnRows),
+      by_reason: keyedCounts(REPORT_REASONS, reasonRows),
+      by_target_type: keyedCounts(REPORT_TARGET_TYPES, targetTypeRows),
+      oldest_open_at: oldestRows[0]
+        ? new Date(oldestRows[0].created_at).toISOString()
+        : null,
+      meta: { scopes: { ...REPORT_QUEUE_STATS_SCOPES } },
     };
   }
 
