@@ -47,6 +47,7 @@ import { UpdatePostDto } from './dto/update-post.dto';
 import { ListPostsDto } from './dto/list-posts.dto';
 import { PostsService } from './posts.service';
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
+import { COMMUNITY_BANNED_FORBIDDEN_DOC } from '../communities/community-ban-policy.service';
 import { USER_BLOCKED_FORBIDDEN_DOC } from '../users/user-block-policy.service';
 import { CastVoteDto } from '../votes/dto/cast-vote.dto';
 import {
@@ -88,9 +89,13 @@ export class PostsController {
   @UseGuards(AuthGuard)
   @ApiOperation({
     summary: 'Create a post',
-    description: 'Link and media posts carry an HTTP(S) URL as content.',
+    description:
+      'Link and media posts carry an HTTP(S) URL as content. Refused for an ' +
+      'account banned from the community.',
   })
-  @ApiAuthenticated()
+  @ApiAuthenticated({
+    forbidden: `The caller has not accepted the community's current rules. ${COMMUNITY_BANNED_FORBIDDEN_DOC}`,
+  })
   @ApiCreatedResponse({ type: PostResponse })
   @ApiErrorResponses({
     400: 'Invalid post data.',
@@ -135,7 +140,9 @@ export class PostsController {
       'values changes nothing and leaves edited_at unchanged. A locked post ' +
       'may still be edited. Not gated on rule acceptance.',
   })
-  @ApiAuthenticated({ forbidden: 'Only the author may edit this content.' })
+  @ApiAuthenticated({
+    forbidden: `Only the author may edit this content, and not while banned from the community: editing publishes, deleting does not. ${COMMUNITY_BANNED_FORBIDDEN_DOC}`,
+  })
   @ApiRouteParam('id', 'id', 'Post ID.')
   @ApiOkResponse({ type: PostResponse })
   @ApiErrorResponses({
@@ -349,7 +356,7 @@ export class PostsController {
       'author have blocked each other.',
   })
   @ApiAuthenticated({
-    forbidden: `The caller has not accepted the community's current rules. ${USER_BLOCKED_FORBIDDEN_DOC}`,
+    forbidden: `The caller has not accepted the community's current rules. ${COMMUNITY_BANNED_FORBIDDEN_DOC} ${USER_BLOCKED_FORBIDDEN_DOC}`,
   })
   @ApiRouteParam('id', 'id', 'Post ID.')
   @ApiOkResponse({ type: VoteResponse })
@@ -475,7 +482,7 @@ export class PostsController {
       'reply.',
   })
   @ApiAuthenticated({
-    forbidden: `The caller has not accepted the community's current rules. ${USER_BLOCKED_FORBIDDEN_DOC}`,
+    forbidden: `The caller has not accepted the community's current rules. ${COMMUNITY_BANNED_FORBIDDEN_DOC} ${USER_BLOCKED_FORBIDDEN_DOC}`,
   })
   @ApiRouteParam('postId', 'id', 'Post ID.')
   @ApiCreatedResponse({ type: CommentResponse })

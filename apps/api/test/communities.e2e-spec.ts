@@ -378,6 +378,10 @@ describe('Community endpoints (e2e)', () => {
           ];
         }
 
+        // The ban lookup (CommunityBanPolicyService): no ban here.
+        if (sql.includes('FROM community_bans')) {
+          return [[], []];
+        }
         throw new Error(`Unexpected SQL query: ${sql}`);
       },
       // A transaction snapshots the mutable state and restores it on

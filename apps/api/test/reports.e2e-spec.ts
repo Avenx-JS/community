@@ -17,6 +17,7 @@ import { AuthRateLimitService } from '../src/auth/auth-rate-limit.service';
 import { AuthService, MYSQL_POOL } from '../src/auth/auth.service';
 import { ApiRateLimitInterceptor } from '../src/common/api-rate-limit.interceptor';
 import { CommunityRuleAcceptanceService } from '../src/communities/community-rule-acceptance.service';
+import { CommunityBanPolicyService } from '../src/communities/community-ban-policy.service';
 import { UserBlockPolicyService } from '../src/users/user-block-policy.service';
 import { SafeApiExceptionFilter } from '../src/common/safe-api-exception.filter';
 
@@ -585,6 +586,23 @@ describe('Report endpoint (e2e)', () => {
     expect(assert).not.toHaveBeenCalled();
     isBlocked.mockRestore();
     assert.mockRestore();
+  });
+
+  // A banned user must still be able to report what they saw, including the
+  // community that banned them: a ban never silences the safety mechanism.
+  it('accepts every target type without consulting community bans', async () => {
+    const check = jest
+      .spyOn(app.get(CommunityBanPolicyService), 'assertNotBannedOrThrow')
+      .mockRejectedValue(new Error('banned'));
+
+    await reportOf('user', 'target').expect(201);
+    await reportOf('post', 'post-1').expect(201);
+    await reportOf('comment', 'comment-1').expect(201);
+    await reportOf('community', 'a-community').expect(201);
+
+    expect(stored).toHaveLength(4);
+    expect(check).not.toHaveBeenCalled();
+    check.mockRestore();
   });
 
   it('never returns an email, an internal id or a credential', async () => {

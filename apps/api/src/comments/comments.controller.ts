@@ -36,6 +36,7 @@ import {
 import { UpdateCommentDto } from './dto/update-comment.dto';
 import { ListCommentRepliesDto } from './dto/list-comment-replies.dto';
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
+import { COMMUNITY_BANNED_FORBIDDEN_DOC } from '../communities/community-ban-policy.service';
 import { USER_BLOCKED_FORBIDDEN_DOC } from '../users/user-block-policy.service';
 import { CastVoteDto } from '../votes/dto/cast-vote.dto';
 import {
@@ -91,7 +92,9 @@ export class CommentsController {
       'is immutable. Submitting the stored content changes nothing and ' +
       'leaves edited_at unchanged. Not gated on rule acceptance.',
   })
-  @ApiAuthenticated({ forbidden: 'Only the author may edit this content.' })
+  @ApiAuthenticated({
+    forbidden: `Only the author may edit this content, and not while banned from the community: editing publishes, deleting does not. ${COMMUNITY_BANNED_FORBIDDEN_DOC}`,
+  })
   @ApiRouteParam('id', 'id', 'Comment ID.')
   @ApiOkResponse({ type: CommentReplyResponse })
   @ApiErrorResponses({
@@ -120,7 +123,7 @@ export class CommentsController {
       "the comment's author have blocked each other.",
   })
   @ApiAuthenticated({
-    forbidden: `The caller has not accepted the community's current rules. ${USER_BLOCKED_FORBIDDEN_DOC}`,
+    forbidden: `The caller has not accepted the community's current rules. ${COMMUNITY_BANNED_FORBIDDEN_DOC} ${USER_BLOCKED_FORBIDDEN_DOC}`,
   })
   @ApiRouteParam('id', 'id', 'Comment ID.')
   @ApiOkResponse({ type: VoteResponse })

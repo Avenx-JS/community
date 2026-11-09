@@ -48,6 +48,7 @@ import { UpdateCommunityDto } from './dto/update-community.dto';
 import { UpdateNotificationPreferencesDto } from './dto/update-notification-preferences.dto';
 import { NoQueryParamsGuard } from '../common/no-query-params.guard';
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
+import { COMMUNITY_BANNED_FORBIDDEN_DOC } from './community-ban-policy.service';
 
 @ApiTags('communities')
 @Controller('communities')
@@ -187,9 +188,13 @@ export class CommunitiesController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({
     summary: 'Subscribe to a community',
-    description: 'Idempotent.',
+    description:
+      'Idempotent. Refused for an account banned from the community; ' +
+      'leaving (DELETE) never is.',
   })
-  @ApiAuthenticated()
+  @ApiAuthenticated({
+    forbidden: `The caller has not accepted the community's current rules. ${COMMUNITY_BANNED_FORBIDDEN_DOC}`,
+  })
   @ApiRouteParam('name', 'communityName', 'Exact community name.')
   @ApiNoContentResponse({ description: 'The user is subscribed.' })
   @ApiErrorResponses({

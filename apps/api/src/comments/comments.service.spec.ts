@@ -45,6 +45,10 @@ describe('CommentsService', () => {
       if (sql.includes('FROM user_blocks')) {
         return Promise.resolve([[{ blocked: 0 }], []] as [unknown, unknown]);
       }
+      // The ban lookup is answered outside the queue: no ban here.
+      if (sql.includes('FROM community_bans')) {
+        return Promise.resolve([[], []] as [unknown, unknown]);
+      }
       queries.push({ sql, values });
       return Promise.resolve([results.shift() ?? [], []] as [unknown, unknown]);
     };
@@ -244,6 +248,10 @@ describe('CommentsService.create notifications', () => {
         // The block lookup is answered outside the queue: no block here.
         if (sql.includes('FROM user_blocks')) {
           return Promise.resolve([[{ blocked: 0 }], []] as [unknown, unknown]);
+        }
+        // The ban lookup is answered outside the queue: no ban here.
+        if (sql.includes('FROM community_bans')) {
+          return Promise.resolve([[], []] as [unknown, unknown]);
         }
         queries.push({ sql, values });
         return Promise.resolve([results.shift() ?? [], []]);
@@ -573,6 +581,10 @@ describe('CommentsService.create with NotificationsService', () => {
         if (sql.includes('FROM user_blocks')) {
           return Promise.resolve([[{ blocked: 0 }], []]);
         }
+        // The ban lookup (CommunityBanPolicyService): no ban here.
+        if (sql.includes('FROM community_bans')) {
+          return Promise.resolve([[], []]);
+        }
         return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
       },
     };
@@ -679,6 +691,10 @@ describe('CommentsService.remove', () => {
         // The block lookup (UserBlockPolicyService): no block here.
         if (sql.includes('FROM user_blocks')) {
           return Promise.resolve([[{ blocked: 0 }], []]);
+        }
+        // The ban lookup (CommunityBanPolicyService): no ban here.
+        if (sql.includes('FROM community_bans')) {
+          return Promise.resolve([[], []]);
         }
         return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
       },
@@ -794,6 +810,10 @@ describe('CommentsService paginated listings', () => {
         // The block lookup is answered outside the queue: no block here.
         if (sql.includes('FROM user_blocks')) {
           return Promise.resolve([[{ blocked: 0 }], []] as [unknown, unknown]);
+        }
+        // The ban lookup is answered outside the queue: no ban here.
+        if (sql.includes('FROM community_bans')) {
+          return Promise.resolve([[], []] as [unknown, unknown]);
         }
         queries.push({ sql, values });
         return Promise.resolve([results.shift() ?? [], []]);
@@ -1084,6 +1104,10 @@ describe('CommentsService.update', () => {
         if (sql.includes('FROM user_blocks')) {
           return Promise.resolve([[{ blocked: 0 }], []]);
         }
+        // The ban lookup (CommunityBanPolicyService): no ban here.
+        if (sql.includes('FROM community_bans')) {
+          return Promise.resolve([[], []]);
+        }
         return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
       },
     };
@@ -1308,6 +1332,10 @@ describe('CommentsService.create on locked threads', () => {
         if (sql.includes('FROM user_blocks')) {
           return Promise.resolve([[{ blocked: 0 }], []]);
         }
+        // The ban lookup (CommunityBanPolicyService): no ban here.
+        if (sql.includes('FROM community_bans')) {
+          return Promise.resolve([[], []]);
+        }
         return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
       },
     };
@@ -1500,6 +1528,10 @@ describe('CommentsService removed content', () => {
       if (sql.includes('FROM user_blocks')) {
         return Promise.resolve([[{ blocked: 0 }], []]);
       }
+      // The ban lookup (CommunityBanPolicyService): no ban here.
+      if (sql.includes('FROM community_bans')) {
+        return Promise.resolve([[], []]);
+      }
       return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
     };
     const module: TestingModule = await Test.createTestingModule({
@@ -1632,6 +1664,10 @@ describe('CommentsService.create on removed content', () => {
       // The block lookup (UserBlockPolicyService): no block here.
       if (sql.includes('FROM user_blocks')) {
         return Promise.resolve([[{ blocked: 0 }], []]);
+      }
+      // The ban lookup (CommunityBanPolicyService): no ban here.
+      if (sql.includes('FROM community_bans')) {
+        return Promise.resolve([[], []]);
       }
       inserts += 1;
       return Promise.reject(new Error(`Unexpected SQL: ${sql}`));

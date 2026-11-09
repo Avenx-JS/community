@@ -5,6 +5,7 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -14,6 +15,7 @@ import type {
   RowDataPacket,
 } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { CommunityBanPolicyService } from './community-ban-policy.service';
 import {
   canModerateCommunitySql,
   isSqlTrue,
@@ -163,11 +165,16 @@ export const LISTED_COMMUNITY_ID_SQL =
 
 @Injectable()
 export class CommunitiesService {
+  private readonly bans: CommunityBanPolicyService;
+
   constructor(
     @Inject(MYSQL_POOL) private readonly pool: Pool,
     private readonly ruleAcceptance: CommunityRuleAcceptanceService,
     private readonly moderationLog: CommunityModerationLogService,
-  ) {}
+    @Optional() bans?: CommunityBanPolicyService,
+  ) {
+    this.bans = bans ?? new CommunityBanPolicyService(pool);
+  }
 
   async findAll(query: ListCommunitiesDto): Promise<CommunityListDto> {
     const page = query.page ?? 1;
@@ -265,6 +272,10 @@ export class CommunitiesService {
   // declines the rules must not be trapped in the community.
   async subscribe(name: string, userId: string): Promise<void> {
     const communityId = await this.getCommunityId(name);
+    // Without this a ban is defeated at once: banning deletes the membership,
+    // and nothing else stops an immediate rejoin. Before the rule gate, so a
+    // banned user is told the actionable fact.
+    await this.bans.assertNotBannedOrThrow(userId, communityId);
     await this.ruleAcceptance.assertAcceptedOrThrow(userId, communityId);
     await this.pool.execute<ResultSetHeader>(
       'INSERT INTO community_subscriptions (user_id, community_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE created_at = created_at',

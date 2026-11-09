@@ -14,6 +14,7 @@ import type {
   RowDataPacket,
 } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { CommunityBanPolicyService } from '../communities/community-ban-policy.service';
 import { activeCommunitySql } from '../common/community-visibility';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { UserBlockPolicyService } from '../users/user-block-policy.service';
@@ -74,13 +75,16 @@ export const SCORE_SQL =
 @Injectable()
 export class VotesService {
   private readonly blocks: UserBlockPolicyService;
+  private readonly bans: CommunityBanPolicyService;
 
   constructor(
     @Inject(MYSQL_POOL) private readonly pool: Pool,
     private readonly ruleAcceptance: CommunityRuleAcceptanceService,
     @Optional() blocks?: UserBlockPolicyService,
+    @Optional() bans?: CommunityBanPolicyService,
   ) {
     this.blocks = blocks ?? new UserBlockPolicyService(pool);
+    this.bans = bans ?? new CommunityBanPolicyService(pool);
   }
 
   async vote(input: VoteInput, userId: string): Promise<VoteResponseDto> {
@@ -94,6 +98,13 @@ export class VotesService {
         connection,
         input.target_type,
         input.target_id,
+      );
+      // A comment's community is its post's (findTarget's two hops). Ban
+      // first, then rules: a banned user is told the actionable fact.
+      await this.bans.assertNotBannedOrThrow(
+        userId,
+        target.communityId,
+        connection,
       );
       // Voting is participation: gated on the target's community rules,
       // after the 404 for an unknown target, on the transaction's connection.

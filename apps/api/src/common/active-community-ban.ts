@@ -1,6 +1,6 @@
 // The one definition of "this community ban is in force", over
 // community_bans' own columns: not lifted, and permanent or not yet expired.
-// The ban routes and the enforcement that will refuse participation share it,
+// The ban routes and the enforcement that refuses participation share it,
 // so the two can never disagree about who is banned. Its shape matches
 // ACTIVE_USER_RESTRICTION_PREDICATE on purpose, but it is a separate constant:
 // a community ban and a platform restriction are different records, and
@@ -14,4 +14,17 @@ export const ACTIVE_COMMUNITY_BAN_PREDICATE =
 // participation attempt.
 export const ACTIVE_COMMUNITY_BAN_SQL = `SELECT id FROM community_bans
        WHERE community_id = ? AND user_id = ? AND ${ACTIVE_COMMUNITY_BAN_PREDICATE}
+       LIMIT 1`;
+
+// The enforcement lookup: the same rows as ACTIVE_COMMUNITY_BAN_SQL, with
+// what the banned user may be told (the community's name and when the ban
+// ends) and nothing else: never the reason, the moderator or the ban id.
+// Bound to (community_id, user_id). A permanent ban sorts first, so if two
+// were ever active the refusal never promises an end that is not there.
+export const ACTIVE_COMMUNITY_BAN_STATE_SQL = `SELECT communities.name AS community_name, community_bans.expires_at
+       FROM community_bans
+       JOIN communities ON communities.id = community_bans.community_id
+       WHERE community_bans.community_id = ? AND community_bans.user_id = ?
+         AND ${ACTIVE_COMMUNITY_BAN_PREDICATE}
+       ORDER BY community_bans.expires_at IS NULL DESC, community_bans.expires_at DESC
        LIMIT 1`;

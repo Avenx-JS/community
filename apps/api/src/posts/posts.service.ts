@@ -6,6 +6,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -15,6 +16,7 @@ import type {
   RowDataPacket,
 } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { CommunityBanPolicyService } from '../communities/community-ban-policy.service';
 import {
   canModerateCommunitySql,
   isSqlTrue,
@@ -156,12 +158,17 @@ export class PostsService {
     5,
   );
 
+  private readonly bans: CommunityBanPolicyService;
+
   constructor(
     @Inject(MYSQL_POOL) private readonly pool: Pool,
     private readonly notifications: NotificationsService,
     private readonly ruleAcceptance: CommunityRuleAcceptanceService,
     private readonly moderationLog: CommunityModerationLogService,
-  ) {}
+    @Optional() bans?: CommunityBanPolicyService,
+  ) {
+    this.bans = bans ?? new CommunityBanPolicyService(pool);
+  }
 
   async findAll(query: ListPostsDto, viewerId?: string): Promise<PostListDto> {
     const page = query.page ?? 1;
@@ -221,6 +228,12 @@ export class PostsService {
       if (!communities[0]) {
         throw new NotFoundException('Community not found');
       }
+      // Ban first, then rules: a banned user is told the actionable fact.
+      await this.bans.assertNotBannedOrThrow(
+        authorId,
+        input.community_id,
+        connection,
+      );
       await this.ruleAcceptance.assertAcceptedOrThrow(
         authorId,
         input.community_id,
@@ -538,6 +551,13 @@ export class PostsService {
       if (post.author_id !== actorId) {
         throw new ForbiddenException('Only the author may edit this post');
       }
+      // Editing publishes new content into the community, so a ban refuses
+      // it; deleting only removes, and stays open.
+      await this.bans.assertNotBannedOrThrow(
+        actorId,
+        post.community_id,
+        connection,
+      );
       if (post.removed_at) {
         throw new ConflictException(
           'This post was removed by a moderator and cannot be edited',

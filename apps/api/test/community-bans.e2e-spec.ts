@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  jest,
+} from '@jest/globals';
 import { ValidationPipe } from '@nestjs/common';
 import type { INestApplication } from '@nestjs/common';
 import { HttpAdapterHost } from '@nestjs/core';
@@ -9,6 +16,7 @@ import { AppModule } from '../src/app.module';
 import { AuthRateLimitService } from '../src/auth/auth-rate-limit.service';
 import { AuthService, MYSQL_POOL } from '../src/auth/auth.service';
 import { SafeApiExceptionFilter } from '../src/common/safe-api-exception.filter';
+import { CommunityBanPolicyService } from '../src/communities/community-ban-policy.service';
 
 interface Ban {
   id: string;
@@ -299,6 +307,26 @@ describe('Community bans (e2e)', () => {
         const [user, community] = values as string[];
         subscriptions.add(key(community, user));
         return { affectedRows: 1 };
+      }
+      // The enforcement lookup (ACTIVE_COMMUNITY_BAN_STATE_SQL): the active
+      // ban of (community, user), with the community's name.
+      if (flat.startsWith('SELECT communities.name AS community_name')) {
+        const [community, user] = values as string[];
+        const ban = bans.find(
+          (row) =>
+            row.community_id === community &&
+            row.user_id === user &&
+            active(row),
+        );
+        return ban
+          ? [
+              {
+                community_name: communities.find((c) => c.id === community)!
+                  .name,
+                expires_at: iso(ban.expires_at),
+              },
+            ]
+          : [];
       }
       throw new Error(`Unexpected SQL: ${flat}`);
     };
@@ -684,5 +712,77 @@ describe('Community bans (e2e)', () => {
     for (const response of responses) {
       expect(response.text).not.toMatch(/@example\.com|email|password/);
     }
+  });
+
+  describe('enforcement on rejoining', () => {
+    const member = as('member');
+    const leave = (community = 'a-community') =>
+      request(app.getHttpServer())
+        .delete(`/communities/${community}/subscribe`)
+        .set('Authorization', 'Bearer member-token');
+
+    it('refuses a banned user’s rejoin with the payload, and a lift lets them back', async () => {
+      await moderator.ban(BAN).expect(201);
+      const refused = await member.subscribe().expect(403);
+      expect(refused.body).toEqual({
+        reason: 'community_banned',
+        community: 'a-community',
+      });
+      expect(subscriptions.has(key('c-a', 'u-member'))).toBe(false);
+
+      await moderator.lift('member').expect(204);
+      await member.subscribe().expect(204);
+      expect(subscriptions.has(key('c-a', 'u-member'))).toBe(true);
+    });
+
+    it('tells a temporarily banned user when the ban ends', async () => {
+      await moderator.ban({ ...BAN, duration_hours: 48 }).expect(201);
+      const refused = await member.subscribe().expect(403);
+      expect(refused.body).toEqual({
+        reason: 'community_banned',
+        community: 'a-community',
+        expires_at: iso(NOW + 48 * 3_600_000),
+      });
+    });
+
+    // The ban lapses by the predicate; nothing has to run.
+    it('lets the user back the moment a temporary ban has expired', async () => {
+      await moderator.ban({ ...BAN, duration_hours: 1 }).expect(201);
+      bans[0].expires_at = NOW - 1;
+      await member.subscribe().expect(204);
+    });
+
+    it('never discloses the ban reason, the moderator or the ban id', async () => {
+      await moderator
+        .ban({ ...BAN, reason: 'Harassed three members' })
+        .expect(201);
+      const refused = await member.subscribe().expect(403);
+      expect(refused.text).not.toMatch(
+        new RegExp(`Harassed|a_moderator|u-mod|${bans[0].id}|created_by|"id"`),
+      );
+    });
+
+    it('is scoped to one community', async () => {
+      await moderator.ban(BAN).expect(201);
+      await member.subscribe('b-community').expect(204);
+      expect(subscriptions.has(key('c-b', 'u-member'))).toBe(true);
+    });
+
+    it('lets a banned user leave, without consulting the ban', async () => {
+      await moderator.ban(BAN).expect(201);
+      const check = jest.spyOn(
+        app.get(CommunityBanPolicyService),
+        'assertNotBannedOrThrow',
+      );
+      await leave('b-community').expect(204);
+      await leave().expect(204);
+      expect(check).not.toHaveBeenCalled();
+      check.mockRestore();
+    });
+
+    it('answers an unknown community with 404, not 403', async () => {
+      await moderator.ban(BAN).expect(201);
+      await member.subscribe('no-such-community').expect(404);
+    });
   });
 });

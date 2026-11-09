@@ -377,6 +377,10 @@ describe('Admin restrictions API (e2e)', () => {
         auditRows.push(values);
         return result({ affectedRows: 1 });
       }
+      // The ban lookup (CommunityBanPolicyService): no ban here.
+      if (sql.includes('FROM community_bans')) {
+        return Promise.resolve([[], []]);
+      }
       return Promise.reject(new Error(`Unexpected SQL query: ${sql}`));
     };
 

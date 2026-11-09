@@ -85,6 +85,8 @@ describe('Comment endpoints (e2e)', () => {
   let suspendedCommunities: Set<string>;
   // "blocker:blocked" pairs, read by the block lookup.
   let blocks: Set<string>;
+  // "community:user" -> the ban's expires_at (ms) or null for permanent.
+  let bans: Map<string, number | null>;
   let lockedPosts: Set<string>;
   let removedPosts: Set<string>;
   let ancestryReads: number;
@@ -171,6 +173,7 @@ describe('Comment endpoints (e2e)', () => {
     deletedCommunities = new Set();
     suspendedCommunities = new Set();
     blocks = new Set();
+    bans = new Map();
     lockedPosts = new Set();
     removedPosts = new Set();
     ancestryReads = 0;
@@ -245,6 +248,7 @@ describe('Comment endpoints (e2e)', () => {
                     post_removed_at: removedPosts.has(comment.post_id)
                       ? new Date('2026-11-01T00:00:00.000Z')
                       : null,
+                    community_id: postCommunities.get(comment.post_id),
                   },
                 ]
               : [],
@@ -723,6 +727,25 @@ describe('Comment endpoints (e2e)', () => {
           const [a, b] = values as string[];
           const blocked = blocks.has(`${a}:${b}`) || blocks.has(`${b}:${a}`);
           return [[{ blocked: blocked ? 1 : 0 }], []];
+        }
+        // The ban lookup (CommunityBanPolicyService): no ban here.
+        // ACTIVE_COMMUNITY_BAN_STATE_SQL, bound to (community, user).
+        if (sql.includes('FROM community_bans')) {
+          const [community, user] = values as string[];
+          const ban = bans.get(`${community}:${user}`);
+          const active =
+            ban !== undefined && (ban === null || ban > Date.now());
+          return [
+            active
+              ? [
+                  {
+                    community_name: rules.communities.get(community)?.name,
+                    expires_at: ban === null ? null : new Date(ban),
+                  },
+                ]
+              : [],
+            [],
+          ];
         }
         throw new Error(`Unexpected SQL query: ${sql}`);
       },
@@ -1286,6 +1309,108 @@ describe('Comment endpoints (e2e)', () => {
       expect(
         comments.find((comment) => comment.id === 'root-1')?.removed_at,
       ).toBeTruthy();
+    });
+  });
+
+  // user-1 (valid-token) is banned from community-1, where post-1 is. post-2
+  // is in community-2.
+  describe('for a user banned from the community', () => {
+    const user1 = (
+      method: 'post' | 'patch' | 'delete' | 'get',
+      path: string,
+      body?: object,
+    ) => {
+      const call = request(app.getHttpServer())
+        [method](path)
+        .set('Authorization', 'Bearer valid-token');
+      return body ? call.send(body) : call;
+    };
+    const banned = { reason: 'community_banned', community: 'general' };
+    const inserts = () =>
+      queryCalls.filter(({ sql }) => sql.startsWith('INSERT INTO comments'));
+
+    beforeEach(() => {
+      bans.set('community-1:user-1', null);
+    });
+
+    it('refuses comments and replies with the payload, writing nothing', async () => {
+      for (const body of [
+        { content: 'Top level' },
+        { content: 'Reply', parent_id: 'reply-1' },
+      ]) {
+        const refused = await user1(
+          'post',
+          '/posts/post-1/comments',
+          body,
+        ).expect(403);
+        expect(refused.body).toEqual(banned);
+      }
+      expect(inserts()).toHaveLength(0);
+      expect(notifications).toEqual([]);
+      expect(openConnections).toBe(0);
+    });
+
+    it('reports the ban rather than unaccepted rules', async () => {
+      rules.publish('community-1');
+      const refused = await user1('post', '/posts/post-1/comments', {
+        content: 'Top level',
+      }).expect(403);
+      expect(refused.body).toEqual(banned);
+    });
+
+    it('tells a temporarily banned user when the ban ends, and lets them in once it has', async () => {
+      const ends = Date.now() + 3_600_000;
+      bans.set('community-1:user-1', ends);
+      const refused = await user1('post', '/posts/post-1/comments', {
+        content: 'Hi',
+      }).expect(403);
+      expect(refused.body).toEqual({
+        ...banned,
+        expires_at: new Date(ends).toISOString(),
+      });
+      bans.set('community-1:user-1', Date.now() - 1);
+      await user1('post', '/posts/post-1/comments', { content: 'Hi' }).expect(
+        201,
+      );
+    });
+
+    // Editing publishes new content into the community; deleting removes.
+    it('refuses editing their own comment, and lets them delete it', async () => {
+      const edited = await user1('patch', '/comments/root-1', {
+        content: 'Rewritten',
+      }).expect(403);
+      expect(edited.body).toEqual(banned);
+      expect(comments.find((comment) => comment.id === 'root-1')?.content).toBe(
+        'Root comment',
+      );
+      await user1('delete', '/comments/nested-reply').expect(204);
+    });
+
+    it('still lets them read the thread', async () => {
+      await user1('get', '/posts/post-1/comments').expect(200);
+    });
+
+    it('answers an unknown post or parent with 404, not 403', async () => {
+      await user1('post', '/posts/no-such-post/comments', {
+        content: 'Hi',
+      }).expect(404);
+      await user1('post', '/posts/post-1/comments', {
+        content: 'Hi',
+        parent_id: 'no-such-parent',
+      }).expect(404);
+    });
+
+    it('is scoped to the one community', async () => {
+      await user1('post', '/posts/post-2/comments', {
+        content: 'Elsewhere',
+      }).expect(201);
+    });
+
+    it('lets them comment again once the ban is lifted', async () => {
+      bans.clear();
+      await user1('post', '/posts/post-1/comments', { content: 'Back' }).expect(
+        201,
+      );
     });
   });
 

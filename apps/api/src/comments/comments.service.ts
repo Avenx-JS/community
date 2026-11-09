@@ -15,6 +15,7 @@ import type {
   RowDataPacket,
 } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { CommunityBanPolicyService } from '../communities/community-ban-policy.service';
 import { UserBlockPolicyService } from '../users/user-block-policy.service';
 import {
   canModerateCommunitySql,
@@ -55,6 +56,7 @@ interface CommentRow extends RowDataPacket {
 interface EditableCommentRow extends RowDataPacket {
   id: string;
   author_id: string;
+  community_id: string;
   content: string;
   removed_at: Date | string | null;
   post_removed_at: Date | string | null;
@@ -226,14 +228,17 @@ export interface CommentReplyListDto {
 @Injectable()
 export class CommentsService {
   private readonly blocks: UserBlockPolicyService;
+  private readonly bans: CommunityBanPolicyService;
 
   constructor(
     @Inject(MYSQL_POOL) private readonly pool: Pool,
     private readonly notifications: NotificationsService,
     private readonly ruleAcceptance: CommunityRuleAcceptanceService,
     @Optional() blocks?: UserBlockPolicyService,
+    @Optional() bans?: CommunityBanPolicyService,
   ) {
     this.blocks = blocks ?? new UserBlockPolicyService(pool);
+    this.bans = bans ?? new CommunityBanPolicyService(pool);
   }
 
   // The thread varies by viewer only where content was removed. A removed
@@ -491,7 +496,8 @@ export class CommentsService {
 
       const [comments] = await connection.execute<EditableCommentRow[]>(
         `SELECT comments.id, comments.author_id, comments.content,
-           comments.removed_at, posts.removed_at AS post_removed_at
+           comments.removed_at, posts.removed_at AS post_removed_at,
+           posts.community_id
          FROM comments
          INNER JOIN posts ON posts.id = comments.post_id
          WHERE comments.id = ? AND ${listedCommunitySql('posts.community_id')}
@@ -505,6 +511,12 @@ export class CommentsService {
       if (comment.author_id !== actorId) {
         throw new ForbiddenException('Only the author may edit this comment');
       }
+      // Editing publishes new content; deleting only removes and stays open.
+      await this.bans.assertNotBannedOrThrow(
+        actorId,
+        comment.community_id,
+        connection,
+      );
       if (comment.removed_at || comment.post_removed_at) {
         throw new ConflictException(
           comment.removed_at
@@ -590,6 +602,12 @@ export class CommentsService {
         threadLocked = isSqlTrue(parent.thread_locked ?? 0);
         threadTooDeep = isSqlTrue(parent.depth_exceeded ?? 0);
       }
+      // Ban first, then rules: a banned user is told the actionable fact.
+      await this.bans.assertNotBannedOrThrow(
+        authorId,
+        post.community_id,
+        connection,
+      );
       await this.ruleAcceptance.assertAcceptedOrThrow(
         authorId,
         post.community_id,

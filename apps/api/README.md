@@ -3539,11 +3539,10 @@ foreign key. Reads of the log are not themselves logged.
 
 #### Community bans and member removal
 
-> **Not enforced yet.** These routes record decisions. Until the ban-enforcement
-> change lands, a banned account can still subscribe again and still post,
-> comment and vote in the community. The two must ship together, or a moderator
-> will believe they have excluded someone who can still take part. Enforcement
-> reads `ACTIVE_COMMUNITY_BAN_SQL` (`src/common/active-community-ban.ts`).
+> **Enforced on every participation write.** A banned account cannot rejoin,
+> post, comment, vote or edit in the community, while reading, reporting, leaving
+> and deleting its own content stay open. See [Enforcing community bans](#enforcing-community-bans) for
+> every path and its reason.
 
 **A community ban is not a platform restriction.** Conflating the two would let
 a community moderator impose a platform sanction:
@@ -3682,7 +3681,7 @@ lift time", is a [trigger pair](#rules-enforced-by-triggers) because of
 `lifted_by`'s foreign key. Indexes:
 
 - `idx_community_bans_active (community_id, user_id, lifted_at, expires_at)`
-  serves the active-ban lookup enforcement will run on every participation attempt
+  serves the active-ban lookup enforcement runs on every participation attempt
   (`community-bans.mysql.spec.ts` checks the plan).
 - `idx_community_bans_community_created` serves the listing.
 - `idx_community_bans_user` serves "which communities have banned me".
@@ -3692,6 +3691,103 @@ UTC_TIMESTAMP())`, is exported once as `ACTIVE_COMMUNITY_BAN_PREDICATE` and
 restated nowhere; a test fails if it is. It has the same shape as
 `ACTIVE_USER_RESTRICTION_PREDICATE` but is deliberately a separate constant, for a
 separate record.
+
+##### Enforcing community bans
+
+**A ban is enforced server-side, on every participation write.** A client that
+hides the buttons is not enough, so the API refuses the request itself. The check
+is defined once, in `CommunityBanPolicyService.assertNotBannedOrThrow(userId,
+communityId, connection?)` (`src/communities/community-ban-policy.service.ts`).
+It reads `ACTIVE_COMMUNITY_BAN_STATE_SQL`, which is built on the shared
+`ACTIVE_COMMUNITY_BAN_PREDICATE`, and no gated path restates the SQL. It takes the
+caller's connection, as the rule gate does, so inside the post, comment and vote
+transactions it runs on their connection.
+
+| Gated path | Community resolved from |
+| --- | --- |
+| `POST /communities/:name/subscribe` | The route name. Without this a ban is defeated at once: banning deletes the membership, and nothing else stops an immediate rejoin |
+| `POST /posts` | `community_id` in the body, after its existence check |
+| `POST /posts/:postId/comments` | The post |
+| `PUT /posts/:id/vote` | The post |
+| `PUT /comments/:id/vote` | The comment's post (comments → posts), the same two hops as the rule gate |
+| `PATCH /posts/:id`, `PATCH /comments/:id` | The content's post |
+
+**The refusal** is a `403` (the request is well formed; the caller is not
+permitted, as for the rule gate):
+
+```json
+{ "reason": "community_banned", "community": "gardening", "expires_at": "2026-12-01T00:00:00.000Z" }
+```
+
+`expires_at` is present only for a temporary ban, the same shape `AuthGuard`
+gives a suspension and a platform ban. A banned user is entitled to know they are
+banned, where, and until when. **It never contains the ban's reason, the
+moderator or the ban ID**: the lookup does not even select them. The moderator's
+justification and identity are moderator-facing, as for platform restrictions
+and for removal notifications ([Data
+classification](#data-classification-errors-and-logging), [Moderation
+notifications](#moderation-notifications)).
+
+**Ordering.** The check runs after the resource `404`s, so an unknown community,
+post or vote target is still a `404` for a banned user, and the refusal never
+confirms that a post exists. It runs **before the rule gate**: a banned user who
+has also not accepted new rules is told they are banned, which is the actionable
+fact. Being told to accept rules they could not act on afterwards would mislead.
+On a refusal nothing is written, and the transaction rolls back and releases its
+connection.
+
+**Editing is gated; deleting is not.** This is the one genuinely debatable case.
+An edit publishes new content into a community the person is excluded from, and a
+banned user could rewrite an old post into something new. Deleting only removes
+what they wrote. So `PATCH` is refused, after the author check, and both
+`DELETE` routes stay open.
+
+**What a ban never touches, each for a reason:**
+
+- **Reporting (`POST /reports`).** A banned user must still be able to report
+  what they saw, including the community and the moderator that banned them. A
+  ban must never silence the safety mechanism, and this is the most important
+  exemption. `ReportsService` does not even depend on the ban check, and a test
+  reports with the check forced to refuse.
+- **Leaving (`DELETE /communities/:name/subscribe`).** Trapping a banned user in
+  a membership they cannot use would be pointless.
+- **Deleting your own post or comment.** Withdrawing what you wrote stays open,
+  for the same reason the rule gate allows it.
+- **Every read.** The community, its posts, threads and rules stay readable. A
+  ban excludes participation, not access to public content, and the refusal
+  above would be useless without a view of what it refers to.
+- **Rule acceptance.** Its routes stay reachable, and since a ban keeps the
+  acceptances, a lifted ban needs no re-accepting.
+- **Withdrawing a vote** and reading your own vote.
+- **Every other community.** A ban is scoped to one community. A user banned in
+  A participates normally in B, and still moderates any community they moderate.
+- **Everything platform-level.** Authentication, `/users/me`, notifications,
+  search and `/admin`. A community ban never behaves like a platform restriction
+  and never reads or writes `user_restrictions`; that distinction is the point of
+  the feature.
+
+The services behind the exempt-only paths (reports, removal, locking, rules,
+search, the inbox, `/admin`) do not depend on the ban check at all
+(`community-ban-policy.service.spec.ts`). The e2e suites assert that the exempt
+methods of the gated services (leaving, deleting, reading) never call it.
+
+**No bypass for moderators or the creator.** The ban routes refuse to ban the
+creator and let only the creator ban a moderator, so an active ban on either
+should be impossible. If such a state is ever reached, the ban wins and the
+moderator must be unbanned explicitly; a bypass would mean a ban that exists and
+does nothing.
+
+**Expiry needs no job.** A temporary ban lapses because the predicate compares
+`expires_at` with `UTC_TIMESTAMP()` on every check, the same design as
+`user_restrictions`, which has no reaper either. Access returns the moment the
+ban expires, with no scheduled task and no restart. The instinct to add a cleanup
+job is strong, and it would be wrong.
+
+**Cost, and no cache.** Each gated write adds one lookup through
+`idx_community_bans_active` (`community-ban-enforcement.mysql.spec.ts` checks the
+plan), and writes are rate-limited well below the level where that matters.
+Nothing is cached: a cached ban decision would let a banned user participate for
+the cache's lifetime, which is exactly what the check exists to prevent.
 
 ### Community notification preferences
 

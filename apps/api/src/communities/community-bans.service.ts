@@ -32,9 +32,8 @@ import type {
 // touches no other. Platform role is irrelevant either way: an administrator
 // can be banned from a community, and gains no right to moderate one.
 //
-// Nothing enforces a ban yet. These routes record decisions; the enforcement
-// that refuses a banned account's participation reads
-// ACTIVE_COMMUNITY_BAN_SQL and must ship with them.
+// These routes record decisions; CommunityBanPolicyService enforces them on
+// every participation write, over the same predicate.
 
 export interface CommunityBanDto {
   id: string;

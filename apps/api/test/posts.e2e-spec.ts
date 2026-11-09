@@ -76,6 +76,8 @@ describe('Post endpoints (e2e)', () => {
   let openConnections: number;
   let deletedCommunities: Set<string>;
   let suspendedCommunities: Set<string>;
+  // "community:user" pairs with a permanent ban.
+  let bans: Set<string>;
   let moderationLog: TestModerationEntry[];
   let failModerationLog: boolean;
   let pinClock: number;
@@ -152,6 +154,7 @@ describe('Post endpoints (e2e)', () => {
     });
     openConnections = 0;
     deletedCommunities = new Set();
+    bans = new Set();
     suspendedCommunities = new Set();
     moderationLog = [];
     failModerationLog = false;
@@ -180,6 +183,21 @@ describe('Post endpoints (e2e)', () => {
     const pool = {
       execute: async (sql: string, values: unknown[]) => {
         queryCalls.push({ sql, values });
+        // ACTIVE_COMMUNITY_BAN_STATE_SQL, bound to (community, user).
+        if (sql.includes('FROM community_bans')) {
+          const [community, user] = values as string[];
+          return [
+            bans.has(`${community}:${user}`)
+              ? [
+                  {
+                    community_name: rules.communities.get(community)?.name,
+                    expires_at: null,
+                  },
+                ]
+              : [],
+            [],
+          ];
+        }
         const savedAnswer = answerSavedFlags(sql, values, saves);
         if (savedAnswer) {
           return savedAnswer;
@@ -294,6 +312,10 @@ describe('Post endpoints (e2e)', () => {
             !floatsPins &&
             !sql.includes('ORDER BY created_at DESC, id DESC')
           ) {
+            // The ban lookup (CommunityBanPolicyService): no ban here.
+            if (sql.includes('FROM community_bans')) {
+              return [[], []];
+            }
             throw new Error(`Unexpected order: ${sql}`);
           }
           const pinRank = (post: TestPost) =>
@@ -560,6 +582,10 @@ describe('Post endpoints (e2e)', () => {
               : [],
             [],
           ];
+        }
+        // The ban lookup (CommunityBanPolicyService): no ban here.
+        if (sql.includes('FROM community_bans')) {
+          return [[], []];
         }
         throw new Error(`Unexpected SQL query: ${sql}`);
       },
@@ -1040,6 +1066,82 @@ describe('Post endpoints (e2e)', () => {
       expect(moderationLog).toEqual([]);
       expect(notifications).toEqual([]);
       expect(openConnections).toBe(0);
+    });
+  });
+
+  // user-1 (valid-token) wrote post-1 in community-1 ("general") and is banned
+  // there; post-3 is in community-2.
+  describe('for a user banned from the community', () => {
+    const user1 = () => ({
+      create: (communityId: string) =>
+        request(app.getHttpServer())
+          .post('/posts')
+          .set('Authorization', 'Bearer valid-token')
+          .send({
+            title: 'New',
+            content: 'Body',
+            type: 'text',
+            community_id: communityId,
+          }),
+      edit: (id: string) =>
+        request(app.getHttpServer())
+          .patch(`/posts/${id}`)
+          .set('Authorization', 'Bearer valid-token')
+          .send({ title: 'Rewritten' }),
+      remove: (id: string) =>
+        request(app.getHttpServer())
+          .delete(`/posts/${id}`)
+          .set('Authorization', 'Bearer valid-token'),
+      get: (path: string) =>
+        request(app.getHttpServer())
+          .get(path)
+          .set('Authorization', 'Bearer valid-token'),
+    });
+    const banned = { reason: 'community_banned', community: 'general' };
+
+    beforeEach(() => {
+      bans.add('community-1:user-1');
+    });
+
+    it('refuses a post with the payload, writing nothing', async () => {
+      const before = posts.length;
+      const refused = await user1().create('community-1').expect(403);
+      expect(refused.body).toEqual(banned);
+      expect(posts).toHaveLength(before);
+      expect(notifications).toEqual([]);
+      expect(openConnections).toBe(0);
+    });
+
+    it('reports the ban rather than unaccepted rules', async () => {
+      rules.publish('community-1');
+      expect((await user1().create('community-1').expect(403)).body).toEqual(
+        banned,
+      );
+    });
+
+    it('answers an unknown community with 404, not 403', async () => {
+      await user1().create('no-such-community').expect(404);
+    });
+
+    it('is scoped to the one community', async () => {
+      await user1().create('community-2').expect(201);
+    });
+
+    // Editing publishes new content; deleting only removes.
+    it('refuses editing their own post, and lets them delete it', async () => {
+      expect((await user1().edit('post-1').expect(403)).body).toEqual(banned);
+      expect(posts.find((post) => post.id === 'post-1')?.title).toBe('First');
+      await user1().remove('post-1').expect(204);
+    });
+
+    it('still lets them read the community’s posts', async () => {
+      await user1().get('/posts?community_id=community-1').expect(200);
+      await user1().get('/posts/post-2').expect(200);
+    });
+
+    it('lets them post again once the ban is lifted', async () => {
+      bans.clear();
+      await user1().create('community-1').expect(201);
     });
   });
 

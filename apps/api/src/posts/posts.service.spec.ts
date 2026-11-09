@@ -38,6 +38,10 @@ describe('PostsService', () => {
     // The pool and the transaction connection share one query log and one
     // result queue, so a test reads the same whichever of them a query uses.
     const execute = (sql: string, values: unknown[]) => {
+      // The ban lookup is answered outside the queue: no ban here.
+      if (sql.includes('FROM community_bans')) {
+        return Promise.resolve([[], []] as [unknown, unknown]);
+      }
       queries.push({ sql, values });
       return Promise.resolve([results.shift() ?? [], []]);
     };
@@ -253,6 +257,10 @@ describe('PostsService.create notifications', () => {
         if (sql.startsWith('SELECT post_id FROM saved_posts')) {
           return Promise.resolve([[], []]);
         }
+        // The ban lookup (CommunityBanPolicyService): no ban here.
+        if (sql.includes('FROM community_bans')) {
+          return Promise.resolve([[], []]);
+        }
         return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
       },
     };
@@ -285,7 +293,10 @@ describe('PostsService.create notifications', () => {
       score: 0,
       saved: false,
     });
-    expect(queries[1].values[0]).toBe(postId);
+    expect(
+      queries.find((query) => query.sql.startsWith('INSERT INTO posts'))
+        ?.values[0],
+    ).toBe(postId);
     const count = queries.find((query) =>
       query.sql.startsWith('SELECT COUNT(*) AS recipients'),
     );
@@ -431,6 +442,10 @@ describe('PostsService.remove', () => {
           return Promise.resolve([{ affectedRows: 1 }, []]);
         }
         if (sql.startsWith('SELECT post_id FROM saved_posts')) {
+          return Promise.resolve([[], []]);
+        }
+        // The ban lookup (CommunityBanPolicyService): no ban here.
+        if (sql.includes('FROM community_bans')) {
           return Promise.resolve([[], []]);
         }
         return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
@@ -815,6 +830,10 @@ function createPinStore() {
         return [[], []];
       }
       if (sql.startsWith('SELECT post_id FROM saved_posts')) {
+        return [[], []];
+      }
+      // The ban lookup (CommunityBanPolicyService): no ban here.
+      if (sql.includes('FROM community_bans')) {
         return [[], []];
       }
       throw new Error(`Unexpected SQL: ${sql}`);
@@ -1385,6 +1404,10 @@ describe('PostsService.update', () => {
         if (sql.startsWith('SELECT post_id FROM saved_posts')) {
           return Promise.resolve([[], []]);
         }
+        // The ban lookup (CommunityBanPolicyService): no ban here.
+        if (sql.includes('FROM community_bans')) {
+          return Promise.resolve([[], []]);
+        }
         return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
       },
     };
@@ -1695,6 +1718,10 @@ describe('PostsService.lock and unlock', () => {
         if (sql.startsWith('SELECT post_id FROM saved_posts')) {
           return Promise.resolve([[], []]);
         }
+        // The ban lookup (CommunityBanPolicyService): no ban here.
+        if (sql.includes('FROM community_bans')) {
+          return Promise.resolve([[], []]);
+        }
         return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
       },
     };
@@ -1951,6 +1978,10 @@ describe('PostsService moderative removal', () => {
       ];
     }
     if (sql.startsWith('SELECT post_id FROM saved_posts')) {
+      return [[], []];
+    }
+    // The ban lookup (CommunityBanPolicyService): no ban here.
+    if (sql.includes('FROM community_bans')) {
       return [[], []];
     }
     throw new Error(`Unexpected SQL: ${sql}`);

@@ -105,6 +105,10 @@ describe('VotesService vote routes', () => {
     if (sql.includes('FROM user_blocks')) {
       return [[{ blocked: 0 }], []];
     }
+    // The ban lookup (CommunityBanPolicyService): no ban here.
+    if (sql.includes('FROM community_bans')) {
+      return [[], []];
+    }
     throw new Error(`Unexpected SQL: ${sql}`);
   };
 

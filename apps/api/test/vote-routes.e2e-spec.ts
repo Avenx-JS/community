@@ -37,6 +37,8 @@ describe('Vote routes on posts and comments (e2e)', () => {
   let deletedCommunities: Set<string>;
   // "blocker:blocked" pairs, read by the block lookup.
   let blocks: Set<string>;
+  // "community:user" pairs with a permanent ban.
+  let bans: Set<string>;
 
   const tokens: Record<string, string> = {
     'user-1-token': 'user-1',
@@ -51,6 +53,7 @@ describe('Vote routes on posts and comments (e2e)', () => {
     released = 0;
     deletedCommunities = new Set();
     blocks = new Set();
+    bans = new Set();
     rules = createRulesStore({
       'community-1': { name: 'general', creator_id: 'creator-1' },
       'community-2': { name: 'orchards', creator_id: 'creator-2' },
@@ -149,6 +152,22 @@ describe('Vote routes on posts and comments (e2e)', () => {
         const [a, b] = values as string[];
         const blocked = blocks.has(`${a}:${b}`) || blocks.has(`${b}:${a}`);
         return Promise.resolve([[{ blocked: blocked ? 1 : 0 }], []]);
+      }
+      // The ban lookup (CommunityBanPolicyService): no ban here.
+      // ACTIVE_COMMUNITY_BAN_STATE_SQL, bound to (community, user).
+      if (sql.includes('FROM community_bans')) {
+        const [community, user] = values as string[];
+        return Promise.resolve([
+          bans.has(`${community}:${user}`)
+            ? [
+                {
+                  community_name: rules.communities.get(community)?.name,
+                  expires_at: null,
+                },
+              ]
+            : [],
+          [],
+        ]);
       }
       return Promise.reject(new Error(`Unexpected SQL query: ${sql}`));
     };
@@ -432,6 +451,61 @@ describe('Vote routes on posts and comments (e2e)', () => {
       });
     },
   );
+
+  // comment-1 is on a post in community-2 ("orchards"), so a vote on it is
+  // gated on that community's ban, reached through comments -> posts.
+  describe('for a user banned from the community', () => {
+    it.each([
+      ['/posts/post-1/vote', 'community-1', 'general'],
+      ['/comments/comment-1/vote', 'community-2', 'orchards'],
+    ])(
+      'refuses PUT %s with the payload, writing nothing',
+      async (path, communityId, name) => {
+        bans.add(`${communityId}:user-1`);
+        const refused = await user1.put(path, { value: 1 }).expect(403);
+        expect(refused.body).toEqual({
+          reason: 'community_banned',
+          community: name,
+        });
+        expect(stored()).toHaveLength(0);
+      },
+    );
+
+    it('gates a comment vote on the comment’s community, not another', async () => {
+      bans.add('community-1:user-1');
+      await user1.put('/comments/comment-1/vote', { value: 1 }).expect(200);
+      await user1.put('/posts/post-1/vote', { value: 1 }).expect(403);
+    });
+
+    it('reports the ban before unaccepted rules', async () => {
+      rules.publish('community-1');
+      bans.add('community-1:user-1');
+      const refused = await user1
+        .put('/posts/post-1/vote', { value: 1 })
+        .expect(403);
+      expect(refused.body).toMatchObject({ reason: 'community_banned' });
+    });
+
+    it('lets a banned user withdraw a vote and read the score', async () => {
+      await user1.put('/posts/post-1/vote', { value: 1 }).expect(200);
+      bans.add('community-1:user-1');
+      await user1.get('/posts/post-1/vote').expect(200);
+      await user1.delete('/posts/post-1/vote').expect(200);
+      expect(stored()).toHaveLength(0);
+    });
+
+    it('answers an unknown target with 404, not 403', async () => {
+      bans.add('community-1:user-1');
+      await user1.put('/posts/no-such-post/vote', { value: 1 }).expect(404);
+    });
+
+    it('lets them vote again once the ban is lifted', async () => {
+      bans.add('community-1:user-1');
+      await user1.put('/posts/post-1/vote', { value: 1 }).expect(403);
+      bans.clear();
+      await user1.put('/posts/post-1/vote', { value: 1 }).expect(200);
+    });
+  });
 
   it('resolves a comment vote’s community through its post for the rule gate', async () => {
     rules.publish('community-2');

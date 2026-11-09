@@ -37,9 +37,10 @@ import {
 
 const MODERATORS_ONLY =
   'The caller is not the community creator or one of its moderators.';
-const NOT_ENFORCED =
-  ' **Not enforced yet:** a ban is recorded but does not stop the account ' +
-  'from participating until ban enforcement ships.';
+const ENFORCED =
+  ' The account is then refused subscribing, posting, commenting, voting ' +
+  'and editing in this community; reading, reporting, leaving and deleting ' +
+  'its own content stay open.';
 
 // Bans exclude an account from one community. They are not platform
 // restrictions (/admin/restrictions) and never touch them. Users are
@@ -81,7 +82,7 @@ export class CommunityBansController {
       "account's membership; rule acceptances are kept. Only the creator " +
       'may ban a moderator, and doing so also removes the moderator role. A ' +
       'platform administrator can be banned like anyone else.' +
-      NOT_ENFORCED,
+      ENFORCED,
   })
   @ApiAuthenticated({
     forbidden: `${MODERATORS_ONLY} Also: banning the community creator, or a moderator when the caller is not the creator.`,
