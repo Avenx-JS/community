@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import { beforeEach, describe, expect, it } from '@jest/globals';
 import type { Pool } from 'mysql2/promise';
 import {
@@ -338,7 +338,7 @@ describe('AdminCommunitiesService', () => {
 
   describe('update', () => {
     const update = (body: Partial<AdminUpdateCommunityDto>) =>
-      service.update('c-1', body as AdminUpdateCommunityDto, 'admin-id');
+      service.update('c-1', body, 'admin-id');
 
     beforeEach(() => {
       detailRow = {
@@ -405,6 +405,287 @@ describe('AdminCommunitiesService', () => {
       await expect(update({ description: 'x' })).rejects.toThrow(
         'Audit insert failed',
       );
+      expect(tx).toEqual({ commits: 0, rollbacks: 1, releases: 1 });
+    });
+  });
+});
+
+describe('AdminCommunitiesService suspension', () => {
+  let calls: Array<{ sql: string; values: unknown[] }>;
+  let locked: Record<string, unknown> | undefined;
+  let updateAffected: number;
+  let nameRow: Record<string, unknown> | undefined;
+  let audits: Array<{ connection: unknown; entry: unknown }>;
+  let failAudit: boolean;
+  let tx: { commits: number; rollbacks: number; releases: number };
+  let connection: Record<string, unknown>;
+  let service: AdminCommunitiesService;
+
+  const detail = {
+    id: 'c-1',
+    name: 'garden',
+    description: null,
+    creator_username: 'creator',
+    created_at: '2026-01-01T00:00:00Z',
+    suspended_at: '2026-11-01T00:00:00Z',
+    deleted_at: null,
+    suspended_by_username: 'admin',
+    suspension_reason: 'Spam network',
+    deleted_by_username: null,
+    member_count: 3,
+    post_count: 2,
+    moderator_count: 1,
+    comment_count: 4,
+    rule_version: null,
+    open_report_count: 0,
+  };
+
+  beforeEach(() => {
+    calls = [];
+    locked = {
+      id: 'c-1',
+      name: 'garden',
+      suspended_at: null,
+      deleted_at: null,
+    };
+    updateAffected = 1;
+    nameRow = { name: 'garden' };
+    audits = [];
+    failAudit = false;
+    tx = { commits: 0, rollbacks: 0, releases: 0 };
+    connection = {
+      beginTransaction: () => Promise.resolve(),
+      commit: () => {
+        tx.commits += 1;
+        return Promise.resolve();
+      },
+      rollback: () => {
+        tx.rollbacks += 1;
+        return Promise.resolve();
+      },
+      release: () => {
+        tx.releases += 1;
+      },
+      execute: (sql: string, values: unknown[]) => {
+        calls.push({ sql, values });
+        if (sql.startsWith('SELECT id, name, suspended_at, deleted_at')) {
+          return Promise.resolve([locked ? [locked] : [], []]);
+        }
+        if (sql.startsWith('UPDATE communities')) {
+          return Promise.resolve([{ affectedRows: updateAffected }, []]);
+        }
+        if (sql === 'SELECT name FROM communities WHERE id = ? LIMIT 1') {
+          return Promise.resolve([nameRow ? [nameRow] : [], []]);
+        }
+        if (sql === ADMIN_COMMUNITY_DETAIL_SQL) {
+          return Promise.resolve([[detail], []]);
+        }
+        return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
+      },
+    };
+    service = new AdminCommunitiesService(
+      { getConnection: () => Promise.resolve(connection) } as unknown as Pool,
+      {
+        record: (onConnection: unknown, entry: unknown) => {
+          audits.push({ connection: onConnection, entry });
+          return failAudit
+            ? Promise.reject(new Error('Audit insert failed'))
+            : Promise.resolve();
+        },
+      } as unknown as AuditLogService,
+    );
+  });
+
+  const updates = () => calls.filter(({ sql }) => sql.startsWith('UPDATE'));
+  const flat = (sql: string) => sql.replace(/\s+/g, ' ').trim();
+
+  describe('suspend', () => {
+    const suspend = () =>
+      service.suspend('c-1', { reason: 'Spam network' }, 'admin-id');
+
+    it('locks the row, sets all three columns from the clock and the token, and audits once', async () => {
+      const result = await suspend();
+      expect(calls[0].sql).toBe(
+        'SELECT id, name, suspended_at, deleted_at FROM communities WHERE id = ? LIMIT 1 FOR UPDATE',
+      );
+      expect(updates()).toHaveLength(1);
+      expect(flat(updates()[0].sql)).toBe(
+        'UPDATE communities SET suspended_at = UTC_TIMESTAMP(), suspended_by = ?, suspension_reason = ? WHERE id = ? AND suspended_at IS NULL AND deleted_at IS NULL',
+      );
+      expect(updates()[0].values).toEqual(['admin-id', 'Spam network', 'c-1']);
+      expect(audits).toEqual([
+        {
+          connection,
+          entry: {
+            actorId: 'admin-id',
+            action: 'community_suspended',
+            targetType: 'community',
+            targetId: 'c-1',
+            metadata: { community_name: 'garden', reason: 'Spam network' },
+          },
+        },
+      ]);
+      expect(result).toMatchObject({
+        id: 'c-1',
+        suspension_reason: 'Spam network',
+      });
+      expect(tx).toEqual({ commits: 1, rollbacks: 0, releases: 1 });
+    });
+
+    it.each([
+      ['an unknown id', undefined, NotFoundException],
+      [
+        'an already suspended community, keeping the first decision',
+        {
+          id: 'c-1',
+          name: 'garden',
+          suspended_at: new Date(),
+          deleted_at: null,
+        },
+        ConflictException,
+      ],
+      [
+        'a soft-deleted community',
+        {
+          id: 'c-1',
+          name: 'garden',
+          suspended_at: null,
+          deleted_at: new Date(),
+        },
+        ConflictException,
+      ],
+    ])('refuses %s, writing nothing', async (_name, row, error) => {
+      locked = row;
+      await expect(suspend()).rejects.toBeInstanceOf(error);
+      expect(updates()).toHaveLength(0);
+      expect(audits).toHaveLength(0);
+      expect(tx).toEqual({ commits: 0, rollbacks: 1, releases: 1 });
+    });
+
+    // A suspension landing between the read and the update.
+    it('answers 409 when the guarded update matches nothing', async () => {
+      updateAffected = 0;
+      await expect(suspend()).rejects.toBeInstanceOf(ConflictException);
+      expect(audits).toHaveLength(0);
+      expect(tx).toEqual({ commits: 0, rollbacks: 1, releases: 1 });
+    });
+
+    it('rolls the suspension back when the audit entry cannot be written', async () => {
+      failAudit = true;
+      await expect(suspend()).rejects.toThrow('Audit insert failed');
+      expect(tx).toEqual({ commits: 0, rollbacks: 1, releases: 1 });
+    });
+
+    it('yields one suspension and one 409 for two concurrent calls', async () => {
+      let suspended = false;
+      let unlock: () => void = () => undefined;
+      let held: Promise<void> | null = null;
+      const concurrent = new AdminCommunitiesService(
+        {
+          getConnection: () => {
+            let holds = false;
+            const release = () => {
+              if (holds) {
+                holds = false;
+                unlock();
+              }
+              return Promise.resolve();
+            };
+            return Promise.resolve({
+              beginTransaction: () => Promise.resolve(),
+              commit: release,
+              rollback: release,
+              release: () => undefined,
+              execute: async (sql: string) => {
+                if (sql.startsWith('SELECT id, name, suspended_at')) {
+                  while (held) await held;
+                  held = new Promise<void>((resolve) => {
+                    unlock = () => {
+                      held = null;
+                      resolve();
+                    };
+                  });
+                  holds = true;
+                  return [
+                    [
+                      {
+                        id: 'c-1',
+                        name: 'garden',
+                        suspended_at: suspended ? new Date() : null,
+                        deleted_at: null,
+                      },
+                    ],
+                    [],
+                  ];
+                }
+                if (sql.startsWith('UPDATE communities')) {
+                  await new Promise((resolve) => setTimeout(resolve, 5));
+                  const changed = !suspended;
+                  suspended = true;
+                  return [{ affectedRows: changed ? 1 : 0 }, []];
+                }
+                return [[detail], []];
+              },
+            });
+          },
+        } as unknown as Pool,
+        { record: () => Promise.resolve() } as unknown as AuditLogService,
+      );
+      const results = await Promise.allSettled([
+        concurrent.suspend('c-1', { reason: 'A' }, 'admin-1'),
+        concurrent.suspend('c-1', { reason: 'B' }, 'admin-2'),
+      ]);
+      expect(
+        results.filter(({ status }) => status === 'fulfilled'),
+      ).toHaveLength(1);
+      const rejected = results.find(
+        (result): result is PromiseRejectedResult =>
+          result.status === 'rejected',
+      )!;
+      expect(rejected.reason).toBeInstanceOf(ConflictException);
+    });
+  });
+
+  describe('restore', () => {
+    const restore = () =>
+      service.restore('c-1', { restore_reason: 'Appeal upheld' }, 'admin-id');
+
+    it('clears all three columns with a guarded update and audits once', async () => {
+      await restore();
+      expect(flat(updates()[0].sql)).toBe(
+        'UPDATE communities SET suspended_at = NULL, suspended_by = NULL, suspension_reason = NULL WHERE id = ? AND suspended_at IS NOT NULL',
+      );
+      expect(updates()[0].values).toEqual(['c-1']);
+      expect(audits).toEqual([
+        {
+          connection,
+          entry: {
+            actorId: 'admin-id',
+            action: 'community_restored',
+            targetType: 'community',
+            targetId: 'c-1',
+            metadata: {
+              community_name: 'garden',
+              restore_reason: 'Appeal upheld',
+            },
+          },
+        },
+      ]);
+      expect(tx).toEqual({ commits: 1, rollbacks: 0, releases: 1 });
+    });
+
+    it('tells 404 (unknown) from 409 (not suspended) when nothing was updated', async () => {
+      updateAffected = 0;
+      await expect(restore()).rejects.toBeInstanceOf(ConflictException);
+      nameRow = undefined;
+      await expect(restore()).rejects.toBeInstanceOf(NotFoundException);
+      expect(audits).toHaveLength(0);
+      expect(tx).toEqual({ commits: 0, rollbacks: 2, releases: 2 });
+    });
+
+    it('rolls the restoration back when the audit entry cannot be written', async () => {
+      failAudit = true;
+      await expect(restore()).rejects.toThrow('Audit insert failed');
       expect(tx).toEqual({ commits: 0, rollbacks: 1, releases: 1 });
     });
   });

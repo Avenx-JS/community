@@ -22,8 +22,8 @@ import {
   isSqlTrue,
 } from '../common/community-moderation';
 import {
-  activeCommunitySql,
-  listedCommunitySql,
+  COMMUNITY_VISIBLE_PREDICATE,
+  visibleCommunitySql,
 } from '../common/community-visibility';
 import { readPositiveInteger } from '../common/read-positive-integer';
 import { CommunityModerationLogService } from '../communities/community-moderation-log.service';
@@ -179,8 +179,8 @@ export class PostsService {
     // community_id filter and GET /communities/:name/posts all run it, so
     // they cannot drift apart.
     const where = query.community_id
-      ? ` WHERE community_id = ? AND ${activeCommunitySql('posts.community_id')} AND ${VISIBLE_POST_SQL}`
-      : ` WHERE ${activeCommunitySql('posts.community_id')} AND ${VISIBLE_POST_SQL}`;
+      ? ` WHERE community_id = ? AND ${visibleCommunitySql('posts.community_id')} AND ${VISIBLE_POST_SQL}`
+      : ` WHERE ${visibleCommunitySql('posts.community_id')} AND ${VISIBLE_POST_SQL}`;
     const values: (string | number)[] = query.community_id
       ? [query.community_id]
       : [];
@@ -221,7 +221,7 @@ export class PostsService {
       const [communities] = await connection.execute<
         (RowDataPacket & { id: string })[]
       >(
-        'SELECT id FROM communities WHERE id = ? AND deleted_at IS NULL LIMIT 1',
+        `SELECT id FROM communities WHERE id = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1`,
         [input.community_id],
       );
 
@@ -300,7 +300,7 @@ export class PostsService {
   // its removal state. The reviewer check only runs for a removed post.
   async findOne(id: string, viewerId?: string): Promise<ReviewablePostDto> {
     const [posts] = await this.pool.execute<(PostRow & RemovalStateRow)[]>(
-      `SELECT ${POST_COLUMNS}, ${REMOVAL_COLUMNS} FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} LIMIT 1`,
+      `SELECT ${POST_COLUMNS}, ${REMOVAL_COLUMNS} FROM posts WHERE id = ? AND ${visibleCommunitySql('posts.community_id')} LIMIT 1`,
       [id],
     );
     const post = posts[0];
@@ -424,7 +424,7 @@ export class PostsService {
       `SELECT posts.id, posts.author_id, posts.community_id, posts.title, posts.removed_at,
          ${canModerateCommunitySql('posts.community_id')} AS can_moderate
        FROM posts
-       WHERE posts.id = ? AND ${activeCommunitySql('posts.community_id')}
+       WHERE posts.id = ? AND ${visibleCommunitySql('posts.community_id')}
        LIMIT 1 FOR UPDATE`,
       [actorId, actorId, id],
     );
@@ -480,7 +480,7 @@ export class PostsService {
         `SELECT posts.id, posts.author_id, posts.community_id, posts.title,
            ${canModerateCommunitySql('posts.community_id')} AS can_moderate
          FROM posts
-         WHERE posts.id = ? AND ${activeCommunitySql('posts.community_id')}
+         WHERE posts.id = ? AND ${visibleCommunitySql('posts.community_id')}
          LIMIT 1 FOR UPDATE`,
         [actorId, actorId, id],
       );
@@ -540,7 +540,7 @@ export class PostsService {
       const [posts] = await connection.execute<EditablePostRow[]>(
         `SELECT id, author_id, type, title, content, locked_at, removed_at, community_id
          FROM posts
-         WHERE id = ? AND ${listedCommunitySql('posts.community_id')}
+         WHERE id = ? AND ${visibleCommunitySql('posts.community_id')}
          LIMIT 1 FOR UPDATE`,
         [id],
       );
@@ -826,7 +826,7 @@ export class PostsService {
       `SELECT posts.id, posts.community_id, posts.locked_at, posts.removed_at,
          ${canModerateCommunitySql('posts.community_id')} AS can_moderate
        FROM posts
-       WHERE posts.id = ? AND ${activeCommunitySql('posts.community_id')}
+       WHERE posts.id = ? AND ${visibleCommunitySql('posts.community_id')}
        LIMIT 1 FOR UPDATE`,
       [actorId, actorId, id],
     );
@@ -854,7 +854,7 @@ export class PostsService {
       `SELECT posts.id, posts.community_id, posts.pinned_at, posts.removed_at,
          ${canModerateCommunitySql('posts.community_id')} AS can_moderate
        FROM posts
-       WHERE posts.id = ? AND ${activeCommunitySql('posts.community_id')}
+       WHERE posts.id = ? AND ${visibleCommunitySql('posts.community_id')}
        LIMIT 1 FOR UPDATE`,
       [actorId, actorId, id],
     );

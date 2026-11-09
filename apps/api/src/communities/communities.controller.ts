@@ -150,7 +150,7 @@ export class CommunitiesController {
   @ApiNoContentResponse({ description: 'The community is deleted.' })
   @ApiErrorResponses({
     400: 'Invalid community name, a missing or mismatched confirmation name, or an unknown property.',
-    404: 'Community not found or already deleted.',
+    404: 'Community not found, already deleted, or suspended.',
   })
   remove(
     @Param('name', new SafeRouteParamPipe('communityName')) name: string,

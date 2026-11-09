@@ -6,6 +6,7 @@ import {
   MEMBERS_WHERE,
   MODERATORS_FROM,
 } from './communities.service';
+import { COMMUNITY_VISIBLE_PREDICATE } from '../common/community-visibility';
 
 // The recent-activity window, fixed in the server: a public summary takes no
 // caller-supplied range (see README, "Community statistics").
@@ -82,7 +83,7 @@ export class CommunityStatsService {
         created_at: Date | string;
       })[]
     >(
-      'SELECT id, creator_id, created_at FROM communities WHERE name = ? AND deleted_at IS NULL LIMIT 1',
+      `SELECT id, creator_id, created_at FROM communities WHERE name = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1`,
       [name],
     );
     const community = communities[0];

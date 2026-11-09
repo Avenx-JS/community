@@ -310,7 +310,12 @@ describe('Admin communities API (e2e)', () => {
       ).items.map((item) => item.name);
       const adminNames = names(await listed('?limit=100'));
       const hidden = adminNames.filter((name) => !publicNames.includes(name));
-      expect(hidden.sort()).toEqual(['deleted-and-suspended', 'deleted-one']);
+      // Soft-deleted and suspended alike: both hidden states.
+      expect(hidden.sort()).toEqual([
+        'deleted-and-suspended',
+        'deleted-one',
+        'suspended-one',
+      ]);
       expect(publicNames.every((name) => adminNames.includes(name))).toBe(true);
     });
 
@@ -551,12 +556,180 @@ describe('Admin communities API (e2e)', () => {
     }
   });
 
-  it('adds no suspend or restore route', async () => {
-    for (const action of ['suspend', 'restore']) {
+  describe('suspension', () => {
+    const post = (
+      path: string,
+      body: object,
+      token: string | null = 'admin-token',
+    ) => {
+      const call = request(app.getHttpServer()).post(path).send(body);
+      return token ? call.set('Authorization', `Bearer ${token}`) : call;
+    };
+    const suspend = (
+      id = 'c-01',
+      body: object = { reason: 'Spam network' },
+      token?: string | null,
+    ) =>
+      post(
+        `/admin/communities/${id}/suspend`,
+        body,
+        token === undefined ? 'admin-token' : token,
+      );
+    const restore = (
+      id = 'c-01',
+      body: object = { restore_reason: 'Appeal upheld' },
+      token?: string | null,
+    ) =>
+      post(
+        `/admin/communities/${id}/restore`,
+        body,
+        token === undefined ? 'admin-token' : token,
+      );
+    const community = (id: string) =>
+      store.communities.find((row) => row.id === id)!;
+    const publicNames = async () =>
+      (
+        (
+          await request(app.getHttpServer())
+            .get('/communities?limit=100')
+            .expect(200)
+        ).body as {
+          items: Array<{ name: string }>;
+        }
+      ).items.map((item) => item.name);
+    const actions = () => store.audit.map((row) => row[3]);
+
+    it('suspends with the reason and the token, returns the detail, and audits once', async () => {
+      const body = (await suspend().expect(200)).body as unknown;
+      expect(body).toMatchObject({
+        id: 'c-01',
+        suspension_reason: 'Spam network',
+        suspended_at: '2026-11-09T12:00:00.000Z',
+      });
+      expect(community('c-01')).toMatchObject({
+        suspended_by: 'u-admin',
+        suspension_reason: 'Spam network',
+      });
+      expect(actions()).toEqual(['community_suspended']);
+      expect(JSON.parse(String(store.audit[0][6]))).toEqual({
+        community_name: 'community-1',
+        reason: 'Spam network',
+      });
+      expect(tx).toEqual({ commits: 1, rollbacks: 0, releases: 1 });
+    });
+
+    it.each([
+      [{}],
+      [{ reason: '' }],
+      [{ reason: '   ' }],
+      [{ reason: 'x'.repeat(2001) }],
+      [{ reason: 'bad\u0000text' }],
+      [{ reason: 'Spam', duration_hours: 24 }],
+      [{ reason: 'Spam', expires_at: '2030-01-01T00:00:00Z' }],
+      [{ reason: 'Spam', suspended_by: 'u-alice' }],
+      [{ reason: 'Spam', unexpected: 1 }],
+    ])('answers %o with 400 and writes nothing', async (body) => {
+      await suspend('c-01', body).expect(400);
+      expect(community('c-01').suspended_at).toBeNull();
+      expect(store.audit).toHaveLength(0);
+    });
+
+    it('refuses a second suspension with 409, keeping the first decision', async () => {
+      await suspend('c-23', { reason: 'Again' }).expect(409);
+      expect(community('c-23')).toMatchObject({
+        suspended_by: 'u-gone',
+        suspension_reason: 'Spam network',
+      });
+      expect(store.audit).toHaveLength(0);
+    });
+
+    it('refuses a soft-deleted community with 409, and answers 404 and 400', async () => {
+      await suspend('c-24').expect(409);
+      await suspend('no-such-id').expect(404);
+      await suspend('bad.id').expect(400);
+      expect(store.audit).toHaveLength(0);
+    });
+
+    it('rolls the suspension back when the audit entry cannot be written', async () => {
+      failAudit = true;
+      await suspend().expect(500);
+      expect(community('c-01').suspended_at).toBeNull();
+      expect(tx).toEqual({ commits: 0, rollbacks: 1, releases: 1 });
+    });
+
+    it('restores with a reason, clearing all three columns, and audits once', async () => {
+      const body = (await restore('c-23').expect(200)).body as unknown;
+      expect(body).toMatchObject({
+        id: 'c-23',
+        suspended_at: null,
+        suspension_reason: null,
+      });
+      expect(community('c-23')).toMatchObject({
+        suspended_at: null,
+        suspended_by: null,
+        suspension_reason: null,
+      });
+      expect(actions()).toEqual(['community_restored']);
+      expect(JSON.parse(String(store.audit[0][6]))).toEqual({
+        community_name: 'suspended-one',
+        restore_reason: 'Appeal upheld',
+      });
+    });
+
+    it('refuses restoring a community that is not suspended with 409, and needs a reason', async () => {
+      await restore('c-01').expect(409);
+      await restore('no-such-id').expect(404);
+      await restore('c-23', {}).expect(400);
+      await restore('c-23', { reason: 'wrong key' }).expect(400);
+      expect(store.audit).toHaveLength(0);
+    });
+
+    it('guards both routes like every admin route', async () => {
+      await suspend('c-01', { reason: 'x' }, null).expect(401);
+      await suspend('c-01', { reason: 'x' }, 'user-token').expect(403);
+      await restore('c-23', { restore_reason: 'x' }, null).expect(401);
+      await restore('c-23', { restore_reason: 'x' }, 'user-token').expect(403);
+      expect(store.audit).toHaveLength(0);
+    });
+
+    it('hides it from the public, keeps it for administrators, and restores it intact', async () => {
+      const subscriptionsBefore = store.subscriptions.length;
+      expect(await publicNames()).toContain('community-1');
       await request(app.getHttpServer())
-        .post(`/admin/communities/c-01/${action}`)
-        .set('Authorization', 'Bearer admin-token')
+        .get('/communities/community-1')
+        .expect(200);
+
+      await suspend().expect(200);
+      expect(await publicNames()).not.toContain('community-1');
+      const hidden = await request(app.getHttpServer())
+        .get('/communities/community-1')
         .expect(404);
-    }
+      // The same 404 as a deleted or unknown community: nothing says why.
+      const deleted = await request(app.getHttpServer())
+        .get('/communities/deleted-one')
+        .expect(404);
+      const unknown = await request(app.getHttpServer())
+        .get('/communities/no-such-name')
+        .expect(404);
+      expect(hidden.body).toEqual(deleted.body);
+      expect(hidden.body).toEqual(unknown.body);
+      // Administrators still see it, in every directory route.
+      await admin.get('/admin/communities/c-01').expect(200);
+      expect(
+        (
+          (await admin.get('/admin/communities?state=suspended').expect(200))
+            .body as ListBody
+        ).items.map((item) => item.id),
+      ).toContain('c-01');
+
+      await restore().expect(200);
+      expect(await publicNames()).toContain('community-1');
+      await request(app.getHttpServer())
+        .get('/communities/community-1')
+        .expect(200);
+      // Nothing was deleted along the way.
+      expect(store.subscriptions).toHaveLength(subscriptionsBefore);
+      expect(actions()).toEqual(['community_suspended', 'community_restored']);
+    });
   });
 });

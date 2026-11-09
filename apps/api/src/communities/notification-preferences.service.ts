@@ -2,6 +2,10 @@ import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { UpdateNotificationPreferencesDto } from './dto/update-notification-preferences.dto';
+import {
+  COMMUNITY_VISIBLE_PREDICATE,
+  visibleCommunityColumnsSql,
+} from '../common/community-visibility';
 
 interface PreferenceRow extends RowDataPacket {
   id: string;
@@ -30,7 +34,7 @@ export class NotificationPreferencesService {
        FROM communities c
        LEFT JOIN community_notification_preferences p
          ON p.community_id = c.id AND p.user_id = ?
-       WHERE c.name = ? AND c.deleted_at IS NULL LIMIT 1`,
+       WHERE c.name = ? AND ${visibleCommunityColumnsSql('c')} LIMIT 1`,
       [userId, userId, name],
     );
     const row = rows[0];
@@ -54,7 +58,7 @@ export class NotificationPreferencesService {
     const [communities] = await this.pool.execute<
       (RowDataPacket & { id: string })[]
     >(
-      'SELECT id FROM communities WHERE name = ? AND deleted_at IS NULL LIMIT 1',
+      `SELECT id FROM communities WHERE name = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1`,
       [name],
     );
     const community = communities[0];

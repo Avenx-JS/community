@@ -21,10 +21,7 @@ import {
   canModerateCommunitySql,
   isSqlTrue,
 } from '../common/community-moderation';
-import {
-  activeCommunitySql,
-  listedCommunitySql,
-} from '../common/community-visibility';
+import { visibleCommunitySql } from '../common/community-visibility';
 import type { NotificationEntry } from '../notifications/notification-metadata';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -91,7 +88,7 @@ export const MAX_COMMENTS_PER_THREAD = 500;
 
 // The tree route's post lookup: the community for the reviewer check, and
 // the removal state that hides the whole thread from everyone else.
-export const THREAD_POST_SQL = `SELECT community_id, removed_at FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} LIMIT 1`;
+export const THREAD_POST_SQL = `SELECT community_id, removed_at FROM posts WHERE id = ? AND ${visibleCommunitySql('posts.community_id')} LIMIT 1`;
 
 // The furthest a reply's ancestor walk goes. A chain this deep cannot be
 // shown by the tree route anyway (MAX_COMMENTS_PER_THREAD), and the bound
@@ -357,7 +354,7 @@ export class CommentsService {
     >(
       `SELECT comments.id FROM comments
        INNER JOIN posts ON posts.id = comments.post_id
-       WHERE comments.id = ? AND ${activeCommunitySql('posts.community_id')}
+       WHERE comments.id = ? AND ${visibleCommunitySql('posts.community_id')}
          AND posts.removed_at IS NULL
        LIMIT 1`,
       [commentId],
@@ -500,7 +497,7 @@ export class CommentsService {
            posts.community_id
          FROM comments
          INNER JOIN posts ON posts.id = comments.post_id
-         WHERE comments.id = ? AND ${listedCommunitySql('posts.community_id')}
+         WHERE comments.id = ? AND ${visibleCommunitySql('posts.community_id')}
          LIMIT 1 FOR UPDATE OF comments`,
         [id],
       );
@@ -575,7 +572,7 @@ export class CommentsService {
           removed_at?: Date | string | null;
         })[]
       >(
-        `SELECT id, author_id, community_id, title, locked_at, removed_at FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} LIMIT 1 FOR SHARE`,
+        `SELECT id, author_id, community_id, title, locked_at, removed_at FROM posts WHERE id = ? AND ${visibleCommunitySql('posts.community_id')} LIMIT 1 FOR SHARE`,
         [postId],
       );
       const post = posts[0];
@@ -743,7 +740,7 @@ export class CommentsService {
            ${canModerateCommunitySql('posts.community_id')} AS can_moderate
          FROM comments
          INNER JOIN posts ON posts.id = comments.post_id
-         WHERE comments.id = ? AND ${activeCommunitySql('posts.community_id')}
+         WHERE comments.id = ? AND ${visibleCommunitySql('posts.community_id')}
          LIMIT 1 FOR UPDATE OF comments`,
         [actorId, actorId, id],
       );
@@ -781,7 +778,7 @@ export class CommentsService {
     const [posts] = await this.pool.execute<(RowDataPacket & { id: string })[]>(
       // Visible posts only: a removed post's flat routes are 404 for
       // everyone; reviewers read it through the tree route.
-      `SELECT id FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')} AND posts.removed_at IS NULL LIMIT 1`,
+      `SELECT id FROM posts WHERE id = ? AND ${visibleCommunitySql('posts.community_id')} AND posts.removed_at IS NULL LIMIT 1`,
       [postId],
     );
     if (!posts[0]) {

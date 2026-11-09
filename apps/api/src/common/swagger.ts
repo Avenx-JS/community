@@ -40,7 +40,12 @@ export function createOpenApiDocument(app: INestApplication): OpenAPIObject {
     .setDescription(
       'REST API for communities, posts, comments, votes, reports, and ' +
         'platform administration. Error responses share the `ErrorResponse` ' +
-        'shape; every route except `GET /health` is rate limited.',
+        'shape; every route except `GET /health` is rate limited. A ' +
+        'community that is soft-deleted, or suspended by a platform ' +
+        'administrator, is not found on every route outside /admin, for ' +
+        'every caller, its own moderators and creator included: lookups ' +
+        'answer the same 404 as for an unknown community, and listings and ' +
+        'search omit it and its content.',
     )
     .addTag('health', 'Service status.')
     .addTag('auth', 'Registration, login, token rotation, and logout.')

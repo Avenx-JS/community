@@ -785,7 +785,7 @@ describe('ReportsService: the reporter’s own reports', () => {
         'IF(target_comment.removed_at IS NULL, LEFT(target_comment.content, 100), NULL)',
       );
       expect(sql).toContain(
-        'IF(target_community.deleted_at IS NULL, target_community.name, NULL)',
+        'IF(target_community.deleted_at IS NULL AND target_community.suspended_at IS NULL, target_community.name, NULL)',
       );
     });
 

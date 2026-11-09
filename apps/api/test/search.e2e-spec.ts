@@ -296,7 +296,7 @@ function makePool() {
         .filter(
           (row) =>
             row.relevance > 0 &&
-            (!flat.includes('communities.deleted_at IS NULL') ||
+            (!flat.includes('communities.deleted_at IS NULL AND communities.suspended_at IS NULL') ||
               row.deleted_at === null) &&
             (!flat.includes('communities.suspended_at IS NULL') ||
               row.suspended_at === null),
@@ -317,7 +317,7 @@ function makePool() {
             row.relevance > 0 &&
             (!flat.includes('posts.removed_at IS NULL') ||
               row.removed_at === null) &&
-            (!flat.includes('communities.deleted_at IS NULL') ||
+            (!flat.includes('communities.deleted_at IS NULL AND communities.suspended_at IS NULL') ||
               home.deleted_at === null) &&
             (!flat.includes('communities.suspended_at IS NULL') ||
               home.suspended_at === null) &&

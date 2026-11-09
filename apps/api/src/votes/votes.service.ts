@@ -15,7 +15,7 @@ import type {
 } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { CommunityBanPolicyService } from '../communities/community-ban-policy.service';
-import { activeCommunitySql } from '../common/community-visibility';
+import { visibleCommunitySql } from '../common/community-visibility';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { UserBlockPolicyService } from '../users/user-block-policy.service';
 
@@ -267,12 +267,12 @@ export class VotesService {
       })[]
     >(
       targetType === 'post'
-        ? `SELECT id, community_id, author_id, removed_at IS NOT NULL AS removed FROM posts WHERE id = ? AND ${activeCommunitySql('posts.community_id')}${lock ? ' FOR UPDATE' : ''}`
+        ? `SELECT id, community_id, author_id, removed_at IS NOT NULL AS removed FROM posts WHERE id = ? AND ${visibleCommunitySql('posts.community_id')}${lock ? ' FOR UPDATE' : ''}`
         : `SELECT comments.id, posts.community_id, comments.author_id,
              (comments.removed_at IS NOT NULL OR posts.removed_at IS NOT NULL) AS removed
            FROM comments
            INNER JOIN posts ON posts.id = comments.post_id
-           WHERE comments.id = ? AND ${activeCommunitySql('posts.community_id')}${
+           WHERE comments.id = ? AND ${visibleCommunitySql('posts.community_id')}${
              lock ? '\n           FOR UPDATE OF comments' : ''
            }`,
       [targetId],

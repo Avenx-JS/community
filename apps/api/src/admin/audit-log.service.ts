@@ -114,6 +114,8 @@ export type AuditEntry =
       targetId: string;
       metadata?: {
         community_name?: string;
+        // Why the suspension was reversed: a reversal is a decision too.
+        restore_reason?: string;
       };
     }
   | {
@@ -276,15 +278,18 @@ function usernameSnapshotValue(
   return value;
 }
 
-function reasonValue(metadata: Record<string, unknown>): string | undefined {
-  const value = requiredString(metadata, 'reason');
+function reasonValue(
+  metadata: Record<string, unknown>,
+  key = 'reason',
+): string | undefined {
+  const value = requiredString(metadata, key);
   if (
     value !== undefined &&
     (value.trim().length === 0 ||
       value.length > MAX_REASON_LENGTH ||
       hasControlCharacters(value, true))
   ) {
-    throw new TypeError('Invalid audit metadata field: reason');
+    throw new TypeError(`Invalid audit metadata field: ${key}`);
   }
   return value;
 }
@@ -370,7 +375,9 @@ export function buildAuditMetadata(
     }
     case 'community_restored': {
       const communityName = communityNameValue(metadata);
+      const restoreReason = reasonValue(metadata, 'restore_reason');
       if (communityName !== undefined) result.community_name = communityName;
+      if (restoreReason !== undefined) result.restore_reason = restoreReason;
       break;
     }
     case 'community_updated': {

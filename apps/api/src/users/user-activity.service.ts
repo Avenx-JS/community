@@ -6,7 +6,10 @@ import {
 } from '@nestjs/common';
 import type { Pool, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
-import { listedCommunitySql } from '../common/community-visibility';
+import {
+  visibleCommunityColumnsSql,
+  visibleCommunitySql,
+} from '../common/community-visibility';
 import { loadVoteScores } from '../votes/vote-scores';
 import { UserBlockPolicyService } from './user-block-policy.service';
 import {
@@ -37,7 +40,7 @@ export const USER_ID_BY_USERNAME_SQL =
 
 // Served by idx_posts_author_created (author_id, created_at, id): rows come
 // in index order, so neither direction needs a filesort.
-const USER_POSTS_WHERE = `WHERE author_id = ? AND removed_at IS NULL AND ${listedCommunitySql('posts.community_id')}`;
+const USER_POSTS_WHERE = `WHERE author_id = ? AND removed_at IS NULL AND ${visibleCommunitySql('posts.community_id')}`;
 
 export const userPostsSql = (sort: UserActivitySort): string =>
   `SELECT ${POST_COLUMNS} FROM posts ${USER_POSTS_WHERE} ORDER BY ${order(sort, 'created_at', 'id')} LIMIT ? OFFSET ?`;
@@ -57,8 +60,7 @@ const USER_COMMENTS_FROM = `FROM comments c
        WHERE c.author_id = ?
          AND c.removed_at IS NULL
          AND p.removed_at IS NULL
-         AND co.deleted_at IS NULL
-         AND co.suspended_at IS NULL`;
+         AND ${visibleCommunityColumnsSql('co')}`;
 
 export const userCommentsSql = (sort: UserActivitySort): string =>
   `SELECT c.id, c.post_id, c.content, c.created_at, c.edited_at,
@@ -87,7 +89,7 @@ const USER_COMMUNITY_IDS = `(
          WHERE c.author_id = ? AND c.removed_at IS NULL AND p.removed_at IS NULL
        ) activity
        JOIN communities co ON co.id = activity.community_id
-       WHERE co.deleted_at IS NULL AND co.suspended_at IS NULL`;
+       WHERE ${visibleCommunityColumnsSql('co')}`;
 
 // By name: deterministic, and unlike a recency order it does not reveal when
 // the person was last active there. The strongest role wins.

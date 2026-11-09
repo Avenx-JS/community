@@ -1,10 +1,11 @@
-import { ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Transform, Type } from 'class-transformer';
 import {
   IsIn,
   IsInt,
   IsOptional,
   IsString,
+  Length,
   Matches,
   Max,
   MaxLength,
@@ -89,3 +90,29 @@ export class ListAdminCommunitiesDto {
 // one field required. name, rules and every other property are rejected by
 // the global pipe's forbidNonWhitelisted.
 export class AdminUpdateCommunityDto extends UpdateCommunityDto {}
+
+const trim = ({ value }: { value: unknown }) =>
+  typeof value === 'string' ? value.trim() : value;
+
+// Indefinite by design: a community suspension has no duration, unlike a
+// user suspension. duration_hours, expires_at and anything else are rejected
+// by forbidNonWhitelisted. Required, because taking a community offline
+// affects every member and the justification is what makes it reviewable.
+export class SuspendCommunityDto {
+  @ApiProperty({ minLength: 1, maxLength: 2000 })
+  @Transform(trim)
+  @IsString()
+  @Length(1, 2000)
+  @Validate(PlainTextConstraint)
+  reason!: string;
+}
+
+// A reversal is a decision too, as lifting a restriction is.
+export class RestoreCommunityDto {
+  @ApiProperty({ minLength: 1, maxLength: 2000 })
+  @Transform(trim)
+  @IsString()
+  @Length(1, 2000)
+  @Validate(PlainTextConstraint)
+  restore_reason!: string;
+}

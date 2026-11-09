@@ -10,7 +10,7 @@ import {
   type RowDataPacket,
 } from 'mysql2/promise';
 import { CommentsService } from '../comments/comments.service';
-import { activeCommunitySql } from '../common/community-visibility';
+import { visibleCommunitySql } from '../common/community-visibility';
 import type { CommunityModerationLogService } from '../communities/community-moderation-log.service';
 import type { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import type { NotificationsService } from '../notifications/notifications.service';
@@ -376,7 +376,7 @@ integration('content listing indexes (MySQL)', () => {
   // and is what the two-query alternative there would use for unpinned posts.
   it("pages one community's posts newest-first on idx_posts_community_created without a filesort", async () => {
     const result = await plan(
-      `SELECT id, title, content, type, author_id, community_id, created_at FROM posts WHERE community_id = ? AND ${activeCommunitySql('posts.community_id')} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+      `SELECT id, title, content, type, author_id, community_id, created_at FROM posts WHERE community_id = ? AND ${visibleCommunitySql('posts.community_id')} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
       ['c1', 20, 20],
     );
     expect(result.key).toBe('idx_posts_community_created');

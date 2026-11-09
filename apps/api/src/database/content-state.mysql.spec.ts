@@ -13,7 +13,7 @@ import { CommentsService } from '../comments/comments.service';
 import type { CommunityModerationLogService } from '../communities/community-moderation-log.service';
 import type { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import type { NotificationsService } from '../notifications/notifications.service';
-import { activeCommunitySql } from '../common/community-visibility';
+import { visibleCommunitySql } from '../common/community-visibility';
 import {
   POST_COLUMNS,
   PostsService,
@@ -212,7 +212,7 @@ integration('post and comment content state (MySQL)', () => {
   }, 120_000);
 
   const legacyListing = async () => {
-    const where = ` WHERE ${activeCommunitySql('posts.community_id')}`;
+    const where = ` WHERE ${visibleCommunitySql('posts.community_id')}`;
     const [items] = await pool.execute<PostRow[]>(
       `SELECT ${POST_COLUMNS} FROM posts${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
       [100, 0],

@@ -17,6 +17,7 @@ import { CommunityRuleAcceptanceService } from './community-rule-acceptance.serv
 import { hashCommunityRules, CommunityRuleItem } from './community-rules-hash';
 import { ListRuleVersionsDto } from './dto/list-rule-versions.dto';
 import { PublishCommunityRulesDto } from './dto/publish-community-rules.dto';
+import { COMMUNITY_VISIBLE_PREDICATE } from '../common/community-visibility';
 
 interface RuleCommunityRow extends RowDataPacket {
   id: string;
@@ -316,7 +317,7 @@ export class CommunityRulesService {
     forUpdate = false,
   ): Promise<RuleCommunityRow> {
     const [communities] = await executor.execute<RuleCommunityRow[]>(
-      `SELECT id, creator_id FROM communities WHERE name = ? AND deleted_at IS NULL LIMIT 1${
+      `SELECT id, creator_id FROM communities WHERE name = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1${
         forUpdate ? ' FOR UPDATE' : ''
       }`,
       [name],

@@ -461,7 +461,7 @@ export class PostsController {
   @ApiOkResponse({ type: CommentReplyListResponse })
   @ApiErrorResponses({
     400: 'Invalid post ID or query parameters.',
-    404: 'Post not found, or its community is deleted.',
+    404: 'Post not found, or its community is deleted or suspended.',
   })
   getTopLevelComments(
     @Param('postId', new SafeRouteParamPipe('id')) postId: string,

@@ -91,7 +91,7 @@ describe('CommunityPostsController', () => {
     );
     for (const { sql } of [listing, count]) {
       expect(sql).toContain('WHERE community_id = ?');
-      expect(sql).toContain('communities.deleted_at IS NULL');
+      expect(sql).toContain('communities.deleted_at IS NULL AND communities.suspended_at IS NULL');
       expect(sql).toContain('posts.removed_at IS NULL');
     }
     expect(listing.values).toEqual(['community-1', 20, 0]);

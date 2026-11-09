@@ -1,4 +1,9 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import type {
   Pool,
   PoolConnection,
@@ -13,14 +18,17 @@ import type {
   AdminCommunityState,
   AdminUpdateCommunityDto,
   ListAdminCommunitiesDto,
+  RestoreCommunityDto,
+  SuspendCommunityDto,
 } from './dto/admin-communities.dto';
 
 // The platform administrators' view of communities. Unlike the public
 // listing it hides nothing: suspended and soft-deleted communities are the
 // ones most likely to need attention. Addressed by id, as every /admin route
 // is, with the name in every response for cross-reference. Read and correct
-// only: suspension and restoration are a separate route pair, which must
-// ship with the enforcement that gives suspension its meaning.
+// and correct, suspend and restore. A suspended community is hidden from
+// everyone else by COMMUNITY_VISIBLE_PREDICATE (common/community-visibility.ts),
+// which every public read and write applies.
 
 export interface AdminCommunityListItem {
   id: string;
@@ -306,6 +314,118 @@ export class AdminCommunitiesService {
       await connection.commit();
       transactionStarted = false;
       return detail;
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  // Takes a community offline for everyone but platform administrators,
+  // indefinitely, until restored. Nothing is deleted and no membership is
+  // removed: it is reversible. suspended_by comes only from the token.
+  async suspend(
+    id: string,
+    input: SuspendCommunityDto,
+    actorId: string,
+  ): Promise<AdminCommunityDetail> {
+    return this.inTransaction(async (connection) => {
+      const [rows] = await connection.execute<
+        (RowDataPacket & {
+          id: string;
+          name: string;
+          suspended_at: Date | string | null;
+          deleted_at: Date | string | null;
+        })[]
+      >(
+        'SELECT id, name, suspended_at, deleted_at FROM communities WHERE id = ? LIMIT 1 FOR UPDATE',
+        [id],
+      );
+      const community = rows[0];
+      if (!community) {
+        throw new NotFoundException('Community not found');
+      }
+      // Re-suspending would silently rewrite the record of the first decision.
+      if (community.suspended_at !== null) {
+        throw new ConflictException('Community is already suspended');
+      }
+      // Already hidden: suspending would add nothing but a double state.
+      if (community.deleted_at !== null) {
+        throw new ConflictException('A deleted community cannot be suspended');
+      }
+
+      const [result] = await connection.execute<ResultSetHeader>(
+        `UPDATE communities
+         SET suspended_at = UTC_TIMESTAMP(), suspended_by = ?, suspension_reason = ?
+         WHERE id = ? AND suspended_at IS NULL AND deleted_at IS NULL`,
+        [actorId, input.reason, id],
+      );
+      if (result.affectedRows !== 1) {
+        throw new ConflictException('Community changed concurrently');
+      }
+      await this.auditLogService.record(connection, {
+        actorId,
+        action: 'community_suspended',
+        targetType: 'community',
+        targetId: id,
+        metadata: { community_name: community.name, reason: input.reason },
+      });
+      return this.findOne(id, connection);
+    });
+  }
+
+  // Clears the suspension and nothing else: content removed and members who
+  // left while it was suspended stay as they are.
+  async restore(
+    id: string,
+    input: RestoreCommunityDto,
+    actorId: string,
+  ): Promise<AdminCommunityDetail> {
+    return this.inTransaction(async (connection) => {
+      const [result] = await connection.execute<ResultSetHeader>(
+        `UPDATE communities
+         SET suspended_at = NULL, suspended_by = NULL, suspension_reason = NULL
+         WHERE id = ? AND suspended_at IS NOT NULL`,
+        [id],
+      );
+      const [rows] = await connection.execute<
+        (RowDataPacket & { name: string })[]
+      >('SELECT name FROM communities WHERE id = ? LIMIT 1', [id]);
+      if (!rows[0]) {
+        throw new NotFoundException('Community not found');
+      }
+      if (result.affectedRows !== 1) {
+        throw new ConflictException('Community is not suspended');
+      }
+      await this.auditLogService.record(connection, {
+        actorId,
+        action: 'community_restored',
+        targetType: 'community',
+        targetId: id,
+        metadata: {
+          community_name: rows[0].name,
+          restore_reason: input.restore_reason,
+        },
+      });
+      return this.findOne(id, connection);
+    });
+  }
+
+  private async inTransaction<T>(
+    work: (connection: PoolConnection) => Promise<T>,
+  ): Promise<T> {
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+      const result = await work(connection);
+      await connection.commit();
+      transactionStarted = false;
+      return result;
     } catch (error) {
       if (transactionStarted) {
         await connection.rollback();

@@ -51,7 +51,7 @@ describe('SavedPostsService', () => {
 
     it('requires a visible post: not removed, community neither deleted nor suspended', () => {
       expect(SAVEABLE_POST_SQL).toContain('posts.removed_at IS NULL');
-      expect(SAVEABLE_POST_SQL).toContain('communities.deleted_at IS NULL');
+      expect(SAVEABLE_POST_SQL).toContain('communities.deleted_at IS NULL AND communities.suspended_at IS NULL');
       expect(SAVEABLE_POST_SQL).toContain('communities.suspended_at IS NULL');
     });
 
@@ -198,7 +198,7 @@ describe('SavedPostsService', () => {
       );
       expect(SAVED_POSTS_FROM).toContain('WHERE s.user_id = ?');
       expect(SAVED_POSTS_FROM).toContain('p.removed_at IS NULL');
-      expect(SAVED_POSTS_FROM).toContain('communities.deleted_at IS NULL');
+      expect(SAVED_POSTS_FROM).toContain('communities.deleted_at IS NULL AND communities.suspended_at IS NULL');
       expect(SAVED_POSTS_FROM).toContain('communities.suspended_at IS NULL');
       // A deleted author is no reason to drop a save.
       expect(SAVED_POSTS_FROM).not.toContain('users');

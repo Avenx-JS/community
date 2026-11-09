@@ -11,6 +11,7 @@ import type {
   RowDataPacket,
 } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { COMMUNITY_VISIBLE_PREDICATE } from '../common/community-visibility';
 
 interface CurrentDocumentRow extends RowDataPacket {
   document_id: string;
@@ -110,7 +111,7 @@ export class CommunityRuleAcceptanceService {
     }
 
     const [communities] = await connection.execute<CommunityIdentityRow[]>(
-      'SELECT name, creator_id FROM communities WHERE id = ? AND deleted_at IS NULL LIMIT 1',
+      `SELECT name, creator_id FROM communities WHERE id = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1`,
       [communityId],
     );
     const community = communities[0];

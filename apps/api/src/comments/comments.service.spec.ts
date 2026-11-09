@@ -839,7 +839,7 @@ describe('CommentsService paginated listings', () => {
       expect(queries).toHaveLength(1);
       expect(queries[0].values).toEqual(['missing']);
       expect(queries[0].sql).toContain('comments.id = ?');
-      expect(queries[0].sql).toContain('communities.deleted_at IS NULL');
+      expect(queries[0].sql).toContain('communities.deleted_at IS NULL AND communities.suspended_at IS NULL');
       // The parent lookup ignores removal, so the replies of a removed
       // comment stay readable.
       expect(queries[0].sql).not.toContain('comments.removed_at');
@@ -975,7 +975,7 @@ describe('CommentsService paginated listings', () => {
         NotFoundException,
       );
       expect(queries).toHaveLength(1);
-      expect(queries[0].sql).toContain('communities.deleted_at IS NULL');
+      expect(queries[0].sql).toContain('communities.deleted_at IS NULL AND communities.suspended_at IS NULL');
     });
 
     it('selects visible roots of the post with the parent_id IS NULL predicate', async () => {
@@ -1149,7 +1149,7 @@ describe('CommentsService.update', () => {
     expect(read.sql).toContain(
       'INNER JOIN posts ON posts.id = comments.post_id',
     );
-    expect(read.sql).toContain('communities.deleted_at IS NULL');
+    expect(read.sql).toContain('communities.deleted_at IS NULL AND communities.suspended_at IS NULL');
     expect(read.sql).toContain('communities.suspended_at IS NULL');
   });
 

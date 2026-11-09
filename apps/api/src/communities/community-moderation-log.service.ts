@@ -13,6 +13,7 @@ import {
 } from '../common/community-moderation';
 import { hasControlCharacters } from '../common/safe-text.constraint';
 import type { ListCommunityModerationActionsDto } from './dto/list-community-moderation-actions.dto';
+import { visibleCommunityColumnsSql } from '../common/community-visibility';
 
 // Mirrors the community_moderation_actions.action and target_type enums; read
 // filters validate against these lists so they cannot drift from what is
@@ -385,7 +386,7 @@ export class CommunityModerationLogService {
     const [communities] = await this.pool.execute<CommunityAccessRow[]>(
       `SELECT c.id, ${canModerateCommunitySql('c.id')} AS can_moderate
        FROM communities c
-       WHERE c.name = ? AND c.deleted_at IS NULL LIMIT 1`,
+       WHERE c.name = ? AND ${visibleCommunityColumnsSql('c')} LIMIT 1`,
       [userId, userId, name],
     );
     const community = communities[0];

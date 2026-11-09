@@ -178,9 +178,37 @@ export function executeCommunityDirectoryQuery(
     ];
   }
 
-  // The public GET /communities listing and its count.
-  if (/FROM communities WHERE deleted_at IS NULL/.test(flat)) {
-    let rows = store.communities.filter((row) => !row.deleted_at);
+  // GET /communities/:name: one visible community by name.
+  if (
+    flat ===
+    'SELECT id, creator_id, name, description, created_at FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1'
+  ) {
+    return [
+      store.communities
+        .filter(
+          (row) =>
+            row.name === values[0] && !row.deleted_at && !row.suspended_at,
+        )
+        .map(({ id, creator_id, name, description, created_at }) => ({
+          id,
+          creator_id,
+          name,
+          description,
+          created_at,
+        })),
+      [],
+    ];
+  }
+
+  // The public GET /communities listing and its count: visible ones only.
+  if (
+    /FROM communities WHERE deleted_at IS NULL AND suspended_at IS NULL/.test(
+      flat,
+    )
+  ) {
+    let rows = store.communities.filter(
+      (row) => !row.deleted_at && !row.suspended_at,
+    );
     if (flat.includes('LIKE LOWER(?)')) {
       const pattern = like(String(values[0]));
       rows = rows.filter(
@@ -204,6 +232,59 @@ export function executeCommunityDirectoryQuery(
     ];
   }
 
+  // POST /admin/communities/:id/suspend and /restore.
+  if (
+    flat ===
+    'SELECT id, name, suspended_at, deleted_at FROM communities WHERE id = ? LIMIT 1 FOR UPDATE'
+  ) {
+    const row = store.communities.find((c) => c.id === values[0]);
+    return [
+      row
+        ? [
+            {
+              id: row.id,
+              name: row.name,
+              suspended_at: row.suspended_at,
+              deleted_at: row.deleted_at,
+            },
+          ]
+        : [],
+      [],
+    ];
+  }
+  if (
+    flat.startsWith('UPDATE communities SET suspended_at = UTC_TIMESTAMP()')
+  ) {
+    const [actor, reason, id] = values as string[];
+    const row = store.communities.find(
+      (c) => c.id === id && !c.suspended_at && !c.deleted_at,
+    );
+    if (row) {
+      Object.assign(row, {
+        suspended_at: '2026-11-09T12:00:00.000Z',
+        suspended_by: actor,
+        suspension_reason: reason,
+      });
+    }
+    return [{ affectedRows: row ? 1 : 0 }, []];
+  }
+  if (flat.startsWith('UPDATE communities SET suspended_at = NULL')) {
+    const row = store.communities.find(
+      (c) => c.id === values[0] && c.suspended_at,
+    );
+    if (row) {
+      Object.assign(row, {
+        suspended_at: null,
+        suspended_by: null,
+        suspension_reason: null,
+      });
+    }
+    return [{ affectedRows: row ? 1 : 0 }, []];
+  }
+  if (flat === 'SELECT name FROM communities WHERE id = ? LIMIT 1') {
+    const row = store.communities.find((c) => c.id === values[0]);
+    return [row ? [{ name: row.name }] : [], []];
+  }
   if (
     flat === 'SELECT id, name FROM communities WHERE id = ? LIMIT 1 FOR UPDATE'
   ) {

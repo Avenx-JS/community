@@ -1,30 +1,32 @@
-// SQL expression that is true when the community identified by
-// communityIdColumn has not been deleted. Community deletion is a soft delete
-// (communities.deleted_at), so every read of community-scoped content must
-// apply this or the content of a deleted community stays reachable. No
-// placeholders, so it can be appended to any WHERE clause.
-export function activeCommunitySql(communityIdColumn: string): string {
-  return activeCommunityExists(communityIdColumn, '');
-}
+// The one definition of "this community is publicly there": neither
+// soft-deleted by its creator (deleted_at) nor suspended by a platform
+// administrator (suspended_at). Every public read and every write applies it,
+// so a call site cannot honour one hidden state and miss the other, and the
+// two states are indistinguishable from outside: both are a 404 or an
+// omission. Only the /admin routes, which must see hidden communities, do
+// not use it.
+const HIDDEN_STATE_COLUMNS = ['deleted_at', 'suspended_at'] as const;
 
-// As activeCommunitySql, and also false for a suspended community
-// (communities.suspended_at, migration 025). Only the public author listings
-// (GET /users/:username/...) apply it so far: suspension is not enforced on
-// the other reads yet, and each must add it when it is.
-export function listedCommunitySql(communityIdColumn: string): string {
-  return activeCommunityExists(
-    communityIdColumn,
-    '\n           AND communities.suspended_at IS NULL',
+const visibleOver = (qualify: (column: string) => string) =>
+  HIDDEN_STATE_COLUMNS.map((column) => `${qualify(column)} IS NULL`).join(
+    ' AND ',
   );
+
+// Unqualified, for a statement over communities alone.
+export const COMMUNITY_VISIBLE_PREDICATE = visibleOver((column) => column);
+
+// The same predicate over a communities alias, e.g. visibleCommunityColumnsSql('c').
+export function visibleCommunityColumnsSql(alias: string): string {
+  return visibleOver((column) => `${alias}.${column}`);
 }
 
-function activeCommunityExists(
-  communityIdColumn: string,
-  extra: string,
-): string {
+// The same predicate for content that names its community by id: true when
+// the community identified by communityIdColumn is visible. No placeholders,
+// so it can be appended to any WHERE clause.
+export function visibleCommunitySql(communityIdColumn: string): string {
   return `EXISTS (
          SELECT 1 FROM communities
          WHERE communities.id = ${communityIdColumn}
-           AND communities.deleted_at IS NULL${extra}
+           AND ${visibleCommunityColumnsSql('communities')}
        )`;
 }

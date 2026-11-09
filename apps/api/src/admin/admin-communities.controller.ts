@@ -2,8 +2,11 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   Patch,
+  Post,
   Query,
   Req,
   UseGuards,
@@ -27,12 +30,14 @@ import {
 import {
   AdminUpdateCommunityDto,
   ListAdminCommunitiesDto,
+  RestoreCommunityDto,
+  SuspendCommunityDto,
 } from './dto/admin-communities.dto';
 
 // Addressed by id like every /admin route, unlike the public :name routes:
 // an administrator arrives from a report or an audit entry holding an id.
-// There is deliberately no suspend or restore route here; those ship with
-// the enforcement that makes suspension mean something.
+// Suspension is enforced everywhere else by COMMUNITY_VISIBLE_PREDICATE;
+// these routes are the only ones that still see a suspended community.
 @ApiTags('admin: communities')
 @Controller('admin/communities')
 @UseGuards(AuthGuard, AdminGuard)
@@ -91,5 +96,59 @@ export class AdminCommunitiesController {
     @Req() request: AdminAuthenticatedRequest,
   ) {
     return this.communities.update(id, body, request.user.id);
+  }
+
+  // POST .../suspend and .../restore rather than DELETE, as for restrictions:
+  // the row is updated, not deleted, and each call carries a required reason.
+  @Post(':id/suspend')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Suspend a community',
+    description:
+      'Takes the community offline for everyone but platform administrators, ' +
+      'indefinitely: every public read and write answers 404, as for a ' +
+      'deleted community, and its own moderators and creator lose their ' +
+      'powers. Nothing is deleted. Requires a reason; there is no duration. ' +
+      'Recorded as a community_suspended audit entry.',
+  })
+  @ApiAuthenticated(ADMIN_ONLY)
+  @ApiRouteParam('id', 'id', 'Community ID.')
+  @ApiOkResponse({ type: AdminCommunityDetailResponse })
+  @ApiErrorResponses({
+    400: 'Invalid community ID, a missing or invalid reason, a duration, or any other property.',
+    404: 'Community not found.',
+    409: 'The community is already suspended, is deleted, or changed concurrently.',
+  })
+  suspend(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Body() body: SuspendCommunityDto,
+    @Req() request: AdminAuthenticatedRequest,
+  ) {
+    return this.communities.suspend(id, body, request.user.id);
+  }
+
+  @Post(':id/restore')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Restore a suspended community',
+    description:
+      'Makes the community public again exactly as it was. It does not ' +
+      'undo anything done while suspended: removed content stays removed. ' +
+      'Requires restore_reason. Recorded as a community_restored audit entry.',
+  })
+  @ApiAuthenticated(ADMIN_ONLY)
+  @ApiRouteParam('id', 'id', 'Community ID.')
+  @ApiOkResponse({ type: AdminCommunityDetailResponse })
+  @ApiErrorResponses({
+    400: 'Invalid community ID, a missing or invalid restore_reason, or any other property.',
+    404: 'Community not found.',
+    409: 'The community is not suspended.',
+  })
+  restore(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Body() body: RestoreCommunityDto,
+    @Req() request: AdminAuthenticatedRequest,
+  ) {
+    return this.communities.restore(id, body, request.user.id);
   }
 }

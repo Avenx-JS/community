@@ -573,7 +573,7 @@ describe('Community endpoints (e2e)', () => {
     }
 
     function userSubscriptions(userId: string, sql: string) {
-      const live = sql.includes('c.deleted_at IS NULL');
+      const live = sql.includes('c.deleted_at IS NULL AND c.suspended_at IS NULL');
       return communities.flatMap((community) => {
         if (live && community.deleted_at) {
           return [];

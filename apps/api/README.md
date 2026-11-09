@@ -394,7 +394,7 @@ Only the following metadata keys may be recorded:
 | `restriction_lifted`    | `restriction` | `restriction_id`, `restriction_type`        |
 | `user_role_changed`     | `user`        | `from_role`, `to_role`                      |
 | `community_suspended`   | `community`   | `community_name`, `reason`                  |
-| `community_restored`    | `community`   | `community_name`                            |
+| `community_restored`    | `community`   | `community_name`, `restore_reason`          |
 | `community_updated`     | `community`   | `community_name`, `fields`                  |
 | `report_assigned`       | `report`      | `assignee_username`                         |
 | `report_unassigned`     | `report`      | `assignee_username`                         |
@@ -402,12 +402,14 @@ Only the following metadata keys may be recorded:
 The three `community_*` actions and the `community` target were added by
 migration `025_add_community_suspension`, so the community-administration
 endpoints need no enum migration of their own. `community_updated` is written by
-[`PATCH /admin/communities/:id`](#admin-community-directory);
-`community_suspended` and `community_restored` are not written by any endpoint
-yet. `community_name` is a snapshot of the name (1-50 of
+[`PATCH /admin/communities/:id`](#admin-community-directory),
+`community_suspended` by `POST /admin/communities/:id/suspend` and
+`community_restored` by `POST /admin/communities/:id/restore`
+([Community suspension](#community-suspension)). `community_name` is a snapshot of the name (1-50 of
 `[A-Za-z0-9_-]`, the column width), so an entry stays readable after the
 community is gone, as `actor_username` does for the actor. `reason` is the
-suspension reason, plain text of at most 2,000 characters. `fields` names
+suspension reason and `restore_reason` the restoration's, each plain text of
+1-2,000 characters: a reversal is a decision too. `fields` names
 which fields changed, as a comma-separated list of editable fields (today only
 `description`), never their old or new values: the log records that a change
 happened, not a content diff. The `AuditEntry` type pairs each action with its
@@ -434,7 +436,8 @@ The service builds metadata from this allowlist and drops extra runtime keys
 non-object metadata value, throws). Passwords and hashes, tokens, session
 identifiers, email addresses, and free text such as `lift_reason` or
 `resolution_note` are never copied to audit metadata; the only free text
-allowed is `reason` on `community_suspended`, which no other action accepts.
+allowed is `reason` on `community_suspended` and `restore_reason` on
+`community_restored`, which no other action accepts.
 Audit entries themselves are sensitive and may only be exposed
 through future admin-authorized read routes. Do not log the contents of an
 audit entry to application logs. Database grants or a trigger can additionally
@@ -1016,11 +1019,11 @@ the old or new text. A failure writing the entry rolls the change back. The
 entry is in the platform audit log, not the community's own moderation log: the
 actor is a platform administrator, not one of its moderators.
 
-**Suspension and restoration are a separate route pair.** This directory reads
-`suspended_at`, `suspended_by` and `suspension_reason`, but there is deliberately
-no `POST /admin/communities/:id/suspend` or `/restore` here. Those ship together
-with the enforcement that makes suspension mean something. A directory that could
-suspend without enforcement would mislead.
+**Suspension and restoration** are `POST /admin/communities/:id/suspend` and
+`/restore`, described with their enforcement under
+[Community suspension](#community-suspension). This directory is where
+administrators still see a suspended community: `GET /admin/communities/:id`
+and `?state=suspended` return it, while every public route answers `404`.
 
 ### Admin report queue
 
@@ -1830,11 +1833,8 @@ could see:
 | `/comments` | comments with `removed_at` set; comments on a post with `removed_at` set; comments in a deleted or suspended community |
 | `/communities` | deleted and suspended communities; a community the user is only subscribed to; a community where the user's only content is excluded above |
 
-The suspended-community rule is stricter than the rest of the API today:
-suspension (`communities.suspended_at`, migration 025) is not yet enforced on
-`GET /posts` and the other reads. These listings apply both predicates
-(`listedCommunitySql`), and each other read must add the second one when
-suspension is enforced.
+Both hidden states come from the one shared visibility predicate
+([Community suspension](#community-suspension)), as on every other public read.
 
 #### `GET /users/:username/posts`
 
@@ -3006,9 +3006,9 @@ DESC`; see [Pinning posts](#pinning-posts)). A change to the listing belongs in
 **Exclusions.** Posts removed by moderation (`removed_at`) are omitted, as on
 every post listing. A deleted or suspended community is `404`, not an empty
 list, which would imply the community exists and is merely quiet; the name
-lookup checks both `deleted_at` and `suspended_at`, and no listing query runs.
-`GET /posts?community_id=` does not yet apply suspension (it is not enforced on
-the other reads), which is the one case where the two routes differ.
+lookup applies the shared visibility predicate, and no listing query runs.
+`GET /posts?community_id=` applies the same predicate and lists nothing for a
+hidden community.
 
 **Plan.** The community filter is a `ref` lookup on
 `idx_posts_community_created`. Because pins float first, the order needs a
@@ -3022,13 +3022,71 @@ documented rate-limit override this README prescribes, never an exemption.
 
 ### Community suspension
 
-**Nothing enforces suspension yet.** Migration `025_add_community_suspension`
-adds the schema only: no endpoint sets or clears these columns and no read
-excludes a suspended community, so a suspended community behaves exactly like
-an active one. The endpoint that writes them must enforce them in the same
-change and must not be merged without that enforcement.
+A platform administrator can suspend a community that is harmful as a whole,
+which hides it from everyone on every public route until an administrator
+restores it. Both routes require a bearer token and the `admin` platform role
+(`401`/`403` otherwise) and return the
+[admin directory detail](#admin-community-directory).
 
-`communities` gains three columns, all `NULL` for every existing community:
+```http
+POST /admin/communities/:id/suspend   {"reason": "Coordinated spam network"}
+POST /admin/communities/:id/restore   {"restore_reason": "Appeal upheld"}
+```
+
+| Status | Suspend | Restore |
+| --- | --- | --- |
+| `200` | Suspended now | Restored now |
+| `400` | Malformed id; `reason` missing, blank, over 2,000 characters or not plain text; any other property, such as a duration | Malformed id; `restore_reason` missing or invalid; any other property |
+| `404` | Unknown id | Unknown id |
+| `409` | Already suspended (the first decision stands), or soft-deleted | Not suspended |
+
+**Indefinite, with a reason both ways.** There is no duration (see below), and
+`suspended_by` comes from the token, never the body. Each route reads the row
+`FOR UPDATE`, applies a guarded `UPDATE` (`... WHERE suspended_at IS NULL AND
+deleted_at IS NULL`, or `IS NOT NULL` to restore), and writes one
+`community_suspended` (`community_name`, `reason`) or `community_restored`
+(`community_name`, `restore_reason`) [audit](#administrative-action-audit-log)
+entry in the same transaction. A failure writing the entry rolls the change
+back, and of two concurrent suspensions exactly one succeeds and one answers
+`409`. Restoring clears all three columns.
+
+**Enforcement.** A suspended community is treated exactly like a soft-deleted
+one everywhere outside `/admin`:
+
+| Caller | Community routes (`/communities/:name/...`) | Its posts, comments and votes | `GET /communities`, `GET /posts`, `/subscriptions`, search, activity |
+| --- | --- | --- | --- |
+| Public / member | `404` | `404` | omitted |
+| Its moderators | `404`: moderation, bans, rules and the moderation log included | `404`: pin, lock, remove, restore included | omitted |
+| Its creator | `404`: edit, delete and moderator management included | `404` | omitted |
+| Platform administrator | `404` on these public routes | `404` | omitted; seen under `/admin/communities` |
+
+- **`404`, not `403`.** The answer is byte-for-byte the one for a deleted or
+  unknown community, so nothing tells a caller whether it was suspended,
+  deleted or never existed. The visibility lookup is each call's first
+  statement, before anything reads the caller's role, so no role-dependent
+  `403` can leak that the community exists.
+- **No exemptions.** Unsubscribing is refused too: the subscription row is kept
+  and returns on restoration, as everything else does.
+- **One predicate.** `COMMUNITY_VISIBLE_PREDICATE`,
+  `visibleCommunityColumnsSql(alias)` and `visibleCommunitySql(column)` in
+  `src/common/community-visibility.ts` are the only definition of "visible":
+  `deleted_at IS NULL AND suspended_at IS NULL`. Two conditions applied
+  separately at dozens of call sites would drift apart.
+  `src/common/community-visibility.spec.ts` fails when any source outside
+  `/admin` restates either half, and runs every call site against a caller of
+  each role, asserting the `404` comes from that predicate.
+- **Nothing is deleted.** Posts, comments, votes, subscriptions, moderators,
+  bans and rules are untouched, and restoration brings all of them back.
+  Anything decided meanwhile, such as content an administrator removed, stays
+  as decided.
+- **Account deletion.** The creator of a suspended community cannot delete it
+  (`404`), and `DELETE /users/me` still counts it as theirs, so they cannot
+  delete their account until it is restored or an administrator intervenes.
+- **No notification yet.** Members are not told; notifying them is a
+  follow-up.
+
+`communities` has three columns for it (migration
+`025_add_community_suspension`), all `NULL` for every existing community:
 
 - `suspended_at`: when a platform administrator suspended the community;
   `suspended_at IS NULL` is the "not suspended" predicate.
@@ -3051,9 +3109,9 @@ the column later is cheap.
 platform administrator's decision. They have different authority and
 different remedies: the creator must never be able to clear a suspension, and
 only an administrator could undo a deletion. A single status column would make
-"who may change this" ambiguous, so they are two columns, and once suspension
-is enforced every community read must check both predicates, alongside the
-existing `deleted_at IS NULL` (see
+"who may change this" ambiguous, so they are two columns. Publicly they are
+one fact, through the shared predicate above, and a deleted community cannot
+be suspended (`409`) (see
 [Editing and deleting a community](#editing-and-deleting-a-community)).
 
 ### Community statistics
@@ -3232,9 +3290,10 @@ of these behaves as if the community did not exist:
 | `PATCH`, `DELETE /comments/:id`; `POST /comments/:id/remove`, `/restore` | `404` for comments on its posts            |
 | `PUT`, `DELETE` and `GET /posts/:id/vote` and `/comments/:id/vote`                     | `404` for its posts and their comments     |
 
-Content queries apply the shared `activeCommunitySql` predicate
-(`src/common/community-visibility.ts`); community lookups add
-`deleted_at IS NULL`. New reads of community-scoped data must do the same;
+Content queries apply the shared `visibleCommunitySql` predicate and community
+lookups `COMMUNITY_VISIBLE_PREDICATE` (`src/common/community-visibility.ts`),
+which exclude deleted and suspended communities alike. New reads of
+community-scoped data must do the same;
 `src/common/community-visibility.spec.ts` lists every call site and fails if
 one drops the exclusion. Platform administration (`/admin`) and the
 notification inbox are deliberately not filtered.
@@ -4633,7 +4692,7 @@ order:
 
 | Status | When |
 | --- | --- |
-| `404` | Unknown id, or the community is deleted or suspended (`listedCommunitySql`) |
+| `404` | Unknown id, or the community is deleted or suspended (`visibleCommunitySql`) |
 | `403` | The caller is not the author |
 | `409` | The post or comment was removed by moderation (`removed_at`); for a comment, also when its post was removed |
 | `400` | Post content that is not valid for the stored type |

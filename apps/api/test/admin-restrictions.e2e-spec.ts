@@ -228,7 +228,7 @@ describe('Admin restrictions API (e2e)', () => {
       // A protected member route used to prove normal access.
       if (
         sql ===
-        'SELECT id FROM communities WHERE name = ? AND deleted_at IS NULL LIMIT 1'
+        'SELECT id FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1'
       ) {
         return result(values[0] === 'general' ? [{ id: 'community-1' }] : []);
       }

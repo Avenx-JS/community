@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from '@jest/globals';
 import { NotFoundException } from '@nestjs/common';
 import type { Pool } from 'mysql2/promise';
-import { activeCommunitySql } from '../common/community-visibility';
+import { visibleCommunitySql } from '../common/community-visibility';
 import {
   USER_COMMENTS_COUNT_SQL,
   USER_COMMUNITIES_COUNT_SQL,
@@ -64,12 +64,14 @@ describe('UserActivityService', () => {
       for (const sql of [userPostsSql('new'), USER_POSTS_COUNT_SQL]) {
         expect(sql).toContain('WHERE author_id = ? AND removed_at IS NULL');
         expect(sql).toContain('communities.id = posts.community_id');
-        expect(sql).toContain('communities.deleted_at IS NULL');
+        expect(sql).toContain(
+          'communities.deleted_at IS NULL AND communities.suspended_at IS NULL',
+        );
         expect(sql).toContain('communities.suspended_at IS NULL');
       }
-      // Stricter than the other post reads, which check deletion only.
-      expect(userPostsSql('new')).not.toContain(
-        activeCommunitySql('posts.community_id'),
+      // The one shared visibility predicate, as every other post read uses.
+      expect(userPostsSql('new')).toContain(
+        visibleCommunitySql('posts.community_id'),
       );
     });
 

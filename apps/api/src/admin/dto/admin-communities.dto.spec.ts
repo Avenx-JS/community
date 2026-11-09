@@ -4,6 +4,8 @@ import { describe, expect, it } from '@jest/globals';
 import {
   AdminUpdateCommunityDto,
   ListAdminCommunitiesDto,
+  RestoreCommunityDto,
+  SuspendCommunityDto,
 } from './admin-communities.dto';
 
 // Under the global pipe, as the routes really run.
@@ -105,4 +107,52 @@ describe('AdminUpdateCommunityDto', () => {
       await expect(update({ description })).rejects.toThrow();
     },
   );
+});
+
+const suspend = (body: Record<string, unknown>) =>
+  pipe.transform(body, { type: 'body', metatype: SuspendCommunityDto });
+const restore = (body: Record<string, unknown>) =>
+  pipe.transform(body, { type: 'body', metatype: RestoreCommunityDto });
+
+describe('SuspendCommunityDto and RestoreCommunityDto', () => {
+  it('accept a trimmed reason of 1 to 2000 characters', async () => {
+    await expect(
+      suspend({ reason: '  Spam network  ' }),
+    ).resolves.toMatchObject({
+      reason: 'Spam network',
+    });
+    await expect(
+      restore({ restore_reason: 'x'.repeat(2000) }),
+    ).resolves.toBeDefined();
+  });
+
+  it.each([
+    {},
+    { reason: '' },
+    { reason: '   ' },
+    { reason: 'x'.repeat(2001) },
+    { reason: 'bad\u0000text' },
+    { reason: 42 },
+  ])('suspension refuses %o', async (body) => {
+    await expect(suspend(body)).rejects.toThrow();
+  });
+
+  // Indefinite by design, and the actor comes from the token.
+  it.each([
+    { duration_hours: 24 },
+    { expires_at: '2030-01-01T00:00:00Z' },
+    { suspended_by: 'someone' },
+    { unexpected: 1 },
+  ])('suspension refuses the extra field %o', async (extra) => {
+    await expect(suspend({ reason: 'Spam', ...extra })).rejects.toThrow();
+  });
+
+  it.each([
+    {},
+    { restore_reason: '' },
+    { reason: 'Wrong key' },
+    { restore_reason: 'ok', unexpected: 1 },
+  ])('restoration refuses %o', async (body) => {
+    await expect(restore(body)).rejects.toThrow();
+  });
 });

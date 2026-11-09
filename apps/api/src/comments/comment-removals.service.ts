@@ -16,7 +16,7 @@ import {
   canModerateCommunitySql,
   isSqlTrue,
 } from '../common/community-moderation';
-import { activeCommunitySql } from '../common/community-visibility';
+import { visibleCommunitySql } from '../common/community-visibility';
 import type { RemoveContentDto } from '../common/remove-content.dto';
 import {
   toRemovalState,
@@ -146,7 +146,7 @@ export class CommentRemovalService {
          ${canModerateCommunitySql('posts.community_id')} AS can_moderate
        FROM comments
        INNER JOIN posts ON posts.id = comments.post_id
-       WHERE comments.id = ? AND ${activeCommunitySql('posts.community_id')}
+       WHERE comments.id = ? AND ${visibleCommunitySql('posts.community_id')}
        LIMIT 1 FOR UPDATE OF comments`,
       [actorId, actorId, id],
     );

@@ -606,3 +606,31 @@ describe('AuditLogService', () => {
     expect(migration).not.toMatch(/FOREIGN KEY\s*\(\s*target_id\s*\)/i);
   });
 });
+
+describe('community_restored metadata', () => {
+  const entry = (metadata: Record<string, unknown>) =>
+    ({
+      actorId: 'admin-1',
+      action: 'community_restored',
+      targetType: 'community',
+      targetId: 'community-1',
+      metadata,
+    }) as unknown as AuditEntry;
+
+  it('keeps the restore reason, a reversal being a decision too', () => {
+    expect(
+      buildAuditMetadata(
+        entry({ community_name: 'spam-hub', restore_reason: 'Appeal upheld' }),
+      ),
+    ).toEqual({ community_name: 'spam-hub', restore_reason: 'Appeal upheld' });
+  });
+
+  it.each(['', '   ', 'x'.repeat(2001), 'bad\u0000text'])(
+    'refuses the restore reason %j',
+    (restore_reason) => {
+      expect(() => buildAuditMetadata(entry({ restore_reason }))).toThrow(
+        'Invalid audit metadata field: restore_reason',
+      );
+    },
+  );
+});

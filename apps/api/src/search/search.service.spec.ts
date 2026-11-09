@@ -58,7 +58,7 @@ describe('SearchService', () => {
       [
         'posts.removed_at IS NULL',
         'communities.id = posts.community_id',
-        'communities.deleted_at IS NULL',
+        'communities.deleted_at IS NULL AND communities.suspended_at IS NULL',
         'communities.suspended_at IS NULL',
       ],
     ],
@@ -75,7 +75,7 @@ describe('SearchService', () => {
     [
       'communities',
       'MATCH (communities.name, communities.description) AGAINST (? IN BOOLEAN MODE)',
-      ['communities.deleted_at IS NULL', 'communities.suspended_at IS NULL'],
+      ['communities.deleted_at IS NULL AND communities.suspended_at IS NULL', 'communities.suspended_at IS NULL'],
     ],
   ] as const)('type=%s', (type, match, exclusions) => {
     it('matches with the index’s exact column list, in boolean mode', async () => {

@@ -114,14 +114,14 @@ describe('Rule acceptance enforcement', () => {
 
       if (
         sql ===
-        'SELECT id FROM communities WHERE name = ? AND deleted_at IS NULL LIMIT 1'
+        'SELECT id FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1'
       ) {
         const id = communityNames[values[0] as string];
         return rows(id ? [{ id }] : []);
       }
       if (
         sql ===
-        'SELECT id FROM communities WHERE id = ? AND deleted_at IS NULL LIMIT 1'
+        'SELECT id FROM communities WHERE id = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1'
       ) {
         return rows(
           rules.communities.has(values[0] as string) ? [{ id: values[0] }] : [],

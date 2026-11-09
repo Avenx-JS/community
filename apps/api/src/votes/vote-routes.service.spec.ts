@@ -296,7 +296,7 @@ describe('VotesService vote routes', () => {
     expect(lookups).toHaveLength(3);
     for (const { sql } of lookups) {
       expect(sql).toContain('INNER JOIN posts ON posts.id = comments.post_id');
-      expect(sql).toContain('communities.deleted_at IS NULL');
+      expect(sql).toContain('communities.deleted_at IS NULL AND communities.suspended_at IS NULL');
     }
     expect(
       lookups.map(({ sql }) => sql.includes('FOR UPDATE OF comments')),

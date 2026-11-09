@@ -115,7 +115,7 @@ describe('CommentLocksService', () => {
       'INNER JOIN posts ON posts.id = comments.post_id',
     );
     expect(read.sql).toContain('FOR UPDATE OF comments');
-    expect(read.sql).toContain('communities.deleted_at IS NULL');
+    expect(read.sql).toContain('communities.deleted_at IS NULL AND communities.suspended_at IS NULL');
   });
 
   it.each(['moderator', 'creator-1'])(

@@ -1,7 +1,11 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { Pool, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
-import { listedCommunitySql } from '../common/community-visibility';
+import {
+  COMMUNITY_VISIBLE_PREDICATE,
+  visibleCommunityColumnsSql,
+  visibleCommunitySql,
+} from '../common/community-visibility';
 import { escapeLikeSearch } from '../common/like-search';
 import type { CommunityDto } from '../communities/communities.service';
 import {
@@ -47,8 +51,7 @@ export const COMMUNITIES_MATCH_SQL =
 
 // The community a content filter names, if a reader could see it: a deleted
 // or suspended community is as unknown here as anywhere public.
-export const SEARCH_COMMUNITY_ID_SQL =
-  'SELECT id FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1';
+export const SEARCH_COMMUNITY_ID_SQL = `SELECT id FROM communities WHERE name = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1`;
 
 interface Query {
   // FROM and WHERE, shared by the page and its count so the two cannot differ.
@@ -186,7 +189,7 @@ export class SearchService {
     const query: Query = {
       from: `FROM communities
        WHERE ${COMMUNITIES_MATCH_SQL}
-         AND communities.deleted_at IS NULL AND communities.suspended_at IS NULL`,
+         AND ${visibleCommunityColumnsSql('communities')}`,
       values: [terms],
     };
     const { select, order, values } = this.ranking(
@@ -233,7 +236,7 @@ export class SearchService {
       from: `FROM posts
        WHERE ${POSTS_MATCH_SQL}
          AND posts.removed_at IS NULL
-         AND ${listedCommunitySql('posts.community_id')}${filters.sql}`,
+         AND ${visibleCommunitySql('posts.community_id')}${filters.sql}`,
       values: [terms, ...filters.values],
     };
     const { select, order, values } = this.ranking(
@@ -279,8 +282,7 @@ export class SearchService {
        WHERE ${COMMENTS_MATCH_SQL}
          AND c.removed_at IS NULL
          AND p.removed_at IS NULL
-         AND co.deleted_at IS NULL
-         AND co.suspended_at IS NULL${filters.sql}`,
+         AND ${visibleCommunityColumnsSql('co')}${filters.sql}`,
       values: [terms, ...filters.values],
     };
     const { select, order, values } = this.ranking(

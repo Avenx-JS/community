@@ -22,6 +22,7 @@ import type {
   ReportTargetType,
 } from './report.constants';
 import { REPORT_TARGET_JOINS_SQL } from './report-target.sql';
+import { visibleCommunityColumnsSql } from '../common/community-visibility';
 
 interface ReportedUserRow extends RowDataPacket {
   id: string;
@@ -98,7 +99,7 @@ const OWN_REPORT_TARGET_LABEL_SQL = `CASE ur.target_type
            WHEN 'user' THEN IF(target_user.deleted_at IS NULL, target_user.username, NULL)
            WHEN 'post' THEN IF(target_post.removed_at IS NULL, target_post.title, NULL)
            WHEN 'comment' THEN IF(target_comment.removed_at IS NULL, LEFT(target_comment.content, 100), NULL)
-           WHEN 'community' THEN IF(target_community.deleted_at IS NULL, target_community.name, NULL)
+           WHEN 'community' THEN IF(${visibleCommunityColumnsSql('target_community')}, target_community.name, NULL)
          END AS target_label`;
 
 // The column list is the response's allow-list: nothing moderator-only is ever

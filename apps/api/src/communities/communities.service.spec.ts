@@ -262,7 +262,7 @@ describe('CommunitiesService', () => {
     );
     expect(queries[0].values).toEqual(['user-1', 2, 4]);
     expect(queries[1].sql).toContain(
-      'WHERE s.user_id = ? AND c.deleted_at IS NULL',
+      'WHERE s.user_id = ? AND c.deleted_at IS NULL AND c.suspended_at IS NULL',
     );
     expect(queries[1].values).toEqual(['user-1']);
   });
@@ -311,25 +311,25 @@ describe('CommunitiesService', () => {
     results = [[], [{ total: 0 }]];
     await service.findAll({ search: 'garden' });
     expect(queries[0].sql).toContain(
-      "WHERE deleted_at IS NULL AND (LOWER(name) LIKE LOWER(?) ESCAPE '=' OR LOWER(description) LIKE LOWER(?) ESCAPE '=')",
+      "WHERE deleted_at IS NULL AND suspended_at IS NULL AND (LOWER(name) LIKE LOWER(?) ESCAPE '=' OR LOWER(description) LIKE LOWER(?) ESCAPE '=')",
     );
-    expect(queries[1].sql).toContain('WHERE deleted_at IS NULL AND (');
+    expect(queries[1].sql).toContain('WHERE deleted_at IS NULL AND suspended_at IS NULL AND (');
 
     queries = [];
     results = [[], [{ total: 0 }]];
     await service.findAll({});
     expect(queries[0].sql).toContain(
-      'FROM communities WHERE deleted_at IS NULL ORDER BY',
+      'FROM communities WHERE deleted_at IS NULL AND suspended_at IS NULL ORDER BY',
     );
     expect(queries[1].sql).toBe(
-      'SELECT COUNT(*) AS total FROM communities WHERE deleted_at IS NULL',
+      'SELECT COUNT(*) AS total FROM communities WHERE deleted_at IS NULL AND suspended_at IS NULL',
     );
 
     queries = [];
     results = [[], [{ total: 0 }]];
     await service.listSubscriptions('user-1', {});
     for (const { sql } of queries) {
-      expect(sql).toContain('c.deleted_at IS NULL');
+      expect(sql).toContain('c.deleted_at IS NULL AND c.suspended_at IS NULL');
     }
 
     const lookups: Array<() => Promise<unknown>> = [
@@ -408,7 +408,7 @@ describe('CommunitiesService', () => {
         total: 7,
       });
       expect(queries[0].sql).toContain(
-        'WHERE c.name = ? AND c.deleted_at IS NULL',
+        'WHERE c.name = ? AND c.deleted_at IS NULL AND c.suspended_at IS NULL',
       );
       // The creator is excluded from items and total even if appointed, and
       // so can never be duplicated or pushed to a later page.
@@ -484,7 +484,7 @@ describe('CommunitiesService', () => {
 
       expect(queries[0].sql).toContain(canModerateCommunitySql('c.id'));
       expect(queries[0].sql).toContain(
-        'WHERE c.name = ? AND c.deleted_at IS NULL',
+        'WHERE c.name = ? AND c.deleted_at IS NULL AND c.suspended_at IS NULL',
       );
       expect(queries[0].values).toEqual(['mod-id', 'mod-id', 'gardening']);
     });
@@ -681,7 +681,7 @@ describe('CommunitiesService', () => {
       });
 
       expect(statements[0].sql).toBe(
-        'SELECT id, creator_id FROM communities WHERE name = ? AND deleted_at IS NULL LIMIT 1 FOR UPDATE',
+        'SELECT id, creator_id FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1 FOR UPDATE',
       );
       expect(statements[1]).toEqual({
         sql: 'UPDATE communities SET description = ? WHERE id = ?',
@@ -763,7 +763,7 @@ describe('CommunitiesService', () => {
 
       expect(statements).toHaveLength(2);
       expect(statements[0].sql).toBe(
-        'SELECT id, creator_id FROM communities WHERE name = ? AND deleted_at IS NULL LIMIT 1 FOR UPDATE',
+        'SELECT id, creator_id FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1 FOR UPDATE',
       );
       expect(statements[1]).toEqual({
         sql: 'UPDATE communities SET deleted_at = UTC_TIMESTAMP(), deleted_by = ? WHERE id = ?',

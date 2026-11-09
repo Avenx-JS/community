@@ -25,6 +25,7 @@ import type {
   LiftCommunityBanDto,
   ListCommunityBansDto,
 } from './dto/community-ban.dto';
+import { visibleCommunityColumnsSql } from '../common/community-visibility';
 
 // A community ban excludes one account from one community, on the decision of
 // that community's creator or moderators. It is not a platform restriction:
@@ -107,7 +108,7 @@ const BAN_SELECT = `SELECT community_bans.id,
 // community before 403, so the route does not confirm what exists to others.
 export const COMMUNITY_BAN_ACCESS_SQL = `SELECT c.id, c.creator_id, ${canModerateCommunitySql('c.id')} AS can_moderate
        FROM communities c
-       WHERE c.name = ? AND c.deleted_at IS NULL LIMIT 1`;
+       WHERE c.name = ? AND ${visibleCommunityColumnsSql('c')} LIMIT 1`;
 
 // Locks the account row: two bans of one person in one community then run one
 // after the other, so the re-check below sees the first and refuses the

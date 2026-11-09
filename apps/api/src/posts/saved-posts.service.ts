@@ -1,7 +1,7 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
-import { listedCommunitySql } from '../common/community-visibility';
+import { visibleCommunitySql } from '../common/community-visibility';
 import type {
   ListSavedPostsDto,
   SavedPostSort,
@@ -33,7 +33,7 @@ interface SavedPostRow extends PostRow {
 // A post may be saved only while it is readable: not removed by moderation
 // and in a community that is neither deleted nor suspended. Same predicate
 // as the listing, so nothing can be saved that the list would hide.
-export const SAVEABLE_POST_SQL = `SELECT id FROM posts WHERE id = ? AND posts.removed_at IS NULL AND ${listedCommunitySql('posts.community_id')} LIMIT 1`;
+export const SAVEABLE_POST_SQL = `SELECT id FROM posts WHERE id = ? AND posts.removed_at IS NULL AND ${visibleCommunitySql('posts.community_id')} LIMIT 1`;
 
 // Unsaving needs only the post to exist, in any state: a user may always
 // drop a bookmark, including one to a post that has since been hidden.
@@ -56,7 +56,7 @@ export const SAVED_POSTS_FROM = `FROM saved_posts s
        STRAIGHT_JOIN posts p ON p.id = s.post_id
        WHERE s.user_id = ?
          AND p.removed_at IS NULL
-         AND ${listedCommunitySql('p.community_id')}`;
+         AND ${visibleCommunitySql('p.community_id')}`;
 
 const PREFIXED_POST_COLUMNS = POST_COLUMNS.split(', ')
   .map((column) => `p.${column}`)

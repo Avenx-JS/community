@@ -55,7 +55,7 @@ describe('CommunityStatsService', () => {
     await service.get('gardening');
 
     expect(queries[0]).toEqual({
-      sql: 'SELECT id, creator_id, created_at FROM communities WHERE name = ? AND deleted_at IS NULL LIMIT 1',
+      sql: 'SELECT id, creator_id, created_at FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1',
       values: ['gardening'],
     });
     expect(queries.slice(1)).toEqual([

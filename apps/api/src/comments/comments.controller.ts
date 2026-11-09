@@ -73,7 +73,7 @@ export class CommentsController {
   @ApiOkResponse({ type: CommentReplyListResponse })
   @ApiErrorResponses({
     400: 'Invalid comment ID or query parameters.',
-    404: 'Comment not found, or its community is deleted.',
+    404: 'Comment not found, or its community is deleted or suspended.',
   })
   findReplies(
     @Param('id', new SafeRouteParamPipe('id')) id: string,

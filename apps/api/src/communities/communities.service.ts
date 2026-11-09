@@ -32,6 +32,10 @@ import { ListCommunityMembersDto } from './dto/list-community-members.dto';
 import { ListCommunityModeratorsDto } from './dto/list-community-moderators.dto';
 import { ListSubscriptionsDto } from './dto/list-subscriptions.dto';
 import { UpdateCommunityDto } from './dto/update-community.dto';
+import {
+  COMMUNITY_VISIBLE_PREDICATE,
+  visibleCommunityColumnsSql,
+} from '../common/community-visibility';
 
 interface CreatorCheckOptions {
   executor?: Pool | PoolConnection;
@@ -160,8 +164,7 @@ export interface CommunityMemberListDto {
 }
 
 // Both community predicates: soft deletion (022) and suspension (025).
-export const LISTED_COMMUNITY_ID_SQL =
-  'SELECT id FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1';
+export const LISTED_COMMUNITY_ID_SQL = `SELECT id FROM communities WHERE name = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1`;
 
 @Injectable()
 export class CommunitiesService {
@@ -181,7 +184,7 @@ export class CommunitiesService {
     const limit = query.limit ?? 20;
     const offset = (page - 1) * limit;
     const search = query.search?.trim();
-    let where = ' WHERE deleted_at IS NULL';
+    let where = ` WHERE ${COMMUNITY_VISIBLE_PREDICATE}`;
     let values: (string | number)[] = [];
 
     if (search) {
@@ -255,7 +258,7 @@ export class CommunitiesService {
 
   async findOne(name: string): Promise<CommunityDto> {
     const [communities] = await this.pool.execute<CommunityRow[]>(
-      'SELECT id, creator_id, name, description, created_at FROM communities WHERE name = ? AND deleted_at IS NULL LIMIT 1',
+      `SELECT id, creator_id, name, description, created_at FROM communities WHERE name = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1`,
       [name],
     );
     const community = communities[0];
@@ -295,7 +298,7 @@ export class CommunitiesService {
       `SELECT c.id, c.name, c.description, s.created_at AS subscribed_at
        FROM community_subscriptions s
        JOIN communities c ON c.id = s.community_id
-       WHERE s.user_id = ? AND c.deleted_at IS NULL
+       WHERE s.user_id = ? AND ${visibleCommunityColumnsSql('c')}
        ORDER BY s.created_at DESC, s.community_id DESC LIMIT ? OFFSET ?`,
       [userId, limit, offset],
     );
@@ -305,7 +308,7 @@ export class CommunitiesService {
       `SELECT COUNT(*) AS total
        FROM community_subscriptions s
        JOIN communities c ON c.id = s.community_id
-       WHERE s.user_id = ? AND c.deleted_at IS NULL`,
+       WHERE s.user_id = ? AND ${visibleCommunityColumnsSql('c')}`,
       [userId],
     );
 
@@ -418,7 +421,7 @@ export class CommunitiesService {
          u.username, u.display_name, u.deleted_at AS creator_deleted_at
        FROM communities c
        JOIN users u ON u.id = c.creator_id
-       WHERE c.name = ? AND c.deleted_at IS NULL LIMIT 1`,
+       WHERE c.name = ? AND ${visibleCommunityColumnsSql('c')} LIMIT 1`,
       [name],
     );
     const community = communities[0];
@@ -479,7 +482,7 @@ export class CommunitiesService {
     >(
       `SELECT c.id, ${canModerateCommunitySql('c.id')} AS can_moderate
        FROM communities c
-       WHERE c.name = ? AND c.deleted_at IS NULL LIMIT 1`,
+       WHERE c.name = ? AND ${visibleCommunityColumnsSql('c')} LIMIT 1`,
       [userId, userId, name],
     );
     const community = communities[0];
@@ -663,7 +666,7 @@ export class CommunitiesService {
     const [communities] = await executor.execute<
       (RowDataPacket & { id: string; creator_id: string })[]
     >(
-      `SELECT id, creator_id FROM communities WHERE name = ? AND deleted_at IS NULL LIMIT 1${
+      `SELECT id, creator_id FROM communities WHERE name = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1${
         forUpdate ? ' FOR UPDATE' : ''
       }`,
       [name],
@@ -682,7 +685,7 @@ export class CommunitiesService {
     const [communities] = await this.pool.execute<
       (RowDataPacket & { id: string })[]
     >(
-      'SELECT id FROM communities WHERE name = ? AND deleted_at IS NULL LIMIT 1',
+      `SELECT id FROM communities WHERE name = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1`,
       [name],
     );
     const community = communities[0];
