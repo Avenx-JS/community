@@ -7,6 +7,8 @@ import { AdminAnalyticsController } from './admin-analytics.controller';
 import { AdminAnalyticsService } from './admin-analytics.service';
 import { AdminAuditLogController } from './admin-audit-log.controller';
 import { AdminAuditLogService } from './admin-audit-log.service';
+import { AdminCommunitiesController } from './admin-communities.controller';
+import { AdminCommunitiesService } from './admin-communities.service';
 import { AdminReportsController } from './admin-reports.controller';
 import { AdminReportsService } from './admin-reports.service';
 import { AdminRestrictionsController } from './admin-restrictions.controller';
@@ -20,6 +22,7 @@ import { AuditLogService } from './audit-log.service';
   controllers: [
     AdminReportsController,
     AdminUsersController,
+    AdminCommunitiesController,
     AdminRestrictionsController,
     AdminAuditLogController,
     AdminAnalyticsController,
@@ -27,6 +30,7 @@ import { AuditLogService } from './audit-log.service';
   providers: [
     AdminAnalyticsService,
     AdminAuditLogService,
+    AdminCommunitiesService,
     AdminReportsService,
     AdminUsersService,
     AdminRestrictionsService,

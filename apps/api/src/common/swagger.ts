@@ -63,6 +63,10 @@ export function createOpenApiDocument(app: INestApplication): OpenAPIObject {
     .addTag('reports', 'Reporting users to platform administrators.')
     .addTag('notifications', "The authenticated user's notification inbox.")
     .addTag('admin: users', 'Account directory for administrators.')
+    .addTag(
+      'admin: communities',
+      'Community directory for administrators, including hidden communities.',
+    )
     .addTag('admin: reports', 'Report review queue.')
     .addTag('admin: restrictions', 'Suspensions and bans.')
     .addTag('admin: audit log', 'Append-only record of administrative actions.')

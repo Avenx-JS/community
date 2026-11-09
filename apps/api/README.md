@@ -400,9 +400,11 @@ Only the following metadata keys may be recorded:
 | `report_unassigned`     | `report`      | `assignee_username`                         |
 
 The three `community_*` actions and the `community` target were added by
-migration `025_add_community_suspension`. No endpoint writes them yet; they
-exist so the community-administration endpoints that follow need no enum
-migration of their own. `community_name` is a snapshot of the name (1-50 of
+migration `025_add_community_suspension`, so the community-administration
+endpoints need no enum migration of their own. `community_updated` is written by
+[`PATCH /admin/communities/:id`](#admin-community-directory);
+`community_suspended` and `community_restored` are not written by any endpoint
+yet. `community_name` is a snapshot of the name (1-50 of
 `[A-Za-z0-9_-]`, the column width), so an entry stays readable after the
 community is gone, as `actor_username` does for the actor. `reason` is the
 suspension reason, plain text of at most 2,000 characters. `fields` names
@@ -892,6 +894,133 @@ Example detail response:
   }
 }
 ```
+
+### Admin community directory
+
+The platform administrators' view of communities. The public `GET /communities`
+has no suspension state, no creator username and no counts. It also hides
+soft-deleted communities, which are often the ones needing attention.
+
+| Route | Success | Description |
+| --- | --- | --- |
+| `GET /admin/communities` | `200`, `{ "items", "page", "limit", "total", "filters" }` | Every community |
+| `GET /admin/communities/:id` | `200`, the detail | One community, whatever its state |
+| `PATCH /admin/communities/:id` | `200`, the detail | Corrects the description |
+
+All three use `@UseGuards(AuthGuard, AdminGuard)`: `401` without a valid token,
+`403` for a valid non-administrator (`ADMIN_ONLY`). `@RequiresRole(...)` is the
+extension point if platform moderators are ever admitted; it is not used here.
+
+**Addressed by ID, not name.** Every `/admin` route is keyed on an ID, and an
+administrator arrives from a report or an audit entry holding one. The public
+routes use the name; every response here includes `name` so the two can be
+cross-referenced. A malformed ID returns `400` and an unknown one `404`.
+
+#### `GET /admin/communities`
+
+| Parameter | Accepted values |
+| --- | --- |
+| `search` | Up to 100 characters of plain text; a case-insensitive substring of the name or description, with `%`, `_` and `=` escaped (`ESCAPE '='`), as in `GET /communities` |
+| `creator_username` | Exact username, 3–50 letters, digits or underscores |
+| `state` | `any` (default), `active`, `suspended`, `deleted` |
+| `page` | Integer 1–10000; defaults to `1` |
+| `limit` | Integer 1–100; defaults to `20` |
+| `sort` | `new` (default) or `oldest`; ties by ID |
+
+**`state=any` includes hidden communities, and is the default.** That is the
+endpoint's purpose: the public listing hides exactly the communities an
+administrator needs to see. `deleted` is soft-deleted (whether or not also
+suspended), `suspended` is suspended and not deleted, and `active` is neither.
+The three partition `any`. A filter that matches nothing returns `200` with
+`items: []`; an out-of-range or unknown parameter returns `400`.
+
+```json
+{
+  "id": "community-id",
+  "name": "a-community",
+  "description": "About it",
+  "creator_username": "creator",
+  "created_at": "2026-01-01T00:00:00.000Z",
+  "suspended_at": null,
+  "deleted_at": null,
+  "member_count": 12,
+  "post_count": 40
+}
+```
+
+- `creator_username` is `null` once the creator's account is deleted, never the
+  `deleted_<id>` placeholder of an anonymised account. The join is a left join,
+  so a missing account cannot fail the listing.
+- `member_count` counts subscribed members. `post_count` counts every post,
+  removed ones included: this is the moderation view.
+
+**The counts are bounded to the page.** A correlated subquery per row would be
+N subqueries per page. Instead, after the page is read, one grouped query per
+count (`… WHERE community_id IN (<the page's ids>) GROUP BY community_id`) runs
+over `community_subscriptions` and `posts`, each through an index leading on
+`community_id`, the same approach as the vote-score and saved-state lookups. A
+list is therefore four statements whatever its size, and two when the page is
+empty. Migration `033_add_communities_created_index` adds
+`idx_communities_created (created_at, id)`, so the unfiltered listing (and the
+public one) is read in index order rather than scanned and sorted. The
+`suspended` and `deleted` filters use `idx_communities_suspended_at` and
+`idx_communities_deleted_at`; `admin-communities.mysql.spec.ts` checks every
+plan. Because of the aggregates, this is one of the more expensive admin reads.
+It falls under the global buckets (`/admin` is not exempt), and is a candidate
+for the documented `API_READ_IP_*` override if a dashboard polls it.
+
+#### `GET /admin/communities/:id`
+
+Returns the list item's fields, plus:
+
+| Field | Definition |
+| --- | --- |
+| `suspended_by_username`, `deleted_by_username` | Who suspended or deleted it; `null` for a deleted account or none |
+| `suspension_reason` | As recorded with the suspension |
+| `moderator_count` | Appointed moderators, not counting the creator |
+| `comment_count` | Every comment on the community's posts, removed ones included |
+| `rule_version` | The current published rules version, or `null` if rules were never published |
+| `open_report_count` | Reports with `target_type = 'community'` about this community, `open` or `under_review` and not withdrawn: what the [report queue](#admin-report-queue) shows for it |
+
+Suspended and soft-deleted communities are returned rather than hidden: this is
+the view an administrator decides from. `open_report_count` links it to the
+report queue.
+
+#### `PATCH /admin/communities/:id`
+
+```json
+{ "description": "A corrected description" }
+```
+
+**A deliberate, narrow override of the creator.** It exists for correcting
+content a creator will not or cannot fix, so it is limited to the description.
+The body is exactly the creator's `PATCH /communities/:name` body
+(`AdminUpdateCommunityDto` extends `UpdateCommunityDto`, so the two cannot drift):
+plain text, trimmed, at most 16,383 characters, and an empty or whitespace-only
+value stored as `NULL`. An empty body, `null`, control characters or an over-long
+value return `400`.
+
+**The name and the rules cannot be changed here.** `name` is the route key of
+every public community route, with no redirect mechanism. Rules are a versioned
+document authored by the community (`PUT /communities/:name/rules`), and
+accepting them here would recreate the second source of truth that retiring
+`communities.rules` removed. A body containing `name`, `rules`, `creator_id`,
+`suspended_at`, `deleted_at` or any other property returns `400` and writes
+nothing. It works whatever the community's state, since a hidden community's
+description may be why it is hidden.
+
+**Every use is recorded.** The update and one `community_updated` audit entry
+([audit log](#administrative-action-audit-log)) are committed in one transaction,
+with metadata `community_name` and `fields` only: that a change happened, never
+the old or new text. A failure writing the entry rolls the change back. The
+entry is in the platform audit log, not the community's own moderation log: the
+actor is a platform administrator, not one of its moderators.
+
+**Suspension and restoration are a separate route pair.** This directory reads
+`suspended_at`, `suspended_by` and `suspension_reason`, but there is deliberately
+no `POST /admin/communities/:id/suspend` or `/restore` here. Those ship together
+with the enforcement that makes suspension mean something. A directory that could
+suspend without enforcement would mislead.
 
 ### Admin report queue
 

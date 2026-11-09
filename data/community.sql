@@ -81,6 +81,7 @@ CREATE TABLE communities (
 );
 CREATE INDEX idx_communities_deleted_at ON communities (deleted_at);
 CREATE INDEX idx_communities_suspended_at ON communities (suspended_at);
+CREATE INDEX idx_communities_created ON communities (created_at, id);
 CREATE FULLTEXT INDEX ft_communities_name_description
   ON communities (name, description);
 
@@ -704,4 +705,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('029_create_password_reset_tokens'),
     ('030_add_report_withdrawal'),
     ('031_add_report_assignment'),
-    ('032_create_community_bans');
+    ('032_create_community_bans'),
+    ('033_add_communities_created_index');

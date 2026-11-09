@@ -38,6 +38,15 @@ import type {
   AdminUserListItem,
 } from './admin-users.service';
 import type { AnalyticsGranularity, SeriesPoint } from './analytics-range';
+import type {
+  AdminCommunityDetail,
+  AdminCommunityList,
+  AdminCommunityListItem,
+} from './admin-communities.service';
+import {
+  ADMIN_COMMUNITY_STATES,
+  type AdminCommunityState,
+} from './dto/admin-communities.dto';
 import {
   REPORT_ASSIGNED_FILTERS,
   REPORT_WITHDRAWN_FILTERS,
@@ -510,6 +519,121 @@ export class ReportQueueStatsResponse implements ReportQueueStats {
 
   @ApiProperty({ type: ReportQueueStatsMetaResponse })
   meta!: ReportQueueStatsMetaResponse;
+}
+
+// Communities
+
+export class AdminCommunityResponse implements AdminCommunityListItem {
+  @ApiProperty()
+  id!: string;
+
+  @ApiProperty({ description: 'The public route key, for cross-reference.' })
+  name!: string;
+
+  @ApiProperty({ type: String, nullable: true })
+  description!: string | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description: "Null once the creator's account is gone or deleted.",
+  })
+  creator_username!: string | null;
+
+  @ApiProperty({ format: 'date-time' })
+  created_at!: string;
+
+  @ApiProperty({ type: String, format: 'date-time', nullable: true })
+  suspended_at!: string | null;
+
+  @ApiProperty({
+    type: String,
+    format: 'date-time',
+    nullable: true,
+    description: 'Set when the creator soft-deleted the community.',
+  })
+  deleted_at!: string | null;
+
+  @ApiProperty({ type: 'integer', description: 'Subscribed members.' })
+  member_count!: number;
+
+  @ApiProperty({
+    type: 'integer',
+    description: 'Every post, removed ones included.',
+  })
+  post_count!: number;
+}
+
+export class AdminCommunityFiltersResponse {
+  @ApiProperty({ type: String, nullable: true })
+  search!: string | null;
+
+  @ApiProperty({ type: String, nullable: true })
+  creator_username!: string | null;
+
+  @ApiProperty({ enum: ADMIN_COMMUNITY_STATES })
+  state!: AdminCommunityState;
+
+  @ApiProperty({ enum: ['new', 'oldest'] })
+  sort!: 'new' | 'oldest';
+}
+
+export class AdminCommunityListResponse implements AdminCommunityList {
+  @ApiProperty({ type: [AdminCommunityResponse] })
+  items!: AdminCommunityResponse[];
+
+  @ApiProperty({ type: 'integer' })
+  page!: number;
+
+  @ApiProperty({ type: 'integer' })
+  limit!: number;
+
+  @ApiProperty({ type: 'integer' })
+  total!: number;
+
+  @ApiProperty({ type: AdminCommunityFiltersResponse })
+  filters!: AdminCommunityFiltersResponse;
+}
+
+export class AdminCommunityDetailResponse
+  extends AdminCommunityResponse
+  implements AdminCommunityDetail
+{
+  @ApiProperty({ type: String, nullable: true })
+  suspended_by_username!: string | null;
+
+  @ApiProperty({ type: String, nullable: true })
+  suspension_reason!: string | null;
+
+  @ApiProperty({ type: String, nullable: true })
+  deleted_by_username!: string | null;
+
+  @ApiProperty({
+    type: 'integer',
+    description: 'Appointed moderators, not counting the creator.',
+  })
+  moderator_count!: number;
+
+  @ApiProperty({
+    type: 'integer',
+    description:
+      "Every comment on the community's posts, removed ones included.",
+  })
+  comment_count!: number;
+
+  @ApiProperty({
+    type: 'integer',
+    nullable: true,
+    description: 'The current published rules version; null if none.',
+  })
+  rule_version!: number | null;
+
+  @ApiProperty({
+    type: 'integer',
+    description:
+      'Reports about this community, open or under review and not withdrawn.',
+  })
+  open_report_count!: number;
 }
 
 // Audit log

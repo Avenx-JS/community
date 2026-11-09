@@ -1,0 +1,12 @@
+-- Serves listings of communities newest or oldest first: GET
+-- /admin/communities, whose default state=any has no filter at all, and the
+-- public GET /communities. communities had no index leading on created_at, so
+-- both read every row and sorted them to return one page. The shape is
+-- (created_at, id): id is the pagination tiebreaker, so ORDER BY created_at,
+-- id in either direction is read in index order without a filesort.
+-- No behaviour change; only query plans change.
+-- Not safely re-runnable after success; the statement fails if the index
+-- already exists. Inspect the index before re-running manually.
+-- On a populated communities table this locks or copies; consider running it
+-- as online DDL (ALGORITHM=INPLACE, LOCK=NONE).
+CREATE INDEX idx_communities_created ON communities (created_at, id);
