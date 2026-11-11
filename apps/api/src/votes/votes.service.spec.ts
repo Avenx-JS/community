@@ -78,6 +78,10 @@ describe('VotesService', () => {
         if (sql.includes('FROM community_bans')) {
           return [[], []];
         }
+        // The ranking recompute (migration 034).
+        if (/^UPDATE (posts|comments) SET\s+upvotes/.test(sql)) {
+          return [{ affectedRows: 1 }, []];
+        }
         throw new Error(`Unexpected SQL query: ${sql}`);
       },
     };

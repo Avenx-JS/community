@@ -87,11 +87,13 @@ describe('user blocks are read through one definition', () => {
   it('uses the policy only on the gated paths', () => {
     expect(
       referencing(
-        /UserBlockPolicyService|eitherBlockedSql|BLOCKED_BETWEEN_SQL/,
+        /UserBlockPolicyService|eitherBlockedSql|BLOCKED_BETWEEN_SQL|notBlockedByViewerSql/,
       ),
     ).toEqual([
       'comments/comments.service.ts',
       'notifications/notification-inbox.service.ts',
+      // GET /feed, the caller's own surface (FEED_UNBLOCKED_AUTHOR_SQL).
+      'posts/posts.service.ts',
       'users/user-activity.service.ts',
       'users/user-block-policy.module.ts',
       'users/user-block-policy.service.ts',

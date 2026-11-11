@@ -18,6 +18,10 @@ import { CommunityBanPolicyService } from '../communities/community-ban-policy.s
 import { visibleCommunitySql } from '../common/community-visibility';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { UserBlockPolicyService } from '../users/user-block-policy.service';
+import {
+  RECOMPUTE_COMMENT_RANKING_SQL,
+  RECOMPUTE_POST_RANKING_SQL,
+} from '../common/content-ranking';
 
 interface VoteRow extends RowDataPacket {
   id: string;
@@ -134,6 +138,11 @@ export class VotesService {
         'INSERT INTO votes (id, user_id, target_type, target_id, value) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)',
         [randomUUID(), userId, input.target_type, input.target_id, input.value],
       );
+      await this.recomputeRanking(
+        connection,
+        input.target_type,
+        input.target_id,
+      );
 
       const [votes] = await connection.execute<VoteRow[]>(
         'SELECT id, user_id, target_type, target_id, value, created_at FROM votes WHERE user_id = ? AND target_type = ? AND target_id = ? LIMIT 1',
@@ -195,6 +204,7 @@ export class VotesService {
         'DELETE FROM votes WHERE user_id = ? AND target_type = ? AND target_id = ?',
         [userId, targetType, targetId],
       );
+      await this.recomputeRanking(connection, targetType, targetId);
       const score = await this.score(connection, targetType, targetId);
 
       await connection.commit();
@@ -227,6 +237,24 @@ export class VotesService {
       value: own[0] ? (Number(own[0].value) as -1 | 1) : null,
       score,
     };
+  }
+
+  // The target's stored counters and ranks (migration 034), recomputed from
+  // the votes table rather than adjusted by a delta, so a repeat vote, a
+  // changed vote and a withdrawal without a vote all leave them exact. On the
+  // vote's connection, after lockTarget: concurrent votes on one target
+  // serialise on its row lock and commit consistent values.
+  private async recomputeRanking(
+    connection: PoolConnection,
+    targetType: VoteTarget,
+    targetId: string,
+  ): Promise<void> {
+    await connection.execute<ResultSetHeader>(
+      targetType === 'post'
+        ? RECOMPUTE_POST_RANKING_SQL
+        : RECOMPUTE_COMMENT_RANKING_SQL,
+      [targetId, targetId, targetId],
+    );
   }
 
   private async score(

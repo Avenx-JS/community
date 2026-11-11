@@ -283,7 +283,11 @@ the matching rows sit in the index already in that order, and MySQL reads them
 backwards (or forwards) without a filesort. `id` is included because it is the
 pagination tiebreaker: without it, rows sharing a `created_at` still need
 sorting, and the plan is not fully index-ordered. A new listing should reuse
-this shape rather than filter on a single-column index and sort.
+this shape rather than filter on a single-column index and sort. The ranked
+post sorts follow it with their stored rank in place of `created_at`:
+migration `034_add_content_ranking` adds `idx_posts_hot (hot_rank, id)`,
+`idx_posts_top (score, id)` and `idx_posts_created (created_at, id)` for the
+unfiltered listing (see [Sorting and ranking](#sorting-and-ranking)).
 
 **`idx_votes_target` is covering.** Before it, no index on `votes` led with
 `target_type` (`unique_user_target` leads with `user_id`), so every vote
@@ -2982,9 +2986,10 @@ against the API read rate limits.
 Public, no bearer token. Lists one community's posts addressed by its public
 name, like every other community sub-resource, so a client holding the name
 needs one request instead of resolving the id first. Accepts `page` (`1` to
-`10000`, default `1`), `limit` (`1` to `100`, default `20`) and `sort=new`
-(the only value), and returns the same `{ "items", "page", "limit", "total",
-"sort" }` envelope as `GET /posts`, with the same post type
+`10000`, default `1`), `limit` (`1` to `100`, default `20`), `sort` and `time`
+(see [Sorting and ranking](#sorting-and-ranking)), and returns the same
+`{ "items", "page", "limit", "total", "sort" }` envelope as `GET /posts`, with
+the same post type
 (`PostListResponse`, `PostResponse`).
 
 **Equivalent to `GET /posts?community_id=<its id>`, by construction.** The
@@ -4437,14 +4442,17 @@ credentials that may create a scratch database.
 ## Posts
 
 `GET /posts` is public and returns `{ "items", "page", "limit", "total",
-"sort" }`. It accepts optional `community_id`, one-based `page` (default `1`),
-`limit` from `1` to `100` (default `20`), and `sort=new` (the only supported
-sort order). Posts are ordered by `created_at` descending, then `id` descending
-to keep pagination stable. **With `community_id`, that community's pinned
-posts come first** (see [Pinning posts](#pinning-posts)); the unfiltered
-listing never floats pins. Posts removed by moderation (`removed_at` set,
-migration 017) and posts in a deleted community are never listed. An empty
-page is returned with HTTP `200`.
+"sort" }`, plus `time` with `sort=top`. It accepts optional `community_id`,
+one-based `page` (default `1`), `limit` from `1` to `100` (default `20`),
+`sort` (`new`, the default, `hot`, `top` or `rising`) and, with `sort=top`
+only, `time` (see [Sorting and ranking](#sorting-and-ranking)). Every order
+ends in `id` descending to keep pagination stable. **With `community_id` and
+`sort=new` or `sort=hot`, that community's pinned posts come first** (see
+[Pinning posts](#pinning-posts)); the unfiltered listing, `top` and `rising`
+never float pins. Posts removed by moderation (`removed_at` set, migration
+017) and posts in a deleted or suspended community are never listed. An empty
+page is returned with HTTP `200`. The caller's own subscriptions are
+[`GET /feed`](#home-feed).
 
 `GET /posts?community_id=…` is kept and is not deprecated: it is published
 API, still serves clients that hold an id, and its unfiltered form is the only
@@ -4504,6 +4512,109 @@ effective edit (see [Editing posts and comments](#editing-posts-and-comments)).
 [Scores on content](#scores-on-content)). `saved` is caller-dependent: `true`
 only when the authenticated caller has saved the post, `false` otherwise and
 always `false` for an anonymous caller (see [Saved posts](#saved-posts)).
+
+### Sorting and ranking
+
+`GET /posts`, [`GET /communities/:name/posts`](#get-communitiesnameposts) and
+[`GET /feed`](#home-feed) share one query (`PostListingQueryDto`) and one
+listing path (`PostsService.list`), so their sorts cannot drift apart.
+
+| `sort` | Order | Rows |
+| --- | --- | --- |
+| `new` (default) | `created_at DESC, id DESC` | All |
+| `hot` | `hot_rank DESC, id DESC` | All |
+| `top` | `score DESC, id DESC` | Created within `time` |
+| `rising` | `rising_rank DESC, id DESC` | Created within the last 24 hours |
+
+`time` is `hour`, `day` (24 h), `week` (7 days), `month` (30 days), `year`
+(365 days) or `all` (the default), and is accepted **only with `sort=top`**:
+with any other sort it is `400` (`time applies only to sort=top`), because a
+silently ignored window looks like a ranking bug. The response echoes `sort`,
+and `time` with `sort=top` only. The windows compare `created_at` with
+`CURRENT_TIMESTAMP`, the clock its default comes from, so they are right
+whatever the session time zone.
+
+**Every rank is stored, not computed per request.** Migration
+`034_add_content_ranking` adds to `posts` the columns `upvotes`, `downvotes`,
+`score` (their difference), `hot_rank` and `rising_rank`, and to `comments`
+`upvotes`, `downvotes`, `score` and `controversy`. The listings `ORDER BY`
+those columns, so the database sorts and the application never does. A rank
+depends only on the content's votes and its creation time, never on the
+current time, so an unchanged post never moves relative to another as time
+passes, and a rank can be indexed.
+`src/common/content-ranking.ts` is the one definition:
+
+- **hot:** `sign(score) · log10(max(|score|, 1)) + (created − 2024-01-01) /
+  45000 s`. Every 12.5 hours of age weigh as much as one order of magnitude
+  of score: a post with score 10 ties with one of score 1 posted 12.5 hours
+  later. Newer posts win, without a clock in the query.
+- **rising:** the same with `11250 s`, four times steeper in time, over the
+  last 24 hours. It surfaces fresh posts gathering votes that `hot` still
+  ranks below yesterday's: a 6-hour-old post with score 30 beats a fresh one
+  with score 3 on hot, and loses to it on rising.
+- **top:** `score`, within `time`.
+
+All three compute in `DOUBLE` (the divisors are written `45000e0`): an integer
+division in MySQL is `DECIMAL` with four decimals, which would round nearby
+ranks together. `content-ranking.spec.ts` pins the values and the properties
+above, and checks the migration's backfill uses the vote path's exact
+expressions.
+
+**Kept exact on every vote.** `VotesService` recomputes the target's counters
+and ranks from the `votes` table (`RECOMPUTE_POST_RANKING_SQL`,
+`RECOMPUTE_COMMENT_RANKING_SQL`) in the same transaction as every vote, vote
+change and withdrawal, after the target row is locked `FOR UPDATE`. A
+recompute rather than a `±1` delta makes a repeated vote, a changed vote and a
+withdrawal without a vote all exact by construction, and concurrent votes on
+one target serialise on its row lock. A failed recompute rolls the vote back.
+A new post's `INSERT` sets the ranks of score `0` at its creation time;
+comments need nothing, since `controversy` is `0` without votes. Response
+`score` is still read per page from `votes` ([Scores on
+content](#scores-on-content)); both come from the same rows in the same
+transaction.
+
+**Indexes and plans.** `idx_posts_hot (hot_rank, id)` and `idx_posts_top
+(score, id)` serve `hot` and `top` (with `time=all`) on the unfiltered listing
+in index order, without a filesort, as `idx_posts_created (created_at, id)`
+now serves `new`. A `top` window and `rising` read their window as a range of
+`idx_posts_created` and sort it by the stored column. A community listing and
+the feed read their posts by community (`idx_posts_community_created`) and
+sort that set, as the pins already required. `content-ranking.mysql.spec.ts`
+asserts these plans (index named, no full scan, no filesort where index
+order is promised). Per-community rank indexes were left out: every vote
+writes the ranks, and each index more is a write on the hottest path.
+
+**Backfill.** The migration fills every column from the existing votes. Until
+it has run, existing posts have rank `0` and sort last on hot and rising; on a
+large installation run the two `UPDATE` statements in id batches (the header
+says how). The statements are idempotent.
+
+### Home feed
+
+`GET /feed` requires a bearer token and lists the posts of the communities the
+caller subscribes to, in the `GET /posts` envelope, paging and
+[sorts](#sorting-and-ranking) (`sort`, `time`, `page`, `limit`). It is a route
+of its own rather than `GET /posts?subscribed=true`: it is authenticated where
+`/posts` is public, and a flag that changes who may call a route and what it
+returns is a different resource. No property names the subscriber; it is
+always the token's user, and `community_id` or `subscribed` is `400`. As with
+saved posts, a suspended or banned account gets `403`.
+
+| Omitted | Why |
+| --- | --- |
+| Communities the caller does not subscribe to | It is the subscriptions' feed |
+| Deleted and suspended communities | The shared [visibility predicate](#community-suspension) |
+| Communities the caller is banned from now | `ACTIVE_COMMUNITY_BAN_PREDICATE`. A ban deletes the subscription, so this only matters for a row that survived one |
+| Posts removed by moderation | As on every listing |
+| Posts by accounts **the caller** blocked | The feed is the caller's own surface ([Blocking users](#blocking-users)) |
+
+Only the caller's own blocks filter it. Leaving out the posts of someone who
+blocked the caller would show the caller that they were blocked, which the
+[privacy rule](#privacy) forbids; those posts stay, as they do in the
+community listing. Pins do not float: they belong to their community's
+listing. The subscriptions are read through their primary key
+`(user_id, community_id)` as a semi-join, the ban and the block as one
+primary-key or `idx_community_bans_active` probe per row.
 
 ### Removing and restoring content
 
@@ -4956,8 +5067,12 @@ and unpinned posts alike.
 
 The unfiltered `GET /posts` keeps exactly its previous order
 (`created_at DESC, id DESC`) and does not float pins: one community's
-announcement has no claim on the global feed. `sort` still accepts only
-`new`; pinning is not a sort option.
+announcement has no claim on the global listing, nor on
+[`GET /feed`](#home-feed). In a community, pins float on `sort=new` and
+`sort=hot` (`ORDER BY (pinned_at IS NULL), pinned_at DESC, hot_rank DESC, id
+DESC` for hot), the two views a reader lands on; `top` and `rising` are
+rankings a pin would falsify, so they do not float pins. Pinning is not a sort
+option.
 
 **Filesort trade-off.** The leading `(pinned_at IS NULL)` term cannot be read
 from an index, so a single community's listing is a filesort over that
@@ -5042,8 +5157,11 @@ listing indexes that pair the filter with the sort order are separate work.
 each comment contains its `id`, `post_id`, `author_id`, `parent_id`, `content`,
 `created_at`, `edited_at`, `locked_at`, `locked_by`, `score` (see
 [Scores on content](#scores-on-content)) and
-`replies`. Roots and sibling replies use chronological order
+`replies`. The roots and the siblings at every depth are ordered by `sort`
+(see [Comment sorts](#comment-sorts)), chronologically by default
 (`created_at` ascending, then `id` ascending), making the thread order stable.
+`sort` is the route's only query property; any other, `page` included, is
+`400`. **Behaviour change:** unknown query properties were ignored before.
 An unknown post returns `404`.
 
 The tree is built in memory from one unpaginated read, so it is capped at 500
@@ -5072,8 +5190,9 @@ replies of each comment whose `reply_count` is above `0`, recursively.
 | `GET /comments/:id/replies` | The direct replies of comment `:id` (`parent_id = :id`), one level only | The comment is unknown or its post's community is deleted |
 
 Both take the same query (`ListCommentRepliesDto`): `page` (1-10,000, default
-`1`), `limit` (1-100, default `20`) and `sort` (`oldest` or `new`, default
-`oldest`). Out-of-range values and unknown query properties return `400`, as
+`1`), `limit` (1-100, default `20`) and `sort` (`oldest`, `new`, `top` or
+`controversial`, default `oldest`; see [Comment sorts](#comment-sorts)).
+Out-of-range values and unknown query properties return `400`, as
 does a malformed id. Both return the standard envelope
 `{ "items", "page", "limit", "total", "sort" }`; a comment without replies, or
 a post without root comments, returns `200` with `items: []` and `total: 0`.
@@ -5123,7 +5242,8 @@ filtered from it, both read in index order (backwards for `new`) without a
 filesort (`comment-listings.mysql.spec.ts` asserts the plans). On a table
 where the post's comments outnumber all root comments site-wide, the optimiser
 may prefer `idx_comments_parent_created` for the roots instead; that plan is
-also index-ordered without a filesort.
+also index-ordered without a filesort. `top` and `controversial` read the same
+ref and sort the post's or parent's comments by the stored column.
 
 **`reply_count`** counts an item's visible direct replies. It comes from one
 `COUNT(*) … WHERE parent_id IN (…) GROUP BY parent_id` over the page's ids, not
@@ -5173,6 +5293,68 @@ edit it. See [Editing posts and comments](#editing-posts-and-comments).
 comment's whole subtree to new replies. `POST /posts/:postId/comments` answers
 `409` on a locked post or below a locked comment at any depth, for moderators
 too. See [Locking posts and comments](#locking-posts-and-comments).
+
+### Comment sorts
+
+The tree route and both paginated routes take `sort`:
+
+| `sort` | Order |
+| --- | --- |
+| `oldest` (default) | `created_at ASC, id ASC` |
+| `new` | `created_at DESC, id DESC` |
+| `top` | `score DESC, created_at ASC, id ASC` |
+| `controversial` | `controversy DESC, created_at ASC, id ASC` |
+
+`score` and `controversy` are stored on the comment and recomputed on every
+vote (migration `034_add_content_ranking`, see
+[Sorting and ranking](#sorting-and-ranking)). `controversy` is `0` without both
+an up- and a downvote, and otherwise `(up + down) ^ (minority / majority)`: an
+even split of many votes ranks first, so 5/5 (10) beats 9/1 (≈ 1.29) and loses
+to 10/10 (20). Ties break oldest first, so the earliest of equally ranked
+comments keeps its place. The tree builds each level in row order, so one
+`ORDER BY` sorts the siblings at every depth; nothing is sorted in the
+application. `hot` and `rising` are post sorts only, and the tree takes no
+`page`, `limit` or `time` (`400`).
+
+### Comment permalinks
+
+`GET /comments/:id` is public (an optional bearer token identifies a reviewer)
+and returns one comment with its context:
+
+```json
+{
+  "post_id": "post-id",
+  "comment": { "id": "c-3", "parent_id": "c-2", "reply_count": 0, "score": 2, "…": "the flat comment" },
+  "ancestors": [
+    { "id": "c-1", "parent_id": null, "…": "the flat comment" },
+    { "id": "c-2", "parent_id": "c-1", "…": "the flat comment" }
+  ]
+}
+```
+
+`comment` and every ancestor use the flat shape of the paginated routes
+(`reply_count` included). `ancestors` runs from the top-level comment down to
+the direct parent, and is empty for a top-level comment. Replies are not
+included; page them through `GET /comments/:id/replies`. The chain is one
+recursive query, one primary-key lookup per level, bounded by
+`MAX_LOCK_ANCESTOR_DEPTH` like the reply-lock walk.
+
+It applies the thread's visibility rules to the chain:
+
+| Case | Everyone else | Reviewers (the community's creator and moderators, platform admins) |
+| --- | --- | --- |
+| Unknown or deleted comment (`DELETE` is a hard delete) | `404` | `404` |
+| Community deleted or suspended | `404` | `404` |
+| The post was removed by moderation | `404` | `200` |
+| The comment was removed by moderation | `404` | `200`, with `removed`, `removed_at`, `removed_by`, `removal_reason` |
+| An ancestor was removed | `200`, the ancestor as a tombstone `{ id, post_id, parent_id, created_at, removed: true }` | `200`, the ancestor in full with its removal state |
+
+A removed comment is `404` itself but a tombstone as an ancestor, as in the
+thread: the permalink of a removed comment shows nothing, while the context of
+a visible reply keeps its place. The reviewer check runs once, and only when
+something on the chain is removed. The community lookup carries the shared
+visibility predicate, and `community-visibility.spec.ts` lists the route among
+every call site that must.
 
 ### Comment content state
 
@@ -5304,12 +5486,16 @@ target_id, value)` serves it as a covering range scan (`Using index`, no
 temporary table, no filesort). A newly created post or comment has score `0`
 and issues no vote query.
 
-**A stored score was considered and not taken.** A denormalised `posts.score`
-(and `comments.score`) counter would need a migration, a backfill and a write
-on every vote, withdrawal and cascade delete. The covering index makes the
-aggregate cheap, so the counter stays the named escalation if measurement shows
-the per-page aggregate is too slow. `vote-routes.mysql.spec.ts` asserts the
-plans so that a regression fails a test rather than going unnoticed.
+**The stored score is for ranking.** Ranked listings need a score they can
+sort and index by, so migration `034_add_content_ranking` stores `score` (and
+the vote counts and ranks) on `posts` and `comments`, recomputed from `votes`
+in every vote's transaction (see [Sorting and ranking](#sorting-and-ranking)).
+Responses keep reading `score` through the per-page aggregate above: it is the
+source the stored column is recomputed from, the two agree after every vote
+commits, and switching the read path would change every listing's statements
+for no difference in the value. `vote-routes.mysql.spec.ts` asserts the
+aggregate's plan; `content-ranking.mysql.spec.ts` asserts the stored values
+match the votes, under concurrent votes too.
 
 ### `POST /votes` was removed
 
@@ -5569,7 +5755,7 @@ disclosure.
 **A block prevents directed interaction and hides the other person in personal
 surfaces. It does not erase anyone from shared spaces.** The predicate is defined
 once, in `UserBlockPolicyService` (`src/users/user-block-policy.service.ts`):
-`eitherBlockedSql`, `BLOCKED_BETWEEN_SQL` and
+`eitherBlockedSql`, `BLOCKED_BETWEEN_SQL`, `notBlockedByViewerSql` (the feed's one-way filter) and
 `assertNotBlockedOrThrow(actorId, otherUserId, connection?)`, which runs on the
 caller's transaction connection like the rule gate does. No gated path restates
 the SQL, and `user-blocks.spec.ts` fails if a file outside the gated paths
@@ -5609,6 +5795,13 @@ accepted the rules learns that first.
 | --- | --- |
 | `GET /notifications`, `GET /notifications/unread-count` | Notifications whose `actor_id` is blocked in either direction are left out, by the same predicate in both, so the badge matches the list |
 | `GET /users/:username/posts`, `/comments`, `/communities` | `404` when the viewer and the user have blocked each other, either way |
+| `GET /feed` | Posts by accounts **the caller** has blocked are left out (`notBlockedByViewerSql`); see [Home feed](#home-feed) |
+
+**The feed filters one direction only.** Every other check is symmetric, but
+leaving out the posts of someone who blocked the caller would make the
+caller's own feed the way to discover that block: the same post would be in
+the community listing and missing from the feed. So only the caller's own
+blocks apply, which tells them nothing they do not know.
 
 **Notifications are filtered on read, never deleted.** A block is reversible;
 deleting would not be. Unblocking makes them visible again. The filter uses

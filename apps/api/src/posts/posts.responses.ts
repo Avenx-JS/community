@@ -5,6 +5,12 @@ import {
   SAVED_POST_SORTS,
   type SavedPostSort,
 } from './dto/list-saved-posts.dto';
+import {
+  POST_LIST_SORTS,
+  POST_TOP_WINDOWS,
+  type PostListSort,
+  type PostTopWindow,
+} from './dto/post-listing-query.dto';
 
 export class PostResponse implements PostDto {
   @ApiProperty()
@@ -138,8 +144,14 @@ export class PostListResponse implements PostListDto {
   @ApiProperty({ type: 'integer' })
   total!: number;
 
-  @ApiProperty({ enum: ['new'] })
-  sort!: 'new';
+  @ApiProperty({ enum: POST_LIST_SORTS })
+  sort!: PostListSort;
+
+  @ApiPropertyOptional({
+    enum: POST_TOP_WINDOWS,
+    description: 'With sort=top only: the window that was ranked.',
+  })
+  time?: PostTopWindow;
 }
 
 // An item of GET /users/me/saved-posts: the one post shape, reused, with

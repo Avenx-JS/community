@@ -3,7 +3,10 @@ import { describe, expect, it } from '@jest/globals';
 import { ValidationPipe } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
-import { ListCommentRepliesDto } from './list-comment-replies.dto';
+import {
+  ListCommentRepliesDto,
+  ListCommentThreadDto,
+} from './list-comment-replies.dto';
 
 const pipe = new ValidationPipe({
   whitelist: true,
@@ -15,6 +18,8 @@ describe('ListCommentRepliesDto', () => {
   it.each([
     { page: '1', limit: '1', sort: 'oldest' },
     { page: '10000', limit: '100', sort: 'new' },
+    { page: '1', limit: '20', sort: 'top' },
+    { page: '1', limit: '20', sort: 'controversial' },
   ])('transforms values at their bounds: %o', async (query) => {
     const dto = plainToInstance(ListCommentRepliesDto, query);
     expect(dto).toMatchObject({
@@ -44,7 +49,9 @@ describe('ListCommentRepliesDto', () => {
     { limit: '0' },
     { limit: '101' },
     { limit: 'ten' },
-    { sort: 'top' },
+    { sort: 'hot' },
+    { sort: 'best' },
+    { sort: 'TOP' },
     { sort: 'old' },
     { sort: 'created_at DESC' },
   ])('rejects %o', async (query) => {
@@ -64,4 +71,31 @@ describe('ListCommentRepliesDto', () => {
       ).rejects.toThrow();
     },
   );
+});
+
+describe('ListCommentThreadDto', () => {
+  const thread = (query: Record<string, unknown>) =>
+    pipe.transform(query, { type: 'query', metatype: ListCommentThreadDto });
+
+  it.each(['oldest', 'new', 'top', 'controversial'])(
+    'accepts sort=%s',
+    async (sort) => {
+      await expect(thread({ sort })).resolves.toMatchObject({ sort });
+    },
+  );
+
+  it('accepts an empty query, leaving the default to the service', async () => {
+    await expect(thread({})).resolves.toEqual({});
+  });
+
+  // The tree is bounded, not paged.
+  it.each([
+    { sort: 'hot' },
+    { page: '1' },
+    { limit: '20' },
+    { time: 'day' },
+    { unexpected: 'value' },
+  ])('rejects %o', async (query) => {
+    await expect(thread(query)).rejects.toThrow();
+  });
 });

@@ -30,8 +30,10 @@ export class CommunityPostsController {
   @ApiOperation({
     summary: "List a community's posts",
     description:
-      "The community's pinned posts first, most recently pinned first, then " +
-      'newest first by ID. Identical to GET /posts?community_id=<its id>, ' +
+      'Ordered by sort (newest first by default). With sort=new and ' +
+      "sort=hot the community's pinned posts come first, most recently " +
+      'pinned first; top and rising are pure rankings. Identical to ' +
+      'GET /posts?community_id=<its id>, ' +
       'and the form clients should prefer. Omits posts removed by moderators.',
   })
   @ApiRouteParam('name', 'communityName', 'Community name.')

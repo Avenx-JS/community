@@ -36,6 +36,19 @@ import {
 } from './dto/create-post.dto';
 import { UpdatePostDto } from './dto/update-post.dto';
 import { ListPostsDto } from './dto/list-posts.dto';
+import type { ListFeedDto } from './dto/list-feed.dto';
+import type {
+  PostListingQueryDto,
+  PostListSort,
+  PostTopWindow,
+} from './dto/post-listing-query.dto';
+import { notBlockedByViewerSql } from '../users/user-block-policy.service';
+import { ACTIVE_COMMUNITY_BAN_PREDICATE } from '../common/active-community-ban';
+import {
+  NEW_POST_HOT_RANK_SQL,
+  NEW_POST_RISING_RANK_SQL,
+  RISING_WINDOW_HOURS,
+} from '../common/content-ranking';
 import { loadVoteScores } from '../votes/vote-scores';
 import { loadSavedFlags } from './saved-flags';
 import {
@@ -140,7 +153,103 @@ export interface PostListDto {
   page: number;
   limit: number;
   total: number;
-  sort: 'new';
+  sort: PostListSort;
+  // Present with sort=top only: the window that was ranked.
+  time?: PostTopWindow;
+}
+
+// Whose posts a listing reads: every visible post, one community's, or the
+// subscribed communities of one account (GET /feed).
+export interface PostListScope {
+  community_id?: string;
+  subscriber_id?: string;
+}
+
+// The windows of sort=top and sort=rising, against created_at. Compared
+// with CURRENT_TIMESTAMP, the clock created_at defaults to, so the window is
+// right whatever the session time zone.
+const TOP_WINDOW_SQL: Record<Exclude<PostTopWindow, 'all'>, string> = {
+  hour: 'INTERVAL 1 HOUR',
+  day: 'INTERVAL 1 DAY',
+  week: 'INTERVAL 7 DAY',
+  month: 'INTERVAL 30 DAY',
+  year: 'INTERVAL 365 DAY',
+};
+const createdWithinSql = (interval: string) =>
+  `posts.created_at >= CURRENT_TIMESTAMP - ${interval}`;
+
+// The feed's communities: the account's subscriptions (primary key
+// (user_id, community_id)), less any community it is banned from now. A ban
+// deletes the subscription, so this only matters for a row that survived
+// one; it costs a probe of idx_community_bans_active per subscription.
+export const FEED_COMMUNITIES_SQL = `posts.community_id IN (
+         SELECT community_subscriptions.community_id FROM community_subscriptions
+         WHERE community_subscriptions.user_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM community_bans
+             WHERE community_bans.community_id = community_subscriptions.community_id
+               AND community_bans.user_id = community_subscriptions.user_id
+               AND ${ACTIVE_COMMUNITY_BAN_PREDICATE}
+           )
+       )`;
+
+// The feed is the caller's own surface, so it omits the authors the caller
+// has blocked, in that direction only (see "Blocking users").
+export const FEED_UNBLOCKED_AUTHOR_SQL = notBlockedByViewerSql(
+  '?',
+  'posts.author_id',
+);
+
+export function postListingWhere(
+  scope: PostListScope,
+  sort: PostListSort,
+  time?: PostTopWindow,
+): { where: string; values: string[] } {
+  const conditions: string[] = [];
+  const values: string[] = [];
+  if (scope.community_id) {
+    conditions.push('community_id = ?');
+    values.push(scope.community_id);
+  }
+  if (scope.subscriber_id) {
+    conditions.push(FEED_COMMUNITIES_SQL);
+    values.push(scope.subscriber_id);
+  }
+  conditions.push(visibleCommunitySql('posts.community_id'), VISIBLE_POST_SQL);
+  if (scope.subscriber_id) {
+    conditions.push(FEED_UNBLOCKED_AUTHOR_SQL);
+    values.push(scope.subscriber_id);
+  }
+  if (sort === 'top' && time && time !== 'all') {
+    conditions.push(createdWithinSql(TOP_WINDOW_SQL[time]));
+  }
+  if (sort === 'rising') {
+    conditions.push(createdWithinSql(`INTERVAL ${RISING_WINDOW_HOURS} HOUR`));
+  }
+  return { where: ` WHERE ${conditions.join(' AND ')}`, values };
+}
+
+// Pins float only within one community's listing, and only on the
+// chronological and hot views: one community's announcement has no claim on
+// the global listing or the feed, and top and rising are rankings a pin
+// would falsify. The leading (pinned_at IS NULL) term cannot be read from an
+// index, so a community listing is a filesort over that community's posts
+// (see the README). id DESC breaks every tie.
+export function postListingOrder(
+  scope: PostListScope,
+  sort: PostListSort,
+): string {
+  const pins =
+    scope.community_id && (sort === 'new' || sort === 'hot')
+      ? '(pinned_at IS NULL), pinned_at DESC, '
+      : '';
+  const key = {
+    new: 'created_at DESC, id DESC',
+    hot: 'hot_rank DESC, id DESC',
+    top: 'score DESC, id DESC',
+    rising: 'rising_rank DESC, id DESC',
+  }[sort];
+  return `ORDER BY ${pins}${key}`;
 }
 
 @Injectable()
@@ -170,29 +279,37 @@ export class PostsService {
     this.bans = bans ?? new CommunityBanPolicyService(pool);
   }
 
-  async findAll(query: ListPostsDto, viewerId?: string): Promise<PostListDto> {
+  // GET /posts and GET /communities/:name/posts (with community_id).
+  findAll(query: ListPostsDto, viewerId?: string): Promise<PostListDto> {
+    return query.community_id
+      ? this.list({ community_id: query.community_id }, query, viewerId)
+      : this.list({}, query, viewerId);
+  }
+
+  // GET /feed: posts of the caller's subscribed communities.
+  findFeed(query: ListFeedDto, userId: string): Promise<PostListDto> {
+    return this.list({ subscriber_id: userId }, query, userId);
+  }
+
+  // The one post listing path: GET /posts, its community_id filter,
+  // GET /communities/:name/posts and GET /feed all run it, so they cannot
+  // drift apart. Posts in a deleted or suspended community, and posts
+  // removed by moderation, are never listed. Every order is read from
+  // persisted columns (posts.hot_rank, score, rising_rank, created_at), so
+  // the database sorts, never the application.
+  private async list(
+    scope: PostListScope,
+    query: PostListingQueryDto,
+    viewerId?: string,
+  ): Promise<PostListDto> {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
     const offset = (page - 1) * limit;
-    // Posts in a deleted community, and posts removed by moderation, are
-    // never listed. This is the one post listing path: GET /posts, its
-    // community_id filter and GET /communities/:name/posts all run it, so
-    // they cannot drift apart.
-    const where = query.community_id
-      ? ` WHERE community_id = ? AND ${visibleCommunitySql('posts.community_id')} AND ${VISIBLE_POST_SQL}`
-      : ` WHERE ${visibleCommunitySql('posts.community_id')} AND ${VISIBLE_POST_SQL}`;
-    const values: (string | number)[] = query.community_id
-      ? [query.community_id]
-      : [];
-    // Pins float only within one community's listing: one community's
-    // announcement has no claim on the global feed. The leading
-    // (pinned_at IS NULL) term cannot be read from an index, so this is a
-    // filesort over the community's posts (see the README).
-    const order = query.community_id
-      ? 'ORDER BY (pinned_at IS NULL), pinned_at DESC, created_at DESC, id DESC'
-      : 'ORDER BY created_at DESC, id DESC';
+    const sort = query.sort ?? 'new';
+    const time = sort === 'top' ? (query.time ?? 'all') : undefined;
+    const { where, values } = postListingWhere(scope, sort, time);
     const [posts] = await this.pool.execute<PostRow[]>(
-      `SELECT ${POST_COLUMNS} FROM posts${where} ${order} LIMIT ? OFFSET ?`,
+      `SELECT ${POST_COLUMNS} FROM posts${where} ${postListingOrder(scope, sort)} LIMIT ? OFFSET ?`,
       [...values, limit, offset],
     );
     const [countRows] = await this.pool.execute<
@@ -203,8 +320,9 @@ export class PostsService {
       items: await toPostDtos(this.pool, posts, viewerId),
       page,
       limit,
-      total: countRows[0].total,
-      sort: 'new',
+      total: Number(countRows[0].total),
+      sort,
+      ...(time ? { time } : {}),
     };
   }
 
@@ -242,7 +360,8 @@ export class PostsService {
 
       const id = randomUUID();
       await connection.execute<ResultSetHeader>(
-        'INSERT INTO posts (id, title, content, type, author_id, community_id) VALUES (?, ?, ?, ?, ?, ?)',
+        // A new post has no votes; its ranks are those of score 0 now.
+        `INSERT INTO posts (id, title, content, type, author_id, community_id, hot_rank, rising_rank) VALUES (?, ?, ?, ?, ?, ?, ${NEW_POST_HOT_RANK_SQL}, ${NEW_POST_RISING_RANK_SQL})`,
         [
           id,
           input.title.trim(),

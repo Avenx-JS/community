@@ -7,6 +7,8 @@ import { COMMENT_LIST_SORTS } from './dto/list-comment-replies.dto';
 import type { CommentListSort } from './dto/list-comment-replies.dto';
 import type {
   CommentDto,
+  CommentPermalinkDto,
+  CommentPermalinkTombstoneDto,
   CommentReplyDto,
   CommentReplyListDto,
   CommentTombstoneDto,
@@ -249,4 +251,66 @@ export class RemovedCommentResponse extends CommentReplyResponse {
 
   @ApiProperty({ type: String, nullable: true })
   removal_reason!: string | null;
+}
+
+// A comment on a permalink's chain as a reviewer sees it: the flat comment,
+// with its removal state when it was removed.
+export class CommentPermalinkCommentResponse extends CommentReplyResponse {
+  @ApiPropertyOptional({
+    enum: [true],
+    description: 'Present on a removed comment, which only reviewers see.',
+  })
+  removed?: true;
+
+  @ApiPropertyOptional({ format: 'date-time' })
+  removed_at?: string;
+
+  @ApiPropertyOptional({ type: String, nullable: true })
+  removed_by?: string | null;
+
+  @ApiPropertyOptional({ type: String, nullable: true })
+  removal_reason?: string | null;
+}
+
+// A removed ancestor as everyone but its reviewers sees it.
+export class CommentPermalinkTombstoneResponse implements CommentPermalinkTombstoneDto {
+  @ApiProperty()
+  id!: string;
+
+  @ApiProperty()
+  post_id!: string;
+
+  @ApiProperty({ type: String, nullable: true })
+  parent_id!: string | null;
+
+  @ApiProperty({ format: 'date-time' })
+  created_at!: string;
+
+  @ApiProperty({ enum: [true] })
+  removed!: true;
+}
+
+export class CommentPermalinkResponse implements CommentPermalinkDto {
+  @ApiProperty()
+  post_id!: string;
+
+  @ApiProperty({ type: CommentPermalinkCommentResponse })
+  comment!: CommentPermalinkCommentResponse;
+
+  @ApiProperty({
+    type: 'array',
+    items: {
+      oneOf: [
+        { $ref: getSchemaPath('CommentPermalinkCommentResponse') },
+        { $ref: getSchemaPath('CommentPermalinkTombstoneResponse') },
+      ],
+    },
+    description:
+      'The chain above the comment, root first and the direct parent last; ' +
+      'empty for a top-level comment. A removed ancestor is a tombstone to ' +
+      'everyone but reviewers.',
+  })
+  ancestors!: (
+    CommentPermalinkCommentResponse | CommentPermalinkTombstoneResponse
+  )[];
 }

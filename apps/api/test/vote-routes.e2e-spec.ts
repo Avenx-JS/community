@@ -169,6 +169,10 @@ describe('Vote routes on posts and comments (e2e)', () => {
           [],
         ]);
       }
+      // The ranking recompute (migration 034).
+      if (/^UPDATE (posts|comments) SET\s+upvotes/.test(sql)) {
+        return Promise.resolve([{ affectedRows: 1 }, []]);
+      }
       return Promise.reject(new Error(`Unexpected SQL query: ${sql}`));
     };
 

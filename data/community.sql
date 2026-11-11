@@ -228,6 +228,11 @@ CREATE TABLE posts (
     removal_reason TEXT NULL,
     pinned_at TIMESTAMP NULL DEFAULT NULL,
     pinned_by VARCHAR(36) NULL,
+    upvotes INT NOT NULL DEFAULT 0,
+    downvotes INT NOT NULL DEFAULT 0,
+    score INT NOT NULL DEFAULT 0,
+    hot_rank DOUBLE NOT NULL DEFAULT 0,
+    rising_rank DOUBLE NOT NULL DEFAULT 0,
     INDEX idx_posts_removed_at (removed_at),
     FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE,
@@ -239,6 +244,10 @@ CREATE FULLTEXT INDEX ft_posts_title_content ON posts (title, content);
 CREATE INDEX idx_posts_community_created ON posts (community_id, created_at, id);
 CREATE INDEX idx_posts_author_created ON posts (author_id, created_at, id);
 CREATE INDEX idx_posts_community_pinned ON posts (community_id, pinned_at);
+-- Ranked listings (034_add_content_ranking).
+CREATE INDEX idx_posts_hot ON posts (hot_rank, id);
+CREATE INDEX idx_posts_top ON posts (score, id);
+CREATE INDEX idx_posts_created ON posts (created_at, id);
 
 CREATE TABLE comments (
     id VARCHAR(36) PRIMARY KEY,
@@ -253,6 +262,10 @@ CREATE TABLE comments (
     removed_at TIMESTAMP NULL DEFAULT NULL,
     removed_by VARCHAR(36) NULL,
     removal_reason TEXT NULL,
+    upvotes INT NOT NULL DEFAULT 0,
+    downvotes INT NOT NULL DEFAULT 0,
+    score INT NOT NULL DEFAULT 0,
+    controversy DOUBLE NOT NULL DEFAULT 0,
     INDEX idx_comments_removed_at (removed_at),
     FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE,
     FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -706,4 +719,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('030_add_report_withdrawal'),
     ('031_add_report_assignment'),
     ('032_create_community_bans'),
-    ('033_add_communities_created_index');
+    ('033_add_communities_created_index'),
+    ('034_add_content_ranking');

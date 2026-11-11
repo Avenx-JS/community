@@ -5,7 +5,8 @@ import { MYSQL_POOL } from '../auth/auth.service';
 // What a block prevents, defined once. A block stops directed interaction in
 // both directions (replying to the other person's content, voting on it) and
 // hides the other person in the blocker's personal surfaces (the inbox, their
-// profile feeds). It never removes anyone from a shared space: community
+// profile feeds, and the blocked author's posts in the home feed). It never
+// removes anyone from a shared space: community
 // listings, threads and search are unfiltered, and a block is never consulted
 // by reporting, posting, membership, moderation or /admin. See "Blocking
 // users" in README.md for every path and its reason.
@@ -22,6 +23,15 @@ export function eitherBlockedSql(a: string, b: string): string {
 
 // Bound as [a, b, b, a].
 export const BLOCKED_BETWEEN_SQL = `SELECT ${eitherBlockedSql('?', '?')} AS blocked`;
+
+// True unless the viewer has blocked the author: the one direction a
+// personal listing may filter by, as GET /feed does. The other direction is
+// deliberately not checked: hiding the posts of someone who blocked the
+// viewer would show the viewer that they were blocked. A primary-key probe of
+// (blocker_id, blocked_id). viewer and author are SQL expressions.
+export function notBlockedByViewerSql(viewer: string, author: string): string {
+  return `NOT EXISTS (SELECT 1 FROM user_blocks WHERE user_blocks.blocker_id = ${viewer} AND user_blocks.blocked_id = ${author})`;
+}
 
 export const USER_BLOCKED_REASON = 'user_blocked';
 

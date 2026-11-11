@@ -13,6 +13,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import {
+  ApiExtraModels,
   ApiNoContentResponse,
   ApiOkResponse,
   ApiOperation,
@@ -25,14 +26,22 @@ import {
   ApiRouteParam,
 } from '../common/openapi';
 import {
+  CommentPermalinkCommentResponse,
+  CommentPermalinkResponse,
+  CommentPermalinkTombstoneResponse,
   CommentReplyListResponse,
   CommentReplyResponse,
 } from './comments.responses';
 import {
   CommentsService,
+  type CommentPermalinkDto,
   type CommentReplyDto,
   type CommentReplyListDto,
 } from './comments.service';
+import {
+  OptionalAuthGuard,
+  type OptionallyAuthenticatedRequest,
+} from '../auth/optional-auth.guard';
 import { UpdateCommentDto } from './dto/update-comment.dto';
 import { ListCommentRepliesDto } from './dto/list-comment-replies.dto';
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
@@ -58,6 +67,38 @@ export class CommentsController {
     private readonly commentsService: CommentsService,
     private readonly votesService: VotesService,
   ) {}
+
+  @Get(':id')
+  @UseGuards(OptionalAuthGuard)
+  @ApiExtraModels(
+    CommentPermalinkCommentResponse,
+    CommentPermalinkTombstoneResponse,
+  )
+  @ApiOperation({
+    summary: 'Get a comment with its context',
+    description:
+      'A permalink: the comment and the chain of its ancestors up to the ' +
+      'top-level comment, root first. The thread’s visibility rules apply: ' +
+      'a removed comment, or one under a removed post, is 404 except for ' +
+      "its community's creator and moderators and for platform admins, who " +
+      'receive it with its removal state; a removed ancestor is a tombstone ' +
+      'to everyone else. Replies are not included; page them through ' +
+      'GET /comments/{id}/replies. An invalid token reads as anonymous.',
+  })
+  @ApiRouteParam('id', 'id', 'Comment ID.')
+  @ApiOkResponse({ type: CommentPermalinkResponse })
+  @ApiErrorResponses({
+    400: 'Invalid comment ID.',
+    404:
+      'Comment not found or deleted, removed and the caller may not review ' +
+      'it, under a removed post, or its community is deleted or suspended.',
+  })
+  findOne(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Req() request?: OptionallyAuthenticatedRequest,
+  ): Promise<CommentPermalinkDto> {
+    return this.commentsService.findPermalink(id, request?.user?.id);
+  }
 
   @Get(':id/replies')
   @ApiOperation({

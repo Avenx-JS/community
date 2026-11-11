@@ -33,7 +33,10 @@ import {
   type OptionallyAuthenticatedRequest,
 } from '../auth/optional-auth.guard';
 import { RemoveContentDto } from '../common/remove-content.dto';
-import { ListCommentRepliesDto } from '../comments/dto/list-comment-replies.dto';
+import {
+  ListCommentRepliesDto,
+  ListCommentThreadDto,
+} from '../comments/dto/list-comment-replies.dto';
 import {
   ApiAuthenticated,
   ApiErrorResponses,
@@ -71,9 +74,10 @@ export class PostsController {
   @ApiOperation({
     summary: 'List posts',
     description:
-      'Newest first, then by ID descending. With community_id, that ' +
-      "community's pinned posts come first, most recently pinned first; the " +
-      'unfiltered listing does not float pinned posts. With an optional ' +
+      'Ordered by sort (newest first by default), then by ID descending. ' +
+      "With community_id and sort=new or sort=hot, that community's pinned " +
+      'posts come first, most recently pinned first; the unfiltered listing, ' +
+      'top and rising do not float pinned posts. With an optional ' +
       'bearer token, each post\u2019s saved flag reflects the caller.',
   })
   @ApiOkResponse({ type: PostListResponse })
@@ -423,7 +427,8 @@ export class PostsController {
   @ApiOperation({
     summary: 'Get the comment thread of a post',
     description:
-      'Public. Comments oldest first, with replies nested under parents. A ' +
+      'Public. Comments with replies nested under parents, the siblings at ' +
+      'every level ordered by sort (oldest first by default). A ' +
       'comment removed by a moderator stays in place as a tombstone ' +
       '({ id, post_id, parent_id, created_at, removed: true, replies }) so ' +
       "its replies keep their place; the community's creator and " +
@@ -433,7 +438,7 @@ export class PostsController {
   @ApiRouteParam('postId', 'id', 'Post ID.')
   @ApiOkResponse({ type: CommentThreadResponse })
   @ApiErrorResponses({
-    400: 'Invalid post ID.',
+    400: 'Invalid post ID or query parameters.',
     404: 'Post not found, or removed and the caller may not review it.',
     413:
       'The thread exceeds the maximum number of comments; page it through ' +
@@ -441,9 +446,10 @@ export class PostsController {
   })
   getComments(
     @Param('postId', new SafeRouteParamPipe('id')) postId: string,
+    @Query() query: ListCommentThreadDto,
     @Req() request?: OptionallyAuthenticatedRequest,
   ) {
-    return this.commentsService.findThread(postId, request?.user?.id);
+    return this.commentsService.findThread(postId, request?.user?.id, query);
   }
 
   @Get(':postId/comments/top-level')

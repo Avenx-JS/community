@@ -299,6 +299,10 @@ describe('Rule acceptance enforcement', () => {
       if (sql.includes('FROM community_bans')) {
         return Promise.resolve([[], []]);
       }
+      // The ranking recompute (migration 034).
+      if (/^UPDATE (posts|comments) SET\s+upvotes/.test(sql)) {
+        return Promise.resolve([{ affectedRows: 1 }, []]);
+      }
       return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
     };
 

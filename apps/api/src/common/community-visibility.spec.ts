@@ -217,7 +217,7 @@ const lookups: Array<
   ],
   [
     'GET /communities/:name/bans',
-    (s) => s.bans.list('gone', 'u', { page: 1, limit: 20, active: true }),
+    (s) => s.bans.list('gone', 'u', { page: 1, limit: 20, active: 'active' }),
     BY_NAME,
   ],
   [
@@ -249,6 +249,7 @@ const lookups: Array<
     CONTENT,
   ],
   ['PUT /posts/:id/save', (s) => s.saved.save('p', 'u'), CONTENT],
+  ['GET /comments/:id', (s) => s.comments.findPermalink('c', 'u'), CONTENT],
 ];
 
 describe('deleted and suspended communities are excluded from every read and write', () => {
@@ -324,11 +325,26 @@ describe('deleted and suspended communities are excluded from every read and wri
   });
 
   it.each([
-    ['GET /posts', {}],
-    ['GET /posts?community_id=', { community_id: 'gone' }],
+    ['GET /posts', (s: Services) => s.posts.findAll({})],
+    [
+      'GET /posts?community_id=',
+      (s: Services) => s.posts.findAll({ community_id: 'gone' }),
+    ],
+    ...(['hot', 'top', 'rising'] as const).map(
+      (sort) =>
+        [
+          `GET /posts?sort=${sort}`,
+          (s: Services) => s.posts.findAll({ sort }),
+        ] as const,
+    ),
+    ['GET /feed', (s: Services) => s.posts.findFeed({}, 'u')],
+    [
+      'GET /feed?sort=top&time=day',
+      (s: Services) => s.posts.findFeed({ sort: 'top', time: 'day' }, 'u'),
+    ],
   ])(
     '%s lists and counts only posts in live communities',
-    async (_route, query) => {
+    async (_route, call) => {
       const { pool, statements } = emptyDatabase();
       pool.execute = ((sql: string) => {
         statements.push(sql);
@@ -338,7 +354,7 @@ describe('deleted and suspended communities are excluded from every read and wri
         ]);
       }) as unknown as Pool['execute'];
 
-      await services(pool).posts.findAll(query);
+      await call(services(pool));
 
       expect(statements).toHaveLength(2);
       for (const sql of statements) {

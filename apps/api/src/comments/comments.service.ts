@@ -30,11 +30,13 @@ import { UpdateCommentDto } from './dto/update-comment.dto';
 import type {
   CommentListSort,
   ListCommentRepliesDto,
+  ListCommentThreadDto,
 } from './dto/list-comment-replies.dto';
 import { loadVoteScores } from '../votes/vote-scores';
 import {
   canReviewRemovedContent,
   toRemovalState,
+  type RemovalStateDto,
   type RemovalStateRow,
 } from '../common/removed-content';
 
@@ -148,10 +150,17 @@ const COMMENT_REPLY_COLUMNS =
 // Comments removed by moderation are never listed by the paginated routes.
 const VISIBLE_COMMENT_SQL = 'removed_at IS NULL';
 
-const commentListOrder = (sort: CommentListSort): string =>
-  sort === 'new'
-    ? 'ORDER BY created_at DESC, id DESC'
-    : 'ORDER BY created_at ASC, id ASC';
+// Every comment order, read from persisted columns (comments.score and
+// controversy, migration 034): the database sorts, never the application.
+// The tree route builds its levels in row order, so the same ORDER BY sorts
+// the siblings at every depth.
+export const commentListOrder = (sort: CommentListSort): string =>
+  ({
+    oldest: 'ORDER BY created_at ASC, id ASC',
+    new: 'ORDER BY created_at DESC, id DESC',
+    top: 'ORDER BY score DESC, created_at ASC, id ASC',
+    controversial: 'ORDER BY controversy DESC, created_at ASC, id ASC',
+  })[sort];
 
 export interface CommentDto {
   id: string;
@@ -194,6 +203,75 @@ export interface CommentThreadDto {
   post_id: string;
   comments: CommentNodeDto[];
 }
+
+// The permalink's comment, or an ancestor of it: the flat comment shape,
+// with its removal state for a reviewer.
+export type CommentPermalinkCommentDto = CommentReplyDto &
+  Partial<RemovalStateDto>;
+
+// A removed ancestor as everyone but its reviewers sees it: its place in
+// the chain, not its content or author.
+export interface CommentPermalinkTombstoneDto {
+  id: string;
+  post_id: string;
+  parent_id: string | null;
+  created_at: string;
+  removed: true;
+}
+
+export type CommentPermalinkItemDto =
+  CommentPermalinkCommentDto | CommentPermalinkTombstoneDto;
+
+export interface CommentPermalinkDto {
+  post_id: string;
+  comment: CommentPermalinkCommentDto;
+  // Root first, the direct parent last; empty for a top-level comment.
+  ancestors: CommentPermalinkItemDto[];
+}
+
+// The flat comment's columns and its removal state, qualified: the
+// permalink's lookup joins posts, which has columns of the same names.
+const PERMALINK_COLUMNS = (table: string) =>
+  [
+    'id',
+    'post_id',
+    'parent_id',
+    'author_id',
+    'content',
+    'created_at',
+    'edited_at',
+    'locked_at',
+    'locked_by',
+    'removed_at',
+    'removed_by',
+    'removal_reason',
+  ]
+    .map((column) => `${table}.${column}`)
+    .join(', ');
+
+// The permalink's comment, its post's community and removal state. A
+// primary-key lookup joined to its post by primary key.
+export const PERMALINK_COMMENT_SQL = `SELECT ${PERMALINK_COLUMNS('comments')}, posts.community_id, posts.removed_at AS post_removed_at
+       FROM comments
+       INNER JOIN posts ON posts.id = comments.post_id
+       WHERE comments.id = ? AND ${visibleCommunitySql('posts.community_id')}
+       LIMIT 1`;
+
+// The chain above a comment, from its parent up to the root, one
+// primary-key lookup per level, bounded like the reply lock walk
+// (MAX_LOCK_ANCESTOR_DEPTH). Root first. Values: parent id, the bound.
+export const PERMALINK_ANCESTORS_SQL = `WITH RECURSIVE chain (id, parent_id, depth) AS (
+  SELECT id, parent_id, 1 FROM comments WHERE id = ?
+  UNION ALL
+  SELECT comments.id, comments.parent_id, chain.depth + 1
+  FROM chain
+  INNER JOIN comments ON comments.id = chain.parent_id
+  WHERE chain.depth < ?
+)
+SELECT ${PERMALINK_COLUMNS('comments')}
+FROM chain
+INNER JOIN comments ON comments.id = chain.id
+ORDER BY chain.depth DESC`;
 
 // One comment of a paginated listing (GET /comments/:id/replies,
 // GET /posts/:postId/comments/top-level). Deliberately flat: a reply_count
@@ -248,6 +326,7 @@ export class CommentsService {
   async findThread(
     postId: string,
     viewerId?: string,
+    query: ListCommentThreadDto = {},
   ): Promise<CommentThreadDto> {
     const [posts] = await this.pool.execute<
       (RowDataPacket & {
@@ -271,7 +350,7 @@ export class CommentsService {
     }
 
     const [rows] = await this.pool.execute<(CommentRow & RemovalStateRow)[]>(
-      'SELECT id, post_id, author_id, parent_id, content, created_at, edited_at, locked_at, locked_by, removed_at, removed_by, removal_reason FROM comments WHERE post_id = ? ORDER BY created_at ASC, id ASC LIMIT ?',
+      `SELECT id, post_id, author_id, parent_id, content, created_at, edited_at, locked_at, locked_by, removed_at, removed_by, removal_reason FROM comments WHERE post_id = ? ${commentListOrder(query.sort ?? 'oldest')} LIMIT ?`,
       [postId, MAX_COMMENTS_PER_THREAD + 1],
     );
     if (rows.length > MAX_COMMENTS_PER_THREAD) {
@@ -339,6 +418,83 @@ export class CommentsService {
     }
 
     return { post_id: postId, comments };
+  }
+
+  // GET /comments/:id: one comment and its ancestors, root first, as the
+  // context of a permalink. The thread's visibility rules, applied to the
+  // comment's chain: 404 for an unknown or deleted comment, for one in a
+  // deleted or suspended community, and for one under a removed post; a
+  // removed comment is 404 itself and a tombstone as an ancestor, except for
+  // its reviewers (canReviewRemovedContent), who see both in full with
+  // their removal state, exactly as the thread shows them. The reviewer
+  // check runs once, and only if something on the chain is removed.
+  async findPermalink(
+    id: string,
+    viewerId?: string,
+  ): Promise<CommentPermalinkDto> {
+    const [targets] = await this.pool.execute<
+      (CommentReplyRow &
+        RemovalStateRow & {
+          community_id: string;
+          post_removed_at: Date | string | null;
+        })[]
+    >(PERMALINK_COMMENT_SQL, [id]);
+    const target = targets[0];
+    if (!target) {
+      throw new NotFoundException('Comment not found');
+    }
+    let reviewer: boolean | undefined;
+    const isReviewer = async () =>
+      (reviewer ??= await canReviewRemovedContent(
+        this.pool,
+        target.community_id,
+        viewerId,
+      ));
+    if (
+      (target.post_removed_at || target.removed_at) &&
+      !(await isReviewer())
+    ) {
+      throw new NotFoundException('Comment not found');
+    }
+
+    const ancestors = target.parent_id
+      ? (
+          await this.pool.execute<(CommentReplyRow & RemovalStateRow)[]>(
+            PERMALINK_ANCESTORS_SQL,
+            [target.parent_id, MAX_LOCK_ANCESTOR_DEPTH],
+          )
+        )[0]
+      : [];
+    const showRemoved = ancestors.some((row) => row.removed_at)
+      ? await isReviewer()
+      : false;
+
+    const shown = [...ancestors, target].filter(
+      (row) => !row.removed_at || showRemoved || row === target,
+    );
+    const dtos = new Map(
+      (await this.toReplyDtos(this.pool, shown)).map((dto) => [dto.id, dto]),
+    );
+    const toItem = (
+      row: CommentReplyRow & RemovalStateRow,
+    ): CommentPermalinkItemDto => {
+      const dto = dtos.get(row.id);
+      if (!dto) {
+        return {
+          id: row.id,
+          post_id: row.post_id,
+          parent_id: row.parent_id,
+          created_at: new Date(row.created_at).toISOString(),
+          removed: true,
+        };
+      }
+      return row.removed_at ? { ...dto, ...toRemovalState(row) } : dto;
+    };
+    return {
+      post_id: target.post_id,
+      comment: toItem(target) as CommentReplyDto & Partial<RemovalStateDto>,
+      ancestors: ancestors.map(toItem),
+    };
   }
 
   // Direct, visible children of one comment, a page at a time. The parent
