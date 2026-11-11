@@ -202,6 +202,7 @@ describe('GET /communities/:name/posts (e2e)', () => {
         'locked_by',
         'score',
         'saved',
+        'media',
         'title',
         'type',
       ].sort(),

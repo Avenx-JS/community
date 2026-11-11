@@ -296,7 +296,9 @@ function makePool() {
         .filter(
           (row) =>
             row.relevance > 0 &&
-            (!flat.includes('communities.deleted_at IS NULL AND communities.suspended_at IS NULL') ||
+            (!flat.includes(
+              'communities.deleted_at IS NULL AND communities.suspended_at IS NULL',
+            ) ||
               row.deleted_at === null) &&
             (!flat.includes('communities.suspended_at IS NULL') ||
               row.suspended_at === null),
@@ -317,7 +319,9 @@ function makePool() {
             row.relevance > 0 &&
             (!flat.includes('posts.removed_at IS NULL') ||
               row.removed_at === null) &&
-            (!flat.includes('communities.deleted_at IS NULL AND communities.suspended_at IS NULL') ||
+            (!flat.includes(
+              'communities.deleted_at IS NULL AND communities.suspended_at IS NULL',
+            ) ||
               home.deleted_at === null) &&
             (!flat.includes('communities.suspended_at IS NULL') ||
               home.suspended_at === null) &&
@@ -497,6 +501,7 @@ describe('Search (e2e)', () => {
           'locked_by',
           'score',
           'saved',
+          'media',
         ].sort(),
       );
     });
@@ -543,12 +548,14 @@ describe('Search (e2e)', () => {
           display_name: 'Alice A.',
           bio: null,
           created_at: day(1),
+          avatar: null,
         },
         {
           username: 'alina',
           display_name: null,
           bio: null,
           created_at: day(2),
+          avatar: null,
         },
       ]);
       // A prefix, not a substring: "ice" is inside "alice" but starts nothing.

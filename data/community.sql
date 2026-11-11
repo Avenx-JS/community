@@ -680,6 +680,43 @@ BEGIN
 END$$
 DELIMITER ;
 
+-- Uploaded media and profile images (035_create_media).
+CREATE TABLE media (
+    id VARCHAR(36) PRIMARY KEY,
+    uploader_id VARCHAR(36) NULL,
+    purpose ENUM('post', 'avatar', 'community_icon', 'community_banner') NOT NULL,
+    kind ENUM('image', 'video') NOT NULL,
+    mime_type VARCHAR(50) NOT NULL,
+    size_bytes INT UNSIGNED NOT NULL,
+    width INT UNSIGNED NULL,
+    height INT UNSIGNED NULL,
+    storage_key VARCHAR(200) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    released_at TIMESTAMP NULL DEFAULT NULL,
+    UNIQUE KEY uq_media_storage_key (storage_key),
+    INDEX idx_media_uploader_pending (uploader_id, released_at, created_at),
+    INDEX idx_media_released (released_at),
+    CONSTRAINT fk_media_uploader FOREIGN KEY (uploader_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+ALTER TABLE posts
+  ADD COLUMN media_id VARCHAR(36) NULL,
+  ADD CONSTRAINT uq_posts_media_id UNIQUE (media_id),
+  ADD CONSTRAINT fk_posts_media FOREIGN KEY (media_id) REFERENCES media(id);
+
+ALTER TABLE users
+  ADD COLUMN avatar_media_id VARCHAR(36) NULL,
+  ADD CONSTRAINT uq_users_avatar_media_id UNIQUE (avatar_media_id),
+  ADD CONSTRAINT fk_users_avatar_media FOREIGN KEY (avatar_media_id) REFERENCES media(id);
+
+ALTER TABLE communities
+  ADD COLUMN icon_media_id VARCHAR(36) NULL,
+  ADD COLUMN banner_media_id VARCHAR(36) NULL,
+  ADD CONSTRAINT uq_communities_icon_media_id UNIQUE (icon_media_id),
+  ADD CONSTRAINT uq_communities_banner_media_id UNIQUE (banner_media_id),
+  ADD CONSTRAINT fk_communities_icon_media FOREIGN KEY (icon_media_id) REFERENCES media(id),
+  ADD CONSTRAINT fk_communities_banner_media FOREIGN KEY (banner_media_id) REFERENCES media(id);
+
 CREATE TABLE schema_migrations (
     version VARCHAR(64) PRIMARY KEY,
     applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -720,4 +757,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('031_add_report_assignment'),
     ('032_create_community_bans'),
     ('033_add_communities_created_index'),
-    ('034_add_content_ranking');
+    ('034_add_content_ranking'),
+    ('035_create_media');

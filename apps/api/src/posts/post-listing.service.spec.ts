@@ -229,9 +229,9 @@ describe('post creation', () => {
       sql.startsWith('INSERT INTO posts'),
     );
     expect(insert?.sql).toBe(
-      `INSERT INTO posts (id, title, content, type, author_id, community_id, hot_rank, rising_rank) VALUES (?, ?, ?, ?, ?, ?, ${NEW_POST_HOT_RANK_SQL}, ${NEW_POST_RISING_RANK_SQL})`,
+      `INSERT INTO posts (id, title, content, type, author_id, community_id, media_id, hot_rank, rising_rank) VALUES (?, ?, ?, ?, ?, ?, ?, ${NEW_POST_HOT_RANK_SQL}, ${NEW_POST_RISING_RANK_SQL})`,
     );
-    expect(insert?.values).toHaveLength(6);
+    expect(insert?.values).toHaveLength(7);
   });
 });
 

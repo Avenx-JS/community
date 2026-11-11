@@ -11,6 +11,7 @@ import {
   ApiProperty,
   ApiPropertyOptional,
   ApiUnauthorizedResponse,
+  ApiUnsupportedMediaTypeResponse,
   getSchemaPath,
 } from '@nestjs/swagger';
 import {
@@ -106,6 +107,7 @@ const errorDecorators = {
   404: ApiNotFoundResponse,
   409: ApiConflictResponse,
   413: ApiPayloadTooLargeResponse,
+  415: ApiUnsupportedMediaTypeResponse,
 } as const;
 
 export function ApiErrorResponses(

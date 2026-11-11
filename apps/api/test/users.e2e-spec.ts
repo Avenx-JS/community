@@ -281,7 +281,7 @@ describe('User profile endpoints (e2e)', () => {
       }
       if (
         sql.startsWith(
-          'SELECT id, title, content, type, author_id, community_id, created_at, pinned_at, pinned_by, edited_at, locked_at, locked_by FROM posts WHERE EXISTS',
+          'SELECT id, title, content, type, author_id, community_id, created_at, pinned_at, pinned_by, edited_at, locked_at, locked_by, media_id FROM posts WHERE EXISTS',
         )
       ) {
         return Promise.resolve([tables.posts, []]);
@@ -348,6 +348,14 @@ describe('User profile endpoints (e2e)', () => {
       const activity = activityAnswer(sql, values);
       if (activity) {
         return Promise.resolve(activity);
+      }
+      // Media releases (migration 035): nothing to release here.
+      if (
+        sql.startsWith('UPDATE media SET released_at') ||
+        sql === 'UPDATE users SET avatar_media_id = NULL WHERE id = ?' ||
+        sql.startsWith('UPDATE communities SET icon_media_id = NULL')
+      ) {
+        return Promise.resolve([{ affectedRows: 0 }, []]);
       }
       throw new Error(`Unexpected SQL query: ${sql}`);
     };
@@ -559,6 +567,7 @@ describe('User profile endpoints (e2e)', () => {
         display_name: 'Sam',
         bio: 'Hi',
         created_at: '2026-10-21T20:00:00.000Z',
+        avatar: null,
       });
       for (const field of [
         'id',
@@ -573,7 +582,7 @@ describe('User profile endpoints (e2e)', () => {
       expect(JSON.stringify(response.body)).not.toMatch(SECRET);
       expect(queryCalls).toEqual([
         {
-          sql: 'SELECT username, display_name, bio, created_at FROM users WHERE username = ? AND deleted_at IS NULL LIMIT 1',
+          sql: 'SELECT username, display_name, bio, created_at, avatar_media_id FROM users WHERE username = ? AND deleted_at IS NULL LIMIT 1',
           values: ['sample_user'],
         },
       ]);
@@ -619,6 +628,7 @@ describe('User profile endpoints (e2e)', () => {
         bio: 'Hi',
         role: 'user',
         created_at: '2026-10-21T20:00:00.000Z',
+        avatar: null,
       });
       expect(response.body).not.toHaveProperty('last_seen_at');
       expect(JSON.stringify(response.body)).not.toMatch(SECRET);
@@ -710,6 +720,7 @@ describe('User profile endpoints (e2e)', () => {
     it('returns the full own-profile shape', async () => {
       const response = await patch({ bio: 'New' }, 'token-a').expect(200);
       expect(Object.keys(response.body as object).sort()).toEqual([
+        'avatar',
         'bio',
         'created_at',
         'display_name',
@@ -1115,6 +1126,7 @@ describe('User profile endpoints (e2e)', () => {
           'locked_by',
           'score',
           'saved',
+          'media',
           'title',
           'type',
         ].sort(),

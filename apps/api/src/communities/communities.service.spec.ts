@@ -1,3 +1,4 @@
+import { RELEASE_COMMUNITY_MEDIA_SQL } from '../media/media-sql';
 import {
   BadRequestException,
   ConflictException,
@@ -145,7 +146,7 @@ describe('CommunitiesService', () => {
     const created = await service.create({ name: 'gardening' }, 'user-1');
     const found = await service.findOne('gardening');
 
-    for (const community of [listed.items[0], created, found]) {
+    for (const community of [listed.items[0], created]) {
       expect(Object.keys(community).sort()).toEqual([
         'created_at',
         'creator_id',
@@ -154,6 +155,16 @@ describe('CommunitiesService', () => {
         'name',
       ]);
     }
+    // The detail adds its images (migration 035), and nothing else.
+    expect(Object.keys(found).sort()).toEqual([
+      'banner',
+      'created_at',
+      'creator_id',
+      'description',
+      'icon',
+      'id',
+      'name',
+    ]);
     for (const { sql } of queries) {
       expect(sql).not.toMatch(/\brules\b/);
     }
@@ -313,7 +324,9 @@ describe('CommunitiesService', () => {
     expect(queries[0].sql).toContain(
       "WHERE deleted_at IS NULL AND suspended_at IS NULL AND (LOWER(name) LIKE LOWER(?) ESCAPE '=' OR LOWER(description) LIKE LOWER(?) ESCAPE '=')",
     );
-    expect(queries[1].sql).toContain('WHERE deleted_at IS NULL AND suspended_at IS NULL AND (');
+    expect(queries[1].sql).toContain(
+      'WHERE deleted_at IS NULL AND suspended_at IS NULL AND (',
+    );
 
     queries = [];
     results = [[], [{ total: 0 }]];
@@ -761,7 +774,7 @@ describe('CommunitiesService', () => {
 
       await transactional.remove('gardening', 'gardening', 'creator');
 
-      expect(statements).toHaveLength(2);
+      expect(statements).toHaveLength(5);
       expect(statements[0].sql).toBe(
         'SELECT id, creator_id FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1 FOR UPDATE',
       );
@@ -769,6 +782,13 @@ describe('CommunitiesService', () => {
         sql: 'UPDATE communities SET deleted_at = UTC_TIMESTAMP(), deleted_by = ? WHERE id = ?',
         values: ['creator', 'community-1'],
       });
+      // The icon and banner are released in the same transaction.
+      expect(statements.slice(2)).toEqual(
+        RELEASE_COMMUNITY_MEDIA_SQL.map((sql) => ({
+          sql,
+          values: ['community-1'],
+        })),
+      );
       expect(statements.some(({ sql }) => /^\s*DELETE/i.test(sql))).toBe(false);
       expect(moderationLog.record).toHaveBeenCalledWith(connection, {
         actorId: 'creator',

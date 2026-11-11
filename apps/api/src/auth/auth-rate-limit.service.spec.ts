@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from '@jest/globals';
 import { createHmac } from 'node:crypto';
 import type { Pool } from 'mysql2/promise';
-import { AuthRateLimitService } from './auth-rate-limit.service';
+import { AuthRateLimitService, isMediaUpload } from './auth-rate-limit.service';
 
 describe('AuthRateLimitService', () => {
   let service: AuthRateLimitService;
@@ -485,5 +485,55 @@ describe('AuthRateLimitService', () => {
         process.env.API_READ_IP_MAX = previousMax;
       }
     }
+  });
+
+  // Every route that takes a file decodes or stores it: a bucket of its
+  // own, beside the write buckets every write counts against.
+  it.each([
+    ['POST', '/media'],
+    ['PUT', '/users/me/avatar'],
+    ['PUT', '/communities/gardening/icon'],
+    ['PUT', '/communities/gardening/banner'],
+  ])(
+    'counts %s %s against the media upload and write buckets',
+    async (method, path) => {
+      const hmac = (scope: string, value: string) =>
+        createHmac(
+          'sha256',
+          process.env.RATE_LIMIT_HASH_SECRET ??
+            process.env.MYSQL_PASSWORD ??
+            'community-local-rate-limit-secret',
+        )
+          .update(scope)
+          .update('\0')
+          .update(value)
+          .digest('hex');
+
+      await service.enforceApiRequest('192.0.2.10', method, path, 'account-1');
+
+      const keys = calls
+        .filter((call) => call.sql.startsWith('INSERT INTO auth_rate_limits'))
+        .map((call) => call.values[0]);
+      expect(keys).toEqual(
+        expect.arrayContaining([
+          hmac('api:media:upload:ip', '192.0.2.10'),
+          hmac('api:media:upload:account', 'account-1'),
+          hmac('api:write:ip', '192.0.2.10'),
+          hmac('api:write:account', 'account-1'),
+        ]),
+      );
+    },
+  );
+
+  it.each([
+    ['GET', '/media'],
+    ['GET', '/media/some-id/file'],
+    ['DELETE', '/media/some-id'],
+    ['DELETE', '/users/me/avatar'],
+    ['DELETE', '/communities/gardening/icon'],
+    ['PUT', '/communities/gardening/rules'],
+    ['PUT', '/communities/a/b/icon'],
+  ])('does not treat %s %s as an upload', (method, path) => {
+    expect(isMediaUpload(method, path)).toBe(false);
   });
 });

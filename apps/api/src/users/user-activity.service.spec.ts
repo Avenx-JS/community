@@ -138,6 +138,7 @@ describe('UserActivityService', () => {
           locked_by: null,
           score: 0,
           saved: false,
+          media: null,
         },
       ]);
     });

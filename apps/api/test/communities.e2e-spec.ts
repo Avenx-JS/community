@@ -382,6 +382,13 @@ describe('Community endpoints (e2e)', () => {
         if (sql.includes('FROM community_bans')) {
           return [[], []];
         }
+        // A deleted community's images are released (migration 035).
+        if (
+          sql.startsWith('UPDATE media SET released_at') ||
+          sql.startsWith('UPDATE communities SET icon_media_id = NULL')
+        ) {
+          return [{ affectedRows: 0 }, []];
+        }
         throw new Error(`Unexpected SQL query: ${sql}`);
       },
       // A transaction snapshots the mutable state and restores it on
@@ -573,7 +580,9 @@ describe('Community endpoints (e2e)', () => {
     }
 
     function userSubscriptions(userId: string, sql: string) {
-      const live = sql.includes('c.deleted_at IS NULL AND c.suspended_at IS NULL');
+      const live = sql.includes(
+        'c.deleted_at IS NULL AND c.suspended_at IS NULL',
+      );
       return communities.flatMap((community) => {
         if (live && community.deleted_at) {
           return [];
@@ -764,12 +773,15 @@ describe('Community endpoints (e2e)', () => {
       .get('/communities/gardening')
       .expect(200);
     expect(Object.keys(found.body).sort()).toEqual([
+      'banner',
       'created_at',
       'creator_id',
       'description',
+      'icon',
       'id',
       'name',
     ]);
+    expect(found.body).toMatchObject({ icon: null, banner: null });
 
     const response = await request(app.getHttpServer())
       .get('/communities/unknown')

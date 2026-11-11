@@ -207,7 +207,7 @@ describe('migration 034 (content ranking)', () => {
       expect(snapshot).toContain(index);
     }
     expect(snapshot).toContain(
-      "('033_add_communities_created_index'), ('034_add_content_ranking');",
+      "('033_add_communities_created_index'), ('034_add_content_ranking')",
     );
   });
 

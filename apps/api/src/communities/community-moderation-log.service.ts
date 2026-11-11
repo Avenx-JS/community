@@ -119,6 +119,13 @@ export type CommunityModerationEntry =
 // The community fields PATCH /communities/:name may change; a
 // community_updated entry names which of them changed, never their values.
 export const EDITABLE_COMMUNITY_FIELDS = ['description'] as const;
+// The fields a community_updated entry may name: those, and the images set
+// through PUT and DELETE /communities/:name/icon and /banner.
+export const LOGGED_COMMUNITY_FIELDS = [
+  ...EDITABLE_COMMUNITY_FIELDS,
+  'icon',
+  'banner',
+] as const;
 
 export type CommunityModerationMetadata = Record<string, string | number>;
 
@@ -263,7 +270,7 @@ function fieldsValue(metadata: Record<string, unknown>): string | undefined {
     return undefined;
   }
   const fields = value.split(',');
-  const editable: readonly string[] = EDITABLE_COMMUNITY_FIELDS;
+  const editable: readonly string[] = LOGGED_COMMUNITY_FIELDS;
   if (
     new Set(fields).size !== fields.length ||
     !fields.every((field) => editable.includes(field))

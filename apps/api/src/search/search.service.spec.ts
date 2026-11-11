@@ -75,7 +75,10 @@ describe('SearchService', () => {
     [
       'communities',
       'MATCH (communities.name, communities.description) AGAINST (? IN BOOLEAN MODE)',
-      ['communities.deleted_at IS NULL AND communities.suspended_at IS NULL', 'communities.suspended_at IS NULL'],
+      [
+        'communities.deleted_at IS NULL AND communities.suspended_at IS NULL',
+        'communities.suspended_at IS NULL',
+      ],
     ],
   ] as const)('type=%s', (type, match, exclusions) => {
     it('matches with the index’s exact column list, in boolean mode', async () => {
@@ -143,7 +146,7 @@ describe('SearchService', () => {
     it('prefix-matches the indexed username with no leading wildcard', async () => {
       await search({ q: 'ali', type: 'users' });
       expect(flat(page().sql)).toBe(
-        "SELECT username, display_name, bio, created_at FROM users WHERE username LIKE CONCAT(?, '%') ESCAPE '=' AND deleted_at IS NULL ORDER BY username ASC LIMIT ? OFFSET ?",
+        "SELECT username, display_name, bio, created_at, avatar_media_id FROM users WHERE username LIKE CONCAT(?, '%') ESCAPE '=' AND deleted_at IS NULL ORDER BY username ASC LIMIT ? OFFSET ?",
       );
       expect(page().values).toEqual(['ali', 20, 0]);
       expect(fromWhere(page().sql)).toBe(fromWhere(count().sql));
@@ -185,6 +188,7 @@ describe('SearchService', () => {
           display_name: null,
           bio: 'Hi',
           created_at: '2026-01-01T00:00:00.000Z',
+          avatar: null,
         },
       ]);
     });

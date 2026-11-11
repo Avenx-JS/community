@@ -26,6 +26,8 @@ import {
   EDITABLE_COMMUNITY_FIELDS,
 } from './community-moderation-log.service';
 import { CommunityRuleAcceptanceService } from './community-rule-acceptance.service';
+import { loadMediaByIds, type MediaDto } from '../media/media-dto';
+import { RELEASE_COMMUNITY_MEDIA_SQL } from '../media/media-sql';
 import { CreateCommunityDto } from './dto/create-community.dto';
 import { ListCommunitiesDto } from './dto/list-communities.dto';
 import { ListCommunityMembersDto } from './dto/list-community-members.dto';
@@ -57,6 +59,13 @@ export interface CommunityDto {
   name: string;
   description: string | null;
   created_at: string;
+}
+
+// GET /communities/:name: the community with its images
+// (PUT /communities/:name/icon and /banner), each null when unset.
+export interface CommunityDetailDto extends CommunityDto {
+  icon: MediaDto | null;
+  banner: MediaDto | null;
 }
 
 export interface CommunityListDto {
@@ -256,9 +265,14 @@ export class CommunitiesService {
     return community.id;
   }
 
-  async findOne(name: string): Promise<CommunityDto> {
-    const [communities] = await this.pool.execute<CommunityRow[]>(
-      `SELECT id, creator_id, name, description, created_at FROM communities WHERE name = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1`,
+  async findOne(name: string): Promise<CommunityDetailDto> {
+    const [communities] = await this.pool.execute<
+      (CommunityRow & {
+        icon_media_id?: string | null;
+        banner_media_id?: string | null;
+      })[]
+    >(
+      `SELECT id, creator_id, name, description, created_at, icon_media_id, banner_media_id FROM communities WHERE name = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1`,
       [name],
     );
     const community = communities[0];
@@ -267,7 +281,18 @@ export class CommunitiesService {
       throw new NotFoundException('Community not found');
     }
 
-    return this.toDto(community);
+    // A second statement only for a community with an image.
+    const media = await loadMediaByIds(this.pool, [
+      community.icon_media_id,
+      community.banner_media_id,
+    ]);
+    const image = (id: string | null | undefined) =>
+      (id && media.get(id)) || null;
+    return {
+      ...this.toDto(community),
+      icon: image(community.icon_media_id),
+      banner: image(community.banner_media_id),
+    };
   }
 
   // Joining is participation, so it requires the current rules to be
@@ -633,6 +658,11 @@ export class CommunitiesService {
         'UPDATE communities SET deleted_at = UTC_TIMESTAMP(), deleted_by = ? WHERE id = ?',
         [actorId, community.id],
       );
+      // Its icon and banner are released with it; its posts, and their
+      // files, are kept like the posts themselves.
+      for (const sql of RELEASE_COMMUNITY_MEDIA_SQL) {
+        await connection.execute<ResultSetHeader>(sql, [community.id]);
+      }
       await this.moderationLog.record(connection, {
         actorId,
         communityId: community.id,

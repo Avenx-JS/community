@@ -1,6 +1,8 @@
+import { MediaResponse } from '../media/media.responses';
 import { ApiProperty } from '@nestjs/swagger';
 import type {
   CommunityCreatorDto,
+  CommunityDetailDto,
   CommunityDto,
   CommunityListDto,
   CommunityMemberDto,
@@ -48,6 +50,27 @@ export class CommunityResponse implements CommunityDto {
 
   @ApiProperty({ format: 'date-time' })
   created_at!: string;
+}
+
+export class CommunityDetailResponse
+  extends CommunityResponse
+  implements CommunityDetailDto
+{
+  @ApiProperty({
+    type: MediaResponse,
+    nullable: true,
+    description:
+      'Set with PUT /communities/{name}/icon, 256×256 WebP; null when unset.',
+  })
+  icon!: MediaResponse | null;
+
+  @ApiProperty({
+    type: MediaResponse,
+    nullable: true,
+    description:
+      'Set with PUT /communities/{name}/banner, 1536×384 WebP; null when unset.',
+  })
+  banner!: MediaResponse | null;
 }
 
 export class CommunityListResponse implements CommunityListDto {

@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { MediaResponse } from '../media/media.responses';
 import type { PostDto, PostListDto } from './posts.service';
 import type { SavedPostDto, SavedPostListDto } from './saved-posts.service';
 import {
@@ -98,6 +99,16 @@ export class PostResponse implements PostDto {
       'anonymous caller. Saves are private; no response carries a save count.',
   })
   saved!: boolean;
+
+  @ApiProperty({
+    type: MediaResponse,
+    nullable: true,
+    description:
+      "A media post's uploaded file (POST /media); null on text and link " +
+      'posts and on media posts created before uploads existed, whose ' +
+      'content is still their URL.',
+  })
+  media!: MediaResponse | null;
 
   @ApiPropertyOptional({
     enum: [true],

@@ -587,6 +587,14 @@ describe('Post endpoints (e2e)', () => {
         if (sql.includes('FROM community_bans')) {
           return [[], []];
         }
+        // Media releases (migration 035): nothing to release here.
+        if (
+          sql.startsWith('UPDATE media SET released_at') ||
+          sql === 'UPDATE users SET avatar_media_id = NULL WHERE id = ?' ||
+          sql.startsWith('UPDATE communities SET icon_media_id = NULL')
+        ) {
+          return [{ affectedRows: 0 }, []];
+        }
         throw new Error(`Unexpected SQL query: ${sql}`);
       },
       // A transaction snapshots the stored rows and restores them on
@@ -728,11 +736,6 @@ describe('Post endpoints (e2e)', () => {
         type: 'link',
         content: 'https://example.com/article',
       },
-      {
-        title: 'Media',
-        type: 'media',
-        content: 'https://example.com/image.png',
-      },
     ];
 
     for (const post of cases) {
@@ -763,6 +766,7 @@ describe('Post endpoints (e2e)', () => {
           'locked_by',
           'score',
           'saved',
+          'media',
           'title',
           'type',
         ].sort(),
@@ -770,9 +774,21 @@ describe('Post endpoints (e2e)', () => {
       expect(response.body).not.toHaveProperty('email');
       expect(response.body).not.toHaveProperty('password_hash');
     }
+    // Breaking change (migration 035): a media post takes an uploaded
+    // file's media_id, never a URL; a link post is for URLs.
+    await request(app.getHttpServer())
+      .post('/posts')
+      .set('Authorization', 'Bearer valid-token')
+      .send({
+        title: 'Media',
+        type: 'media',
+        content: 'https://example.com/image.png',
+        community_id: 'community-1',
+      })
+      .expect(400);
     expect(
       queryCalls.filter((call) => call.sql.startsWith('INSERT INTO posts')),
-    ).toHaveLength(3);
+    ).toHaveLength(2);
   });
 
   it('stores HTML-looking post content as inert plain text', async () => {
@@ -1360,6 +1376,7 @@ describe('Post endpoints (e2e)', () => {
           pinned_by: userId,
           score: 0,
           saved: false,
+          media: null,
         });
         expect(JSON.stringify(response.body)).not.toMatch(
           /email|password_hash/,
@@ -1680,6 +1697,7 @@ describe('Post endpoints (e2e)', () => {
         locked_by: null,
         score: 0,
         saved: false,
+        media: null,
       });
       expect(stored('post-1')).toMatchObject({
         title: 'Corrected',

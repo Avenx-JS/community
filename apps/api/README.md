@@ -1790,11 +1790,14 @@ HTTP `200`:
   "username": "sample_user",
   "display_name": "Sam",
   "bio": "Grows tomatoes.",
-  "created_at": "2026-10-21T20:00:00.000Z"
+  "created_at": "2026-10-21T20:00:00.000Z",
+  "avatar": null
 }
 ```
 
-`display_name` and `bio` are user-authored public text and are `null` until the
+`avatar` is the account's [avatar](#avatars-icons-and-banners), the media
+object of a 256×256 WebP, or `null`; `GET /users/me` and user search results
+carry it too. `display_name` and `bio` are user-authored public text and are `null` until the
 owner sets them. `created_at` is the join date, public in the same way a
 community's `created_at` is. The public profile never exposes the account ID,
 email, role, `last_seen_at`, password, or password hash. If the username does
@@ -2062,6 +2065,10 @@ whole operation back and the account stays fully intact):
    the account are unassigned (`assigned_to` and `assigned_at` cleared, the
    reports kept), for the same reason: anonymising does not fire
    `fk_user_reports_assigned_to`. See [Assigning reports](#assigning-reports).
+   Its avatar and its uploads never attached to a post are
+   [released](#releasing-and-cleaning-up-media) (`RELEASE_ACCOUNT_MEDIA_SQL`)
+   and `avatar_media_id` is cleared; the files in its posts stay with the
+   posts, which are kept.
 6. Every session and refresh token is revoked.
 
 **Kept:** posts, comments, votes, `community_rule_acceptances`,
@@ -2313,7 +2320,10 @@ environment variables: `API_REQUEST_IP_MAX` and
 `API_CONTENT_CREATE_ACCOUNT_WINDOW_SECONDS`; and `API_CONTENT_COOLDOWN_MAX`
 and `API_CONTENT_COOLDOWN_WINDOW_SECONDS`; and `API_SEARCH_IP_MAX` and
 `API_SEARCH_IP_WINDOW_SECONDS` for [`GET /search`](#search), 30 per IP per
-minute by default. Configure the same values and
+minute by default; and `API_MEDIA_UPLOAD_IP_MAX`,
+`API_MEDIA_UPLOAD_IP_WINDOW_SECONDS`, `API_MEDIA_UPLOAD_ACCOUNT_MAX` and
+`API_MEDIA_UPLOAD_ACCOUNT_WINDOW_SECONDS` for [uploads](#media), 30 per IP and
+20 per account per hour by default. Configure the same values and
 `RATE_LIMIT_HASH_SECRET` on every API instance. The MySQL upsert counter is
 atomic and shared across instances; process-local memory is not used for
 limiting. Configure a trusted proxy hop count as described in the security
@@ -3257,7 +3267,9 @@ It must equal the route's community name exactly; a missing, mismatched or
 differently cased name returns `400` and deletes nothing. This is the same
 DELETE-with-a-body trade-off `DELETE /users/me` takes: a client or proxy that
 drops the body gets a `400`, never a deletion. Deleting an already-deleted
-community returns `404`. The deletion records a `community_deleted` entry.
+community returns `404`. The deletion records a `community_deleted` entry,
+and releases the community's [icon and banner](#avatars-icons-and-banners) in
+the same transaction; its posts, and their files, are kept like the posts.
 
 **Deletion is a soft delete and destroys no content.** Migration
 `022_add_community_deletion` adds `communities.deleted_at` and
@@ -3498,8 +3510,9 @@ COLUMN` on the enum, which is the expensive kind of migration. The two
 `community_*` actions and the `community` target were added afterwards by
 migration `023_add_community_moderation_community_actions`, because `021` had
 already been released; nothing had written to the table, so that rebuild was
-immediate. `fields` is a comma-separated list of editable field names (today
-only `description`), never their values.
+immediate. `fields` is a comma-separated list of changed field names
+(`description` from `PATCH /communities/:name`, `icon` and `banner` from
+their routes; `LOGGED_COMMUNITY_FIELDS`), never their values.
 `rules_published` covers the existing `PUT /communities/:name/rules`, and
 `moderator_added`/`moderator_removed` the existing moderator routes; none of
 them writes an entry yet.
@@ -4461,11 +4474,22 @@ the name-based [`GET /communities/:name/posts`](#get-communitiesnameposts),
 which returns the same result.
 
 `POST /posts` requires a bearer token and accepts `title` (1-300 characters),
-`type` (`text`, `link`, or `media`), non-empty `content` (up to 16,383
-characters), and an existing `community_id`. For `text`, content is the post
-body. For `link` and `media`, content must be an HTTP or HTTPS URL. The author
-is always taken from the authenticated user; body-supplied `author_id` is
-rejected. Successful creation returns HTTP `201` and the post DTO.
+`type` (`text`, `link`, or `media`), `content` (up to 16,383 characters),
+and an existing `community_id`. For `text`, `content` is the required body;
+for `link`, the required HTTP or HTTPS URL. A `media` post takes `media_id`,
+the id of the caller's own unattached upload from [`POST /media`](#media), and
+an optional plain-text caption as `content`; `media_id` on any other type is
+`400`. The author is always taken from the authenticated user; body-supplied
+`author_id` is rejected. Successful creation returns HTTP `201` and the post
+DTO, with the file as `media`.
+
+**Breaking change:** a media post no longer takes a URL. Before migration
+`035_create_media` there was no upload, so a "media" post was a link post with
+another label. `{ "type": "media", "content": "<url>" }` is now `400`; send the
+URL as a `link` post, or upload the file. The URL form was removed rather than
+kept beside uploads, so a media post always has a file the API checked.
+Existing media posts are unchanged: they keep their URL as `content`, have
+`media: null`, and an edit of their content still has to be a URL.
 
 `GET /posts/:id` is public and returns the post DTO, or `404` for an unknown ID.
 A post removed by moderation is also `404`, except to its reviewers (see
@@ -4499,10 +4523,13 @@ Post responses use this DTO:
   "locked_at": null,
   "locked_by": null,
   "score": 3,
-  "saved": false
+  "saved": false,
+  "media": null
 }
 ```
 
+`media` is a media post's file (the [media object](#media)), and `null` on
+every other post and on media posts from before uploads.
 `pinned_at` and `pinned_by` are present on every post response and are `null`
 on a post that is not pinned. `edited_at` is `null` until the author's first
 effective edit (see [Editing posts and comments](#editing-posts-and-comments)).
@@ -5515,6 +5542,188 @@ buckets (`api:write:ip`, 60 per IP, and `api:write:account`, 120 per account
 per minute), `GET` against the read buckets. Voting is the highest-frequency
 legitimate write in the product. If abuse appears, a dedicated vote bucket is
 the candidate, added as a documented per-route override, never an exemption.
+
+## Media
+
+Images and videos for media posts, and the fixed-size images of accounts and
+communities (migration `035_create_media`).
+
+| Route | Who | Success |
+| --- | --- | --- |
+| `POST /media` | Any account | `201`, the media object |
+| `GET /media/:id` | See [Who may read a file](#who-may-read-a-file) | `200`, the media object |
+| `GET /media/:id/file` | The same | `200`, the bytes |
+| `DELETE /media/:id` | The uploader, while no post uses it | `204` |
+| `PUT`, `DELETE /users/me/avatar` | The account | `200` with the media object, `204` |
+| `PUT`, `DELETE /communities/:name/icon` and `/banner` | The community's creator | `200` with the media object, `204` |
+
+The media object never names its uploader or its storage key:
+
+```json
+{
+  "id": "b3a1…",
+  "kind": "image",
+  "mime_type": "image/jpeg",
+  "size_bytes": 48211,
+  "width": 1200,
+  "height": 800,
+  "url": "/media/b3a1…/file",
+  "created_at": "2026-11-11T10:00:00.000Z"
+}
+```
+
+### Uploading
+
+Every upload is `multipart/form-data` with exactly one part, a file named
+`file`; another field, a second file or a differently named one is `400`.
+Uploading needs a bearer token, and a suspended or banned account gets `403`.
+
+1. **Size.** multer reads at most `MEDIA_MAX_BYTES` (default 10 MiB) into
+   memory and stops: a larger file is `413` and never fully read.
+2. **Type, from the content.** The first bytes decide (`sniffMediaType`):
+   JPEG, PNG, GIF, WebP, MP4 (ISO base media brands `isom`, `mp41`, `mp42`,
+   …) and WebM. The `Content-Type` and filename the client sent are
+   ignored, so an HTML page, an SVG (which can carry script), an executable
+   or a QuickTime file is `415` whatever it is labelled. `MEDIA_ALLOWED_TYPES`
+   narrows the list (it can only name these six).
+3. **Decoding.** An image is decoded and re-encoded by sharp (libvips), which
+   proves it is the image it claims: bytes that only start like a PNG are
+   `400`. `MEDIA_MAX_PIXELS` (default 40 million) refuses a decompression
+   bomb, a small file that decodes to gigabytes, before it is decoded.
+4. **Storage, then the row.** The object is written first, then the `media`
+   row in a transaction; a failed transaction deletes the object, so neither
+   half survives the other.
+
+**`POST /media`** stores an image or video for a post. An image keeps its
+format and size; it is re-encoded with its EXIF orientation applied, and
+without any metadata: EXIF (camera, GPS), XMP and comments are gone. Animated
+GIF and WebP keep their frames. **A video is stored as uploaded:** stripping a
+container's metadata needs ffmpeg, which the API does not depend on, so
+`width` and `height` are `null` and the file's own metadata stays. Narrow
+`MEDIA_ALLOWED_TYPES` to images if that is unacceptable.
+
+The upload stays its uploader's and pending until `POST /posts` attaches it
+with `media_id`. At most `MEDIA_PENDING_MAX` (default 20) may wait per account
+(`409` beyond it, counted under a lock of the account's row so concurrent
+uploads cannot both pass), and the sweep releases one still unattached after
+`MEDIA_PENDING_TTL_HOURS` (default 24).
+
+**Attaching.** `POST /posts` locks the upload `FOR UPDATE` and accepts only
+the author's own, unreleased post upload that no post uses: another account's
+upload is `404` like an unknown one, an attached one `409`. `uq_posts_media_id`
+makes one file serve one post in the schema as well. A post's file cannot be
+changed by `PATCH /posts/:id`.
+
+### Avatars, icons and banners
+
+`PUT /users/me/avatar`, `PUT /communities/:name/icon` and `/banner` take the
+image directly, with the same checks, and normalise it to a fixed size: avatar
+and icon 256×256, banner 1536×384, cropped from the centre to fill, first
+frame only, WebP, oriented, no metadata. A video is `415`. The new image
+replaces the old one in one transaction, which releases the old. `DELETE`
+removes and releases it, and is idempotent. Community images are the
+creator's, like every other edit of the community: the creator check runs
+before the file is decoded, so a stranger's upload costs no image processing.
+Each change writes a `community_updated` entry with `fields: "icon"` or
+`"banner"` to the [community moderation log](#community-moderation-log).
+
+`GET /users/:username`, `GET /users/me` and user search carry `avatar`;
+`GET /communities/:name` carries `icon` and `banner`. Each is the media object
+or `null`, loaded only when set. Community listings do not carry them yet.
+
+### Who may read a file
+
+A file is exactly as visible as what uses it (`VISIBLE_MEDIA_SQL`):
+
+| The file is | Visible to |
+| --- | --- |
+| A post's | Everyone, while the post is listed: not removed, its community neither deleted nor suspended |
+| An avatar | Everyone, while the account exists |
+| A community's icon or banner | Everyone, while the community is visible |
+| A pending upload | Its uploader only |
+| Released | No one |
+
+Everything else is `404`, the same as an unknown id. `GET /media/:id/file`
+answers with the detected type, `X-Content-Type-Options: nosniff`, a
+`Content-Security-Policy` of `default-src 'none'; sandbox` (nothing in a file
+may run as a page) and `Cache-Control: private, max-age=300`, short because
+visibility follows content that can be removed at any time. A removed post's
+file is `404` to its reviewers too; they see the post itself.
+
+**`url`** is `/media/:id/file`, relative to the API, so every read goes
+through this rule. With `MEDIA_PUBLIC_BASE_URL` set, `url` points at that base
+plus the storage key instead (a CDN or a public bucket), and fetching the file
+no longer passes the rule: the unguessable key is then the only protection.
+That is the operator's trade of control for delivery.
+
+### Releasing and cleaning up media
+
+A file is in use while a row references it: `posts.media_id`,
+`users.avatar_media_id`, `communities.icon_media_id` or `banner_media_id`.
+Releasing marks `media.released_at` in the transaction that stops using the
+file, so a deletion never waits on storage and never fails because of it:
+
+| Event | Released |
+| --- | --- |
+| `DELETE /posts/:id` | The post's file |
+| `DELETE /users/me` | The avatar, and uploads never attached; files in its kept posts stay |
+| `DELETE /communities/:name` | Its icon and banner; files in its kept posts stay |
+| A replaced or removed avatar, icon or banner | The previous image |
+| `DELETE /media/:id` | That pending upload (`409` if a post uses it or it is a profile image) |
+| An upload unattached after `MEDIA_PENDING_TTL_HOURS` | Released by the sweep |
+
+**The sweep** (`MediaCleanupService`) then deletes the object, then the row.
+It runs right after a release by the media routes and by `DELETE /posts/:id`
+(without waiting for it), and every `MEDIA_SWEEP_INTERVAL_SECONDS` (default
+300; `0` disables the timer, for a deployment that runs it elsewhere), which
+also picks up the releases of account and community deletion. Every step is guarded by "not referenced"
+(`MEDIA_REFERENCED_SQL`), and the references keep the default `RESTRICT`, so
+a file in use can neither be selected nor have its row deleted. A failed
+object delete keeps the row for the next run; deleting a missing object
+succeeds, so concurrent sweeps on several instances are harmless.
+`idx_media_released` serves it.
+
+### Storage backends
+
+`MEDIA_STORAGE` chooses the backend behind one interface (`MediaStorage`:
+`put`, `get`, `delete`); see `sample.env`.
+
+- **`local`** (default, development): files under `MEDIA_LOCAL_DIR` (default
+  `storage/media`, git-ignored), written to a temporary name and renamed into
+  place.
+- **`s3`** (production): any S3-compatible service (AWS S3, MinIO, Ceph, R2)
+  through `MEDIA_S3_ENDPOINT`, `MEDIA_S3_REGION`, `MEDIA_S3_BUCKET`,
+  `MEDIA_S3_ACCESS_KEY_ID` and `MEDIA_S3_SECRET_ACCESS_KEY`, path-style unless
+  `MEDIA_S3_FORCE_PATH_STYLE=false`. Requests are signed with AWS Signature
+  Version 4 by a small built-in signer rather than the AWS SDK, which would be
+  far larger than three single-object calls justify; its spec reproduces the
+  worked example from the S3 documentation. Objects are written private.
+
+Keys are generated, never taken from a request: `<2 hex>/<uuid>.<ext>`, and
+each backend refuses any other shape before touching storage. A missing S3
+setting stops the server at startup, not at the first upload.
+
+### Rate limiting of uploads
+
+Uploads count against the global API buckets like every write (60 per IP and
+120 per account per minute), and in addition against
+`api:media:upload:ip` (30 per hour) and `api:media:upload:account` (20 per
+hour), because each decodes and re-encodes an image: `POST /media` and the
+three `PUT` routes. Reading and deleting media count as ordinary reads and
+writes. The buckets run in the global interceptor, before the file is read.
+
+### Schema
+
+`media` holds `id`, `uploader_id` (`ON DELETE SET NULL`), `purpose`
+(`post`, `avatar`, `community_icon`, `community_banner`), `kind`,
+`mime_type`, `size_bytes`, `width` and `height` (`NULL` for a video), the
+unique `storage_key`, `created_at` and `released_at`. `posts.media_id`,
+`users.avatar_media_id`, `communities.icon_media_id` and `banner_media_id`
+reference it, each `UNIQUE` and `RESTRICT`. The migration changes no existing
+row. It is not safely re-runnable after partial application; its header lists
+what to inspect. `media.mysql.spec.ts` runs it through the real runner,
+compares the result with a fresh installation, and exercises every release
+path and the sweep on a real server.
 
 ## Saved posts
 

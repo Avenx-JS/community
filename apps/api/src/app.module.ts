@@ -10,6 +10,7 @@ import { VotesModule } from './votes/votes.module';
 import { AdminModule } from './admin/admin.module';
 import { ReportsModule } from './reports/reports.module';
 import { SearchModule } from './search/search.module';
+import { MediaModule } from './media/media.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { EmailModule } from './email/email.module';
 
@@ -24,6 +25,7 @@ import { EmailModule } from './email/email.module';
     AdminModule,
     ReportsModule,
     SearchModule,
+    MediaModule,
     NotificationsModule,
     EmailModule,
   ],

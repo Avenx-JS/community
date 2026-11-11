@@ -18,6 +18,7 @@ describe('UsersController', () => {
     display_name: null,
     bio: null,
     created_at: '2026-10-21T20:00:00.000Z',
+    avatar: null,
   };
   const ownProfile = {
     ...profile,

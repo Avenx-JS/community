@@ -46,6 +46,19 @@ interface AuthRateLimitConfig {
   accountDeleteIp: RateLimitOptions;
   accountDeleteAccount: RateLimitOptions;
   searchIp: RateLimitOptions;
+  mediaUploadIp: RateLimitOptions;
+  mediaUploadAccount: RateLimitOptions;
+}
+
+// The routes that take a file: each decodes and re-encodes an image or
+// stores a video, so they cost far more than any other write.
+export function isMediaUpload(method: string, path: string): boolean {
+  return (
+    (method === 'POST' && path === '/media') ||
+    (method === 'PUT' &&
+      (path === '/users/me/avatar' ||
+        /^\/communities\/[^/]+\/(icon|banner)$/.test(path)))
+  );
 }
 
 const localDevelopmentSecret = 'community-local-rate-limit-secret';
@@ -90,6 +103,8 @@ function readConfig(): AuthRateLimitConfig {
     accountDeleteIp: readOptions('API_ACCOUNT_DELETE_IP', 10, 86400),
     accountDeleteAccount: readOptions('API_ACCOUNT_DELETE_ACCOUNT', 5, 86400),
     searchIp: readOptions('API_SEARCH_IP', 30, 60),
+    mediaUploadIp: readOptions('API_MEDIA_UPLOAD_IP', 30, 3600),
+    mediaUploadAccount: readOptions('API_MEDIA_UPLOAD_ACCOUNT', 20, 3600),
   };
 }
 
@@ -238,6 +253,21 @@ export class AuthRateLimitService {
             'api:content:create:cooldown',
             accountId,
             this.config.contentCreateCooldown,
+          ),
+        );
+      }
+    }
+
+    if (isMediaUpload(method, path)) {
+      signals.push(
+        this.signal('api:media:upload:ip', ip, this.config.mediaUploadIp),
+      );
+      if (accountId) {
+        signals.push(
+          this.signal(
+            'api:media:upload:account',
+            accountId,
+            this.config.mediaUploadAccount,
           ),
         );
       }

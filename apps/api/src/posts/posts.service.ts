@@ -58,6 +58,14 @@ import {
   type RemovalStateRow,
 } from '../common/removed-content';
 import { RemoveContentDto } from '../common/remove-content.dto';
+import {
+  loadMediaByIds,
+  toMediaDto,
+  type MediaDto,
+  type MediaRow,
+} from '../media/media-dto';
+import { MEDIA_COLUMNS, RELEASE_POST_MEDIA_SQL } from '../media/media-sql';
+import { MediaCleanupService } from '../media/media-cleanup.service';
 
 export interface PostRow extends RowDataPacket {
   id: string;
@@ -74,6 +82,9 @@ export interface PostRow extends RowDataPacket {
   locked_at: Date | string | null;
   // NULL on a locked post once the locking moderator's account is deleted.
   locked_by: string | null;
+  // The uploaded file of a media post (migration 035); NULL otherwise, and
+  // on media posts created before uploads existed.
+  media_id?: string | null;
 }
 
 // Every column of a post DTO, in DTO order.
@@ -81,7 +92,7 @@ export interface PostRow extends RowDataPacket {
 export const VISIBLE_POST_SQL = 'posts.removed_at IS NULL';
 
 export const POST_COLUMNS =
-  'id, title, content, type, author_id, community_id, created_at, pinned_at, pinned_by, edited_at, locked_at, locked_by';
+  'id, title, content, type, author_id, community_id, created_at, pinned_at, pinned_by, edited_at, locked_at, locked_by, media_id';
 
 interface EditablePostRow extends RowDataPacket {
   id: string;
@@ -92,6 +103,7 @@ interface EditablePostRow extends RowDataPacket {
   locked_at: Date | string | null;
   removed_at: Date | string | null;
   community_id: string;
+  media_id: string | null;
 }
 
 interface LockablePostRow extends RowDataPacket {
@@ -139,6 +151,8 @@ export interface PostDto {
   score: number;
   // Caller-dependent: whether the viewer saved the post; false when anonymous.
   saved: boolean;
+  // A media post's file; null on every other post.
+  media: MediaDto | null;
 }
 
 // A post as a reviewer sees it: removal state only on removed posts.
@@ -275,8 +289,46 @@ export class PostsService {
     private readonly ruleAcceptance: CommunityRuleAcceptanceService,
     private readonly moderationLog: CommunityModerationLogService,
     @Optional() bans?: CommunityBanPolicyService,
+    // Optional so the service also runs without the media module (tests);
+    // the periodic sweep frees released files then.
+    @Optional() private readonly mediaCleanup?: MediaCleanupService,
   ) {
     this.bans = bans ?? new CommunityBanPolicyService(pool);
+  }
+
+  // The upload a media post attaches: the author's own, for a post, not
+  // released and used by no post. Locked FOR UPDATE, so a concurrent
+  // DELETE /media/:id or a second post waits; uq_posts_media_id is the
+  // backstop. Another account's upload is 404, like an unknown one.
+  private async lockAttachableMedia(
+    connection: PoolConnection,
+    mediaId: string | undefined,
+    authorId: string,
+  ): Promise<MediaRow> {
+    const [rows] = await connection.execute<
+      (MediaRow & {
+        released_at: Date | string | null;
+        attached: number | string | boolean;
+      })[]
+    >(
+      `SELECT ${MEDIA_COLUMNS}, media.released_at,
+         EXISTS (SELECT 1 FROM posts WHERE posts.media_id = media.id) AS attached
+       FROM media WHERE media.id = ? LIMIT 1 FOR UPDATE`,
+      [mediaId ?? ''],
+    );
+    const media = rows[0];
+    if (
+      !media ||
+      media.uploader_id !== authorId ||
+      media.purpose !== 'post' ||
+      media.released_at
+    ) {
+      throw new NotFoundException('Media not found');
+    }
+    if (isSqlTrue(media.attached)) {
+      throw new ConflictException('This upload is already attached to a post');
+    }
+    return media;
   }
 
   // GET /posts and GET /communities/:name/posts (with community_id).
@@ -358,17 +410,23 @@ export class PostsService {
         connection,
       );
 
+      const media =
+        input.type === 'media'
+          ? await this.lockAttachableMedia(connection, input.media_id, authorId)
+          : null;
+
       const id = randomUUID();
       await connection.execute<ResultSetHeader>(
         // A new post has no votes; its ranks are those of score 0 now.
-        `INSERT INTO posts (id, title, content, type, author_id, community_id, hot_rank, rising_rank) VALUES (?, ?, ?, ?, ?, ?, ${NEW_POST_HOT_RANK_SQL}, ${NEW_POST_RISING_RANK_SQL})`,
+        `INSERT INTO posts (id, title, content, type, author_id, community_id, media_id, hot_rank, rising_rank) VALUES (?, ?, ?, ?, ?, ?, ?, ${NEW_POST_HOT_RANK_SQL}, ${NEW_POST_RISING_RANK_SQL})`,
         [
           id,
           input.title.trim(),
-          input.content.trim(),
+          input.content?.trim() ?? null,
           input.type,
           authorId,
           input.community_id,
+          media?.id ?? null,
         ],
       );
 
@@ -402,7 +460,7 @@ export class PostsService {
 
       await connection.commit();
       // A new post has no votes yet.
-      return toPostDto(post, 0, false);
+      return toPostDto(post, 0, false, media ? toMediaDto(media) : null);
     } catch (error) {
       if (transactionStarted) {
         await connection.rollback();
@@ -618,12 +676,15 @@ export class PostsService {
         );
       }
 
+      // The file goes with the post: released here, deleted by the sweep.
+      await connection.execute<ResultSetHeader>(RELEASE_POST_MEDIA_SQL, [id]);
       await connection.execute<ResultSetHeader>(
         'DELETE FROM posts WHERE id = ?',
         [id],
       );
 
       await connection.commit();
+      this.mediaCleanup?.requestSweep();
     } catch (error) {
       if (transactionStarted) {
         await connection.rollback();
@@ -657,7 +718,7 @@ export class PostsService {
       transactionStarted = true;
 
       const [posts] = await connection.execute<EditablePostRow[]>(
-        `SELECT id, author_id, type, title, content, locked_at, removed_at, community_id
+        `SELECT id, author_id, type, title, content, locked_at, removed_at, community_id, media_id
          FROM posts
          WHERE id = ? AND ${visibleCommunitySql('posts.community_id')}
          LIMIT 1 FOR UPDATE`,
@@ -686,7 +747,7 @@ export class PostsService {
       // and media posts is applied here, against the stored type.
       if (
         input.content !== undefined &&
-        !isValidPostContent(post.type, input.content)
+        !isValidPostContent(post.type, input.content, !!post.media_id)
       ) {
         throw new BadRequestException([POST_CONTENT_URL_MESSAGE]);
       }
@@ -1003,6 +1064,10 @@ export async function toPostDtos(
 ): Promise<PostDto[]> {
   const ids = posts.map((post) => post.id);
   const scores = await loadVoteScores(executor, 'post', ids);
+  const media = await loadMediaByIds(
+    executor,
+    posts.map((post) => post.media_id),
+  );
   const saved =
     knownSaved === undefined
       ? await loadSavedFlags(executor, viewerId, ids)
@@ -1012,6 +1077,7 @@ export async function toPostDtos(
       post,
       scores.get(post.id) ?? 0,
       saved ? saved.has(post.id) : (knownSaved ?? false),
+      (post.media_id && media.get(post.media_id)) || null,
     ),
   );
 }
@@ -1022,6 +1088,7 @@ export function toPostDto(
   post: PostRow,
   score: number,
   saved: boolean,
+  media: MediaDto | null = null,
 ): PostDto {
   return {
     id: post.id,
@@ -1038,5 +1105,6 @@ export function toPostDto(
     locked_by: post.locked_by ?? null,
     score,
     saved,
+    media,
   };
 }

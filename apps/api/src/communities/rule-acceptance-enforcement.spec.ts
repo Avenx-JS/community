@@ -303,6 +303,10 @@ describe('Rule acceptance enforcement', () => {
       if (/^UPDATE (posts|comments) SET\s+upvotes/.test(sql)) {
         return Promise.resolve([{ affectedRows: 1 }, []]);
       }
+      // A deleted post's file is released (migration 035).
+      if (sql.startsWith('UPDATE media SET released_at')) {
+        return Promise.resolve([{ affectedRows: 0 }, []]);
+      }
       return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
     };
 

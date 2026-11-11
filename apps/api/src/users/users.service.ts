@@ -2,12 +2,14 @@ import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { Pool, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import type { UpdateOwnProfileDto } from './dto/update-own-profile.dto';
+import { loadMediaByIds, type MediaDto } from '../media/media-dto';
 
 interface UserProfileRow extends RowDataPacket {
   username: string;
   display_name: string | null;
   bio: string | null;
   created_at: Date | string;
+  avatar_media_id?: string | null;
 }
 
 interface OwnProfileRow extends UserProfileRow {
@@ -27,6 +29,8 @@ export interface UserProfile {
   display_name: string | null;
   bio: string | null;
   created_at: string;
+  // PUT /users/me/avatar; null without one.
+  avatar: MediaDto | null;
 }
 
 // The caller's own account. The only response that carries email and role;
@@ -38,7 +42,9 @@ export interface OwnProfile extends UserProfile {
 }
 
 export const OWN_PROFILE_SQL =
-  'SELECT id, username, email, display_name, bio, role, created_at FROM users WHERE id = ? LIMIT 1';
+  'SELECT id, username, email, display_name, bio, role, created_at, avatar_media_id FROM users WHERE id = ? LIMIT 1';
+export const USER_PROFILE_SQL =
+  'SELECT username, display_name, bio, created_at, avatar_media_id FROM users WHERE username = ? AND deleted_at IS NULL LIMIT 1';
 
 @Injectable()
 export class UsersService {
@@ -46,7 +52,7 @@ export class UsersService {
 
   async getUserProfile(username: string): Promise<UserProfile> {
     const [users] = await this.pool.execute<UserProfileRow[]>(
-      'SELECT username, display_name, bio, created_at FROM users WHERE username = ? AND deleted_at IS NULL LIMIT 1',
+      USER_PROFILE_SQL,
       [username],
     );
     const user = users[0];
@@ -60,7 +66,14 @@ export class UsersService {
       display_name: user.display_name,
       bio: user.bio,
       created_at: new Date(user.created_at).toISOString(),
+      avatar: await this.avatarOf(user),
     };
+  }
+
+  // A second statement only for an account with an avatar.
+  private async avatarOf(user: UserProfileRow): Promise<MediaDto | null> {
+    const media = await loadMediaByIds(this.pool, [user.avatar_media_id]);
+    return (user.avatar_media_id && media.get(user.avatar_media_id)) || null;
   }
 
   async getOwnProfile(userId: string): Promise<OwnProfile> {
@@ -82,6 +95,7 @@ export class UsersService {
       bio: user.bio,
       role: user.role,
       created_at: new Date(user.created_at).toISOString(),
+      avatar: await this.avatarOf(user),
     };
   }
 

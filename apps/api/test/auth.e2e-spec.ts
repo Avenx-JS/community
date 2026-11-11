@@ -235,7 +235,7 @@ describe('Auth endpoints (e2e)', () => {
       }
       if (
         sql.startsWith(
-          'SELECT username, display_name, bio, created_at FROM users WHERE username',
+          'SELECT username, display_name, bio, created_at, avatar_media_id FROM users WHERE username',
         )
       ) {
         const [username] = values as [string];

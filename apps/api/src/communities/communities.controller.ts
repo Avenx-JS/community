@@ -27,6 +27,7 @@ import {
   ApiRouteParam,
 } from '../common/openapi';
 import {
+  CommunityDetailResponse,
   CommunityListResponse,
   CommunityMemberListResponse,
   CommunityModeratorListResponse,
@@ -90,9 +91,12 @@ export class CommunitiesController {
   }
 
   @Get(':name')
-  @ApiOperation({ summary: 'Get a community by name' })
+  @ApiOperation({
+    summary: 'Get a community by name',
+    description: 'With its icon and banner, each null when unset.',
+  })
   @ApiRouteParam('name', 'communityName', 'Exact community name.')
-  @ApiOkResponse({ type: CommunityResponse })
+  @ApiOkResponse({ type: CommunityDetailResponse })
   @ApiErrorResponses({
     400: 'Invalid community name.',
     404: 'Community not found.',

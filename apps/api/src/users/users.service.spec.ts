@@ -53,16 +53,19 @@ describe('UsersService', () => {
       display_name: 'Sam',
       bio: 'Gardener',
       created_at: '2026-10-21T20:00:00.000Z',
+      avatar: null,
     });
     expect(Object.keys(profile)).toEqual([
       'username',
       'display_name',
       'bio',
       'created_at',
+      'avatar',
     ]);
+    // Without an avatar, no media lookup.
     expect(queryCalls).toEqual([
       {
-        sql: 'SELECT username, display_name, bio, created_at FROM users WHERE username = ? AND deleted_at IS NULL LIMIT 1',
+        sql: 'SELECT username, display_name, bio, created_at, avatar_media_id FROM users WHERE username = ? AND deleted_at IS NULL LIMIT 1',
         values: ['sample'],
       },
     ]);
@@ -86,10 +89,11 @@ describe('UsersService', () => {
       bio: 'Gardener',
       role: 'moderator',
       created_at: '2026-10-21T20:00:00.000Z',
+      avatar: null,
     });
     expect(queryCalls).toEqual([{ sql: OWN_PROFILE_SQL, values: ['user-id'] }]);
     expect(OWN_PROFILE_SQL).toBe(
-      'SELECT id, username, email, display_name, bio, role, created_at FROM users WHERE id = ? LIMIT 1',
+      'SELECT id, username, email, display_name, bio, role, created_at, avatar_media_id FROM users WHERE id = ? LIMIT 1',
     );
   });
 

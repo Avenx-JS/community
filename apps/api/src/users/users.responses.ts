@@ -1,4 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
+import { MediaResponse } from '../media/media.responses';
 import { PostResponse } from '../posts/posts.responses';
 import type { PostDto } from '../posts/posts.service';
 import type {
@@ -22,6 +23,14 @@ export class UserProfileResponse implements UserProfile {
 
   @ApiProperty({ format: 'date-time' })
   created_at!: string;
+
+  @ApiProperty({
+    type: MediaResponse,
+    nullable: true,
+    description:
+      'Set with PUT /users/me/avatar, 256×256 WebP; null without an avatar.',
+  })
+  avatar!: MediaResponse | null;
 }
 
 export class OwnProfileResponse

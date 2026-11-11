@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import { AuthService, MYSQL_POOL } from '../auth/auth.service';
+import { RELEASE_ACCOUNT_MEDIA_SQL } from '../media/media-sql';
 
 interface LockedAccountRow extends RowDataPacket {
   id: string;
@@ -49,6 +50,9 @@ export const DELETE_PRIVATE_STATE_SQL = [
   // Not a deletion: the reports stay, unassigned. Anonymising would not fire
   // fk_user_reports_assigned_to, and a deleted account cannot work a report.
   'UPDATE user_reports SET assigned_to = NULL, assigned_at = NULL WHERE assigned_to = ?',
+  // The avatar and uploads never posted are released (migration 035); the
+  // sweep deletes them. Files in the account's posts stay with the posts.
+  ...RELEASE_ACCOUNT_MEDIA_SQL,
 ] as const;
 
 export const COMMUNITY_CREATOR_MESSAGE =

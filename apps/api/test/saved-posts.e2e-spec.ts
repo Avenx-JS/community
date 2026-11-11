@@ -377,6 +377,7 @@ describe('Saved posts (e2e)', () => {
           locked_by: null,
           score: 0,
           saved: true,
+          media: null,
         },
         saved_at: '2026-11-01T08:02:00.000Z',
       });

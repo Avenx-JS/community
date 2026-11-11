@@ -181,7 +181,7 @@ export function executeCommunityDirectoryQuery(
   // GET /communities/:name: one visible community by name.
   if (
     flat ===
-    'SELECT id, creator_id, name, description, created_at FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1'
+    'SELECT id, creator_id, name, description, created_at, icon_media_id, banner_media_id FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1'
   ) {
     return [
       store.communities

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from '@jest/globals';
+import { RELEASE_ACCOUNT_MEDIA_SQL } from '../media/media-sql';
 import {
   ConflictException,
   NotFoundException,
@@ -162,6 +163,8 @@ describe('AccountDeletionService', () => {
       'DELETE FROM password_reset_tokens WHERE user_id = ?',
       // Unassigns, never deletes: the reports themselves are kept.
       'UPDATE user_reports SET assigned_to = NULL, assigned_at = NULL WHERE assigned_to = ?',
+      // Releases, never deletes: the sweep deletes the files (migration 035).
+      ...RELEASE_ACCOUNT_MEDIA_SQL,
     ]);
     const statements = [
       LOCK_ACCOUNT_SQL,

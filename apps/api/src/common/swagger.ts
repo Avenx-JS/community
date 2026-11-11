@@ -59,6 +59,10 @@ export function createOpenApiDocument(app: INestApplication): OpenAPIObject {
     .addTag('subscriptions', "The authenticated user's memberships.")
     .addTag('posts', 'Posts within communities.')
     .addTag('saved-posts', "The authenticated user's private saved posts.")
+    .addTag(
+      'media',
+      'Uploads for media posts, avatars, and community icons and banners.',
+    )
     .addTag('comments', 'Threaded comments on posts.')
     .addTag('votes', 'Votes on posts and comments.')
     .addTag(

@@ -3,6 +3,7 @@ import { AuthModule } from '../auth/auth.module';
 import { CommunitiesModule } from '../communities/communities.module';
 import { CommentsModule } from '../comments/comments.module';
 import { DatabaseModule } from '../database/database.module';
+import { MediaModule } from '../media/media.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { VotesModule } from '../votes/votes.module';
 import { PostsService } from './posts.service';
@@ -18,6 +19,7 @@ import { SavedPostsService } from './saved-posts.service';
     CommunitiesModule,
     CommentsModule,
     DatabaseModule,
+    MediaModule,
     NotificationsModule,
     VotesModule,
   ],

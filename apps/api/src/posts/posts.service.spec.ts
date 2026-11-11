@@ -12,6 +12,7 @@ import { CommunityRuleAcceptanceService } from '../communities/community-rule-ac
 import { COMMUNITY_NEW_POST_RECIPIENTS_SQL } from '../communities/community-notification-recipients';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PostsService } from './posts.service';
+import { RELEASE_POST_MEDIA_SQL } from '../media/media-sql';
 
 // Every community's rules count as accepted unless a test says otherwise.
 const acceptingRuleAcceptance = {
@@ -148,6 +149,8 @@ describe('PostsService', () => {
       'text',
       'user-1',
       'community-1',
+      // No file: a text post (migration 035).
+      null,
     ]);
   });
 
@@ -292,6 +295,7 @@ describe('PostsService.create notifications', () => {
       locked_by: null,
       score: 0,
       saved: false,
+      media: null,
     });
     expect(
       queries.find((query) => query.sql.startsWith('INSERT INTO posts'))
@@ -441,6 +445,10 @@ describe('PostsService.remove', () => {
         if (sql.startsWith('DELETE FROM posts')) {
           return Promise.resolve([{ affectedRows: 1 }, []]);
         }
+        // The post's file, released with it (migration 035).
+        if (sql === RELEASE_POST_MEDIA_SQL) {
+          return Promise.resolve([{ affectedRows: 0 }, []]);
+        }
         if (sql.startsWith('SELECT post_id FROM saved_posts')) {
           return Promise.resolve([[], []]);
         }
@@ -495,6 +503,12 @@ describe('PostsService.remove', () => {
     expect(deletes()).toEqual([
       { sql: 'DELETE FROM posts WHERE id = ?', values: ['post-1'] },
     ]);
+    // Its file is released first, in the same transaction.
+    expect(queries.slice(1).map(({ sql }) => sql)).toEqual([
+      RELEASE_POST_MEDIA_SQL,
+      'DELETE FROM posts WHERE id = ?',
+    ]);
+    expect(queries[1].values).toEqual(['post-1']);
   });
 
   it('lets the author delete without a notification, even as a moderator', async () => {
@@ -1322,6 +1336,7 @@ describe('PostsService.update', () => {
     locked_at: Date | null;
     removed_at: Date | null;
     edited_at: Date | null;
+    media_id?: string | null;
   };
   let service: PostsService;
   let posts: Map<string, StoredPost>;
@@ -1364,7 +1379,10 @@ describe('PostsService.update', () => {
     failUpdate = false;
     addPost('text-post', 'text', 'Body');
     addPost('link-post', 'link', 'https://example.com/a');
+    // A media post from before uploads: its content is its URL.
     addPost('media-post', 'media', 'https://example.com/a.png');
+    // A media post with an uploaded file: its content is a caption.
+    addPost('upload-post', 'media', 'A caption', { media_id: 'media-1' });
     connection = {
       beginTransaction: jest.fn().mockResolvedValue(undefined),
       commit: jest.fn().mockResolvedValue(undefined),
@@ -1400,6 +1418,10 @@ describe('PostsService.update', () => {
         }
         if (sql.startsWith('SELECT target_id, SUM(value) AS score')) {
           return Promise.resolve([[{ target_id: values[1], score: 4 }], []]);
+        }
+        // The uploaded file of upload-post.
+        if (sql.startsWith('SELECT media.id, media.uploader_id')) {
+          return Promise.resolve([[], []]);
         }
         if (sql.startsWith('SELECT post_id FROM saved_posts')) {
           return Promise.resolve([[], []]);
@@ -1452,7 +1474,9 @@ describe('PostsService.update', () => {
     const [read] = queries;
     expect(read.values).toEqual(['text-post']);
     expect(read.sql).toContain('FOR UPDATE');
-    expect(read.sql).toContain('communities.deleted_at IS NULL AND communities.suspended_at IS NULL');
+    expect(read.sql).toContain(
+      'communities.deleted_at IS NULL AND communities.suspended_at IS NULL',
+    );
     expect(read.sql).toContain('communities.suspended_at IS NULL');
   });
 
@@ -1601,6 +1625,16 @@ describe('PostsService.update', () => {
         },
       });
       expectRolledBackAndReleased();
+    });
+
+    it('takes any caption on a media post with an uploaded file', async () => {
+      await expect(
+        service.update(
+          'upload-post',
+          { content: 'not a url at all' },
+          'author',
+        ),
+      ).resolves.toMatchObject({ content: 'not a url at all' });
     });
 
     it('does not check a title-only edit of a link post against the URL rule', async () => {

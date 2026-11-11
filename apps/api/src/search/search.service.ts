@@ -20,6 +20,7 @@ import {
 } from '../users/user-activity.service';
 import type { UserProfile } from '../users/users.service';
 import { loadVoteScores } from '../votes/vote-scores';
+import { loadMediaByIds } from '../media/media-dto';
 import type {
   SearchQueryDto,
   SearchSort,
@@ -74,6 +75,7 @@ interface UserRow extends RowDataPacket {
   display_name: string | null;
   bio: string | null;
   created_at: Date | string;
+  avatar_media_id?: string | null;
 }
 
 interface CommunityRow extends RowDataPacket {
@@ -165,9 +167,14 @@ export class SearchService {
     const order =
       sort === 'new' ? 'created_at DESC, username ASC' : 'username ASC';
     const [rows] = await this.pool.execute<UserRow[]>(
-      `SELECT username, display_name, bio, created_at ${query.from}
+      `SELECT username, display_name, bio, created_at, avatar_media_id ${query.from}
        ORDER BY ${order} LIMIT ? OFFSET ?`,
       [...query.values, limit, offset],
+    );
+    // The page's avatars in one statement, none without avatars.
+    const avatars = await loadMediaByIds(
+      this.pool,
+      rows.map((row) => row.avatar_media_id),
     );
     return {
       items: rows.map((row): UserProfile => ({
@@ -175,6 +182,8 @@ export class SearchService {
         display_name: row.display_name,
         bio: row.bio,
         created_at: iso(row.created_at),
+        avatar:
+          (row.avatar_media_id && avatars.get(row.avatar_media_id)) || null,
       })),
       total: await this.count(query),
     };
