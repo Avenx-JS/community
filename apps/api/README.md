@@ -2486,6 +2486,14 @@ username index for users.
 `POST /reports` requires a bearer token and creates a report about an account, a
 post, a comment or a community. The reporter is always derived from the token.
 
+**Who reviews it.** Every report reaches the platform administrators
+([Admin report queue](#admin-report-queue)). A report about a post or a comment
+is also routed to that content's community, where its moderators and creator
+review it in their own queue ([Community report review](#community-report-review)).
+A report about an account or a community goes to administrators only: a
+community's moderators must not judge accounts platform-wide, or a complaint about
+their own community.
+
 **Breaking change: `username` is no longer accepted.** It is replaced by
 `target_type` and `target`, so a body that still sends `username` gets `400`.
 Update clients to send `{ "target_type": "user", "target": "<username>" }`. There
@@ -2620,11 +2628,16 @@ Each item, from both read routes, is exactly:
   "reason": "spam",
   "description": "What I saw",
   "status": "open",
+  "community_status": "approved",
   "created_at": "2026-10-25T10:00:00.000Z",
   "withdrawn_at": null
 }
 ```
 
+- `community_status` is the community moderators' review of a post or comment
+  report: `open`, `approved` (the content stays) or `removed`; `null` for a
+  report only administrators review. It never says which moderator decided:
+  `community_reviewed_by` is withheld like `reviewed_by`.
 - `status` is returned: a reporter may know whether their report is open, under
   review or closed. That is only what the `report_resolved`
   [notification](#moderation-notifications) already tells them, readable on demand.
@@ -2680,7 +2693,8 @@ report, independent of where it is in the queue.
 **Only an `open` report can be withdrawn.** Once a moderator has moved it to
 `under_review`, work has started and the queue entry is no longer the reporter's
 alone; `resolved` and `rejected` are closed. So a withdrawn report always has
-status `open`.
+status `open`. The community level counts too: a report its community's
+moderators have approved or removed is decided, and `409` as well.
 
 | Status | When |
 | --- | --- |
@@ -2711,6 +2725,92 @@ report existed.
 **Rate limiting.** The report-creation buckets match `POST /reports` only, so these
 three routes fall under the general read and write buckets. The per-account
 creation bucket (10 per hour) bounds withdraw-and-resubmit cycling.
+
+### Community report review
+
+The community level of reports about posts and comments (migration
+`036_add_community_report_review`). It sits beside the administrators' queue
+and never replaces it: each level has its own state and decides
+independently, so administrators keep seeing every report, and a moderator's
+approval does not close their review.
+
+| Route | Does |
+| --- | --- |
+| `GET /communities/:name/modqueue` | The open reports, one entry per post or comment |
+| `GET /communities/:name/reports` | The reports singly, filtered by state (`open` by default, `approved`, `removed`, `any`) and `target_type`, newest or oldest first |
+| `GET /communities/:name/reports/:id` | One report with its content, the other open reports of that content, and the moderator who closed it |
+| `POST /communities/:name/reports/:id/approve` | The content is fine: it stays, and its reports close |
+| `POST /communities/:name/reports/:id/remove` | Removes the content and closes its reports, in one step; optional `reason` as for `POST /posts/:id/remove` |
+
+**Access.** A bearer token of the community's creator or one of its moderators
+(`canModerateCommunitySql`, the rule of every moderation route); anyone else
+gets `403`, platform administrators included (they have `/admin/reports`).
+An unknown, deleted or suspended community is `404` first, from the shared
+visibility predicate, as everywhere. A report of another community, a withdrawn
+report, and an account or community report are `404`: the id says nothing.
+
+**The queue.** An entry gathers every *open* report of one post or comment:
+routed to this community, `community_status = 'open'`, not withdrawn
+(`OPEN_COMMUNITY_REPORT_SQL`). It carries `report_count`, `reporter_count`
+(distinct reporters), `reasons` (open reports per reason), the first and last
+report time, the content (title or excerpt, author, whether removed; `null`
+once its author deleted it) and the newest 25 reports singly. `sort` is
+`oldest` (default, the content waiting longest), `newest` or
+`most_reported`; every order ends in the target's type and id, so pages are
+stable. `total` counts entries. `idx_user_reports_modqueue (community_id,
+community_status, target_type, target_id)` serves the grouping.
+
+**Reporters stay anonymous to moderators.** No community route returns a
+reporter's id or username: a moderator who learns who reported whom can
+retaliate or be pressured. They see the reason and the reporter's own
+description. In turn the reporter never learns which moderator decided.
+
+**Approve** closes the whole entry: every open report of that content becomes
+`approved`, with the moderator and time, and the content leaves the queue. It
+is not put back by itself. A new report by *someone else* opens a new entry,
+since that is new information; a new report by a reporter whose report was
+already decided is refused with `409` (`POST /reports`), so a closed report
+never reopens through its own reporter. **Remove** runs the content's own
+removal path on the same transaction (`PostsService.removeContentOn`,
+`CommentRemovalService.removeOn`): the author is notified, `post_removed` or
+`comment_removed` is logged, and the reports close as `removed`. It locks the
+content row before the reports, the order of the content's own removal route,
+so the two cannot deadlock. Content already removed only has its reports
+closed; content its author deleted cannot be removed (`409`), and approving
+closes its reports. Both answer `409` for a report already closed, and return
+the report detail.
+
+**Removal by any route closes the reports.** `POST /posts/:id/remove` and
+`POST /comments/:id/remove` close the content's open community reports as
+`removed` too: the removal is the moderators' answer to them, and otherwise
+removed content would stay in the queue.
+
+**Moderation log.** Every decision on reports writes `report_approved` or
+`report_removed` (target the post or comment, metadata `reports`: how many
+it closed, never who filed them) to the
+[community moderation log](#community-moderation-log), in the deciding
+transaction. A removal writes its own `post_removed` or `comment_removed` as
+well.
+
+**Schema.** `user_reports` gains `community_id` (the post's community, a
+comment's through its post), `community_status` (`open`, `approved`,
+`removed`; `NULL` where not routed), `community_reviewed_by` and
+`community_reviewed_at`, the references `ON DELETE SET NULL`. The backfill
+routes existing content reports and opens those still open for administrators;
+reports already closed or withdrawn keep `community_status NULL`, so the new
+queue starts with live work only. `community_moderation_actions.action` gains
+the two values. `community-report-review.mysql.spec.ts` runs the migration
+against a fresh installation and the flow on a real server.
+
+**Not built.** *Automatically held content*: the API has no automatic filter
+that holds content back, so the queue contains reported content only; a filter
+would add its entries here. *Modmail* (`POST`/`GET /communities/:name/modmail`)
+is deliberately left out: a message channel into a moderation team is its own
+feature (threads, replies, notifications, abuse and rate limits, and who among
+the moderators may read what), and a half-built one would invite harassment of
+moderators with no tools to handle it. Reports are the structured channel
+meanwhile. *Notifying the reporter* of the community's decision needs a new
+notification type and is a follow-up; `GET /reports` shows it.
 
 ### Report targets
 
@@ -3503,6 +3603,7 @@ moderator actions, including those whose endpoints do not exist yet:
 | `rules_published`                                         | `rule_document` | `version`                          |
 | `community_updated`                                       | `community`     | `fields`                           |
 | `community_deleted`                                       | `community`     | none                               |
+| `report_approved`, `report_removed`                        | `post`, `comment` | `reports` (how many it closed)     |
 
 Declaring them up front means the endpoint issues that add locking, pinning,
 removal, bans and member removal do not each need an `ALTER TABLE ... MODIFY

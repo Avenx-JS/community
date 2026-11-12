@@ -178,7 +178,9 @@ CREATE TABLE community_moderation_actions (
         'moderator_removed',
         'rules_published',
         'community_updated',
-        'community_deleted'
+        'community_deleted',
+        'report_approved',
+        'report_removed'
     ) NOT NULL,
     target_type ENUM('post', 'comment', 'user', 'rule_document', 'community') NOT NULL,
     target_id VARCHAR(36) NOT NULL,
@@ -334,6 +336,10 @@ CREATE TABLE user_reports (
     withdrawn_at TIMESTAMP NULL DEFAULT NULL,
     assigned_to VARCHAR(36) NULL,
     assigned_at TIMESTAMP NULL DEFAULT NULL,
+    community_id VARCHAR(36) NULL,
+    community_status ENUM('open', 'approved', 'removed') NULL,
+    community_reviewed_by VARCHAR(36) NULL,
+    community_reviewed_at TIMESTAMP NULL DEFAULT NULL,
     INDEX idx_user_reports_status_created (status, created_at),
     INDEX idx_user_reports_reported_user (reported_user_id, status),
     INDEX idx_user_reports_reporter_created (reporter_id, created_at),
@@ -344,6 +350,8 @@ CREATE TABLE user_reports (
     INDEX idx_user_reports_target (target_type, target_id, status),
     INDEX idx_user_reports_target_type_created (target_type, created_at),
     INDEX idx_user_reports_assigned (assigned_to, status, created_at),
+    INDEX idx_user_reports_modqueue (community_id, community_status, target_type, target_id),
+    INDEX idx_user_reports_community (community_id, community_status, created_at),
     CONSTRAINT chk_user_reports_context CHECK (
         (context_type IS NULL AND context_id IS NULL) OR
         (context_type IS NOT NULL AND context_id IS NOT NULL)
@@ -355,7 +363,11 @@ CREATE TABLE user_reports (
     CONSTRAINT fk_user_reports_target_author
         FOREIGN KEY (target_author_id) REFERENCES users(id) ON DELETE SET NULL,
     CONSTRAINT fk_user_reports_assigned_to
-        FOREIGN KEY (assigned_to) REFERENCES users(id) ON DELETE SET NULL
+        FOREIGN KEY (assigned_to) REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT fk_user_reports_community
+        FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE SET NULL,
+    CONSTRAINT fk_user_reports_community_reviewed_by
+        FOREIGN KEY (community_reviewed_by) REFERENCES users(id) ON DELETE SET NULL
 );
 
 CREATE TABLE user_restrictions (
@@ -758,4 +770,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('032_create_community_bans'),
     ('033_add_communities_created_index'),
     ('034_add_content_ranking'),
-    ('035_create_media');
+    ('035_create_media'),
+    ('036_add_community_report_review');

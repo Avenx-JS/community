@@ -66,6 +66,7 @@ import {
 } from '../media/media-dto';
 import { MEDIA_COLUMNS, RELEASE_POST_MEDIA_SQL } from '../media/media-sql';
 import { MediaCleanupService } from '../media/media-cleanup.service';
+import { closeCommunityReports } from '../reports/community-report-review';
 
 export interface PostRow extends RowDataPacket {
   id: string;
@@ -509,39 +510,59 @@ export class PostsService {
     input: RemoveContentDto,
     actorId: string,
   ): Promise<ReviewablePostDto> {
-    return this.inTransaction(async (connection) => {
-      const post = await this.lockPostForRemoval(connection, id, actorId);
-      if (post.removed_at !== null) {
-        throw new ConflictException('This post is already removed');
-      }
-      const reason = input.reason ?? null;
-      await connection.execute<ResultSetHeader>(
-        'UPDATE posts SET removed_at = UTC_TIMESTAMP(), removed_by = ?, removal_reason = ? WHERE id = ? AND removed_at IS NULL',
-        [actorId, reason, id],
-      );
-      // Always true under this route's authorisation; kept so the rule
-      // "an author's own act notifies nobody" is expressed in one place.
-      if (post.author_id !== actorId) {
-        await this.notifications.record(connection, {
-          recipientId: post.author_id,
-          type: 'content_removed',
-          actorId: null,
-          subjectType: 'post',
-          subjectId: post.id,
-          communityId: post.community_id,
-          metadata: { post_title: post.title },
-        });
-      }
-      await this.moderationLog.record(connection, {
-        actorId,
+    return this.inTransaction((connection) =>
+      this.removeContentOn(connection, id, input, actorId),
+    );
+  }
+
+  // The removal itself, on the caller's transaction: POST /posts/:id/remove
+  // and POST /communities/:name/reports/:id/remove both run it. Closes the
+  // post's open community reports as removed (closeCommunityReports): a
+  // removal is the moderators' answer to them, by whichever route.
+  async removeContentOn(
+    connection: PoolConnection,
+    id: string,
+    input: RemoveContentDto,
+    actorId: string,
+  ): Promise<ReviewablePostDto> {
+    const post = await this.lockPostForRemoval(connection, id, actorId);
+    if (post.removed_at !== null) {
+      throw new ConflictException('This post is already removed');
+    }
+    const reason = input.reason ?? null;
+    await connection.execute<ResultSetHeader>(
+      'UPDATE posts SET removed_at = UTC_TIMESTAMP(), removed_by = ?, removal_reason = ? WHERE id = ? AND removed_at IS NULL',
+      [actorId, reason, id],
+    );
+    // Always true under this route's authorisation; kept so the rule
+    // "an author's own act notifies nobody" is expressed in one place.
+    if (post.author_id !== actorId) {
+      await this.notifications.record(connection, {
+        recipientId: post.author_id,
+        type: 'content_removed',
+        actorId: null,
+        subjectType: 'post',
+        subjectId: post.id,
         communityId: post.community_id,
-        action: 'post_removed',
-        targetType: 'post',
-        targetId: id,
-        ...(reason === null ? {} : { metadata: { reason } }),
+        metadata: { post_title: post.title },
       });
-      return this.readReviewable(connection, id, actorId);
+    }
+    await this.moderationLog.record(connection, {
+      actorId,
+      communityId: post.community_id,
+      action: 'post_removed',
+      targetType: 'post',
+      targetId: id,
+      ...(reason === null ? {} : { metadata: { reason } }),
     });
+    await closeCommunityReports(connection, this.moderationLog, {
+      status: 'removed',
+      actorId,
+      communityId: post.community_id,
+      targetType: 'post',
+      targetId: id,
+    });
+    return this.readReviewable(connection, id, actorId);
   }
 
   // POST /posts/:id/restore. Same authorisation; 409 unless removed.

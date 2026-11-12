@@ -27,6 +27,6 @@ import { CommentRemovalService } from './comment-removals.service';
     CommentLocksController,
     CommentRemovalsController,
   ],
-  exports: [CommentsService],
+  exports: [CommentsService, CommentRemovalService],
 })
 export class CommentsModule {}

@@ -143,10 +143,25 @@ describe('Report endpoint (e2e)', () => {
             { id: key === 'reporter' ? REPORTER : AUTHOR, username: key },
           ];
         }
-      } else if (sql.startsWith('SELECT author_id FROM posts')) {
-        rows = key in posts ? [{ author_id: posts[key] }] : [];
-      } else if (sql.startsWith('SELECT author_id FROM comments')) {
-        rows = key in comments ? [{ author_id: comments[key] }] : [];
+      } else if (sql.startsWith('SELECT author_id, community_id FROM posts')) {
+        rows =
+          key in posts
+            ? [{ author_id: posts[key], community_id: 'community-of-content' }]
+            : [];
+      } else if (
+        sql.startsWith(
+          'SELECT comments.author_id, posts.community_id FROM comments',
+        )
+      ) {
+        rows =
+          key in comments
+            ? [
+                {
+                  author_id: comments[key],
+                  community_id: 'community-of-content',
+                },
+              ]
+            : [];
       } else if (sql.startsWith('SELECT id, creator_id FROM communities')) {
         rows = key in communities ? [communities[key]] : [];
       }
@@ -226,7 +241,11 @@ describe('Report endpoint (e2e)', () => {
             [],
           ] as [unknown, unknown]);
         }
-        if (sql.startsWith('SELECT reporter_id, status, withdrawn_at')) {
+        if (
+          sql.startsWith(
+            'SELECT reporter_id, status, community_status, withdrawn_at',
+          )
+        ) {
           return Promise.resolve([
             stored.filter((report) => report.id === values[0]),
             [],
@@ -687,6 +706,8 @@ describe('Report endpoint (e2e)', () => {
         reason: 'spam',
         description: null,
         status: 'open',
+        // An account report: administrators only.
+        community_status: null,
         created_at: '2026-10-25T10:00:00.000Z',
         withdrawn_at: null,
       });

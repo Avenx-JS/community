@@ -1,3 +1,4 @@
+import { closeCommunityReports } from '../reports/community-report-review';
 import {
   ConflictException,
   ForbiddenException,
@@ -62,47 +63,66 @@ export class CommentRemovalService {
     input: RemoveContentDto,
     actorId: string,
   ): Promise<RemovedCommentDto> {
-    return this.inTransaction(async (connection) => {
-      const comment = await this.lockForRemoval(connection, id, actorId);
-      if (comment.removed_at !== null) {
-        throw new ConflictException('This comment is already removed');
-      }
-      const reason = input.reason ?? null;
-      await connection.execute<ResultSetHeader>(
-        'UPDATE comments SET removed_at = UTC_TIMESTAMP(), removed_by = ?, removal_reason = ? WHERE id = ? AND removed_at IS NULL',
-        [actorId, reason, id],
-      );
-      // Always true under this route's authorisation; kept so the rule
-      // "an author's own act notifies nobody" is expressed in one place.
-      if (comment.author_id !== actorId) {
-        await this.notifications.record(connection, {
-          recipientId: comment.author_id,
-          type: 'content_removed',
-          actorId: null,
-          subjectType: 'comment',
-          subjectId: comment.id,
-          communityId: comment.community_id,
-          metadata: { excerpt: comment.content },
-        });
-      }
-      await this.moderationLog.record(connection, {
-        actorId,
-        communityId: comment.community_id,
-        action: 'comment_removed',
-        targetType: 'comment',
-        targetId: id,
-        ...(reason === null ? {} : { metadata: { reason } }),
-      });
+    return this.inTransaction((connection) =>
+      this.removeOn(connection, id, input, actorId),
+    );
+  }
 
-      const flat = await this.comments.readFlat(connection, id);
-      const [state] = await connection.execute<
-        (RowDataPacket & RemovalStateRow)[]
-      >(
-        'SELECT removed_at, removed_by, removal_reason FROM comments WHERE id = ? LIMIT 1',
-        [id],
-      );
-      return { ...flat, ...toRemovalState(state[0]) };
+  // The removal itself, on the caller's transaction: POST /comments/:id/remove
+  // and POST /communities/:name/reports/:id/remove both run it. Closes the
+  // comment's open community reports as removed.
+  async removeOn(
+    connection: PoolConnection,
+    id: string,
+    input: RemoveContentDto,
+    actorId: string,
+  ): Promise<RemovedCommentDto> {
+    const comment = await this.lockForRemoval(connection, id, actorId);
+    if (comment.removed_at !== null) {
+      throw new ConflictException('This comment is already removed');
+    }
+    const reason = input.reason ?? null;
+    await connection.execute<ResultSetHeader>(
+      'UPDATE comments SET removed_at = UTC_TIMESTAMP(), removed_by = ?, removal_reason = ? WHERE id = ? AND removed_at IS NULL',
+      [actorId, reason, id],
+    );
+    // Always true under this route's authorisation; kept so the rule
+    // "an author's own act notifies nobody" is expressed in one place.
+    if (comment.author_id !== actorId) {
+      await this.notifications.record(connection, {
+        recipientId: comment.author_id,
+        type: 'content_removed',
+        actorId: null,
+        subjectType: 'comment',
+        subjectId: comment.id,
+        communityId: comment.community_id,
+        metadata: { excerpt: comment.content },
+      });
+    }
+    await this.moderationLog.record(connection, {
+      actorId,
+      communityId: comment.community_id,
+      action: 'comment_removed',
+      targetType: 'comment',
+      targetId: id,
+      ...(reason === null ? {} : { metadata: { reason } }),
     });
+    await closeCommunityReports(connection, this.moderationLog, {
+      status: 'removed',
+      actorId,
+      communityId: comment.community_id,
+      targetType: 'comment',
+      targetId: id,
+    });
+
+    const flat = await this.comments.readFlat(connection, id);
+    const [state] = await connection.execute<
+      (RowDataPacket & RemovalStateRow)[]
+    >(
+      'SELECT removed_at, removed_by, removal_reason FROM comments WHERE id = ? LIMIT 1',
+      [id],
+    );
+    return { ...flat, ...toRemovalState(state[0]) };
   }
 
   // 409 unless removed, and 409 naming the post when the post itself is

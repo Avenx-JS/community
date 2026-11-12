@@ -15,8 +15,13 @@ const TABLE = /CREATE TABLE community_moderation_actions \(([\s\S]*?)\n\);/;
 
 // Added by migration 023; 021 is released and append-only.
 const ADDED_ACTIONS = ['community_updated', 'community_deleted'];
+// Added by migration 036 (community report review), after 023's.
+const ACTIONS_036 = ['report_approved', 'report_removed'];
+const ACTIONS_THROUGH_023 = COMMUNITY_MODERATION_ACTIONS.filter(
+  (action) => !ACTIONS_036.includes(action),
+);
 const ADDED_TARGETS = ['community'];
-const ORIGINAL_ACTIONS = COMMUNITY_MODERATION_ACTIONS.filter(
+const ORIGINAL_ACTIONS = ACTIONS_THROUGH_023.filter(
   (action) => !ADDED_ACTIONS.includes(action),
 );
 const ORIGINAL_TARGETS = COMMUNITY_MODERATION_TARGETS.filter(
@@ -91,7 +96,7 @@ describe('migration 023 (community moderation community actions)', () => {
   it('appends the community actions and target to both enums', () => {
     expect(sql).toBe(
       'ALTER TABLE community_moderation_actions ' +
-        `MODIFY COLUMN action ENUM( ${enumList(COMMUNITY_MODERATION_ACTIONS)} ) NOT NULL, ` +
+        `MODIFY COLUMN action ENUM( ${enumList(ACTIONS_THROUGH_023)} ) NOT NULL, ` +
         `MODIFY COLUMN target_type ENUM(${enumList(COMMUNITY_MODERATION_TARGETS)}) NOT NULL;`,
     );
   });
@@ -122,6 +127,22 @@ describe('community_moderation_actions in the snapshot', () => {
     expect(normalise(snapshot)).toContain(
       "('020_add_user_account_deletion'), ('021_create_community_moderation_actions'), " +
         "('022_add_community_deletion'), ('023_add_community_moderation_community_actions')",
+    );
+  });
+});
+
+describe('migration 036 (community report review) on the moderation log', () => {
+  const migration = normalise(
+    read(
+      '../../../../data/migrations/036_add_community_report_review.sql',
+    ).replace(/^--.*$/gm, ''),
+  );
+
+  it('appends the report actions to the action enum, last', () => {
+    expect(COMMUNITY_MODERATION_ACTIONS.slice(-2)).toEqual(ACTIONS_036);
+    expect(migration).toContain(
+      'ALTER TABLE community_moderation_actions ' +
+        `MODIFY COLUMN action ENUM( ${enumList(COMMUNITY_MODERATION_ACTIONS)} ) NOT NULL;`,
     );
   });
 });

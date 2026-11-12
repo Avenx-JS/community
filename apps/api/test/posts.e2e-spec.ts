@@ -595,6 +595,10 @@ describe('Post endpoints (e2e)', () => {
         ) {
           return [{ affectedRows: 0 }, []];
         }
+        // Closing the content's community reports (migration 036): none.
+        if (sql.startsWith('UPDATE user_reports')) {
+          return [{ affectedRows: 0 }, []];
+        }
         throw new Error(`Unexpected SQL query: ${sql}`);
       },
       // A transaction snapshots the stored rows and restores them on

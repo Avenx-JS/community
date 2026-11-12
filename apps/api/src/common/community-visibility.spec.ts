@@ -17,6 +17,8 @@ import { CREATED_COMMUNITY_SQL } from '../users/account-deletion.service';
 import { VotesService } from '../votes/votes.service';
 import { CommunityBansService } from '../communities/community-bans.service';
 import { SavedPostsService } from '../posts/saved-posts.service';
+import { CommunityReportsService } from '../reports/community-reports.service';
+import type { CommentRemovalService } from '../comments/comment-removals.service';
 import {
   COMMUNITY_VISIBLE_PREDICATE,
   visibleCommunityColumnsSql,
@@ -80,6 +82,12 @@ function services(pool: Pool) {
     stats: new CommunityStatsService(pool),
     bans: new CommunityBansService(pool, moderationLog),
     saved: new SavedPostsService(pool),
+    reports: new CommunityReportsService(
+      pool,
+      moderationLog,
+      {} as PostsService,
+      {} as CommentRemovalService,
+    ),
   };
 }
 
@@ -250,6 +258,31 @@ const lookups: Array<
   ],
   ['PUT /posts/:id/save', (s) => s.saved.save('p', 'u'), CONTENT],
   ['GET /comments/:id', (s) => s.comments.findPermalink('c', 'u'), CONTENT],
+  [
+    'GET /communities/:name/modqueue',
+    (s) => s.reports.modQueue('gone', 'u', {}),
+    BY_NAME,
+  ],
+  [
+    'GET /communities/:name/reports',
+    (s) => s.reports.list('gone', 'u', {}),
+    BY_NAME,
+  ],
+  [
+    'GET /communities/:name/reports/:id',
+    (s) => s.reports.findOne('gone', 'u', 'r'),
+    BY_NAME,
+  ],
+  [
+    'POST /communities/:name/reports/:id/approve',
+    (s) => s.reports.approve('gone', 'u', 'r'),
+    BY_NAME,
+  ],
+  [
+    'POST /communities/:name/reports/:id/remove',
+    (s) => s.reports.remove('gone', 'u', 'r', {}),
+    BY_NAME,
+  ],
 ];
 
 describe('deleted and suspended communities are excluded from every read and write', () => {

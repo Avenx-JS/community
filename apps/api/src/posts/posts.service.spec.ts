@@ -2018,6 +2018,10 @@ describe('PostsService moderative removal', () => {
     if (sql.includes('FROM community_bans')) {
       return [[], []];
     }
+    // Closing the post's community reports (migration 036): none open.
+    if (sql.startsWith('UPDATE user_reports')) {
+      return [{ affectedRows: 0 }, []];
+    }
     throw new Error(`Unexpected SQL: ${sql}`);
   };
 

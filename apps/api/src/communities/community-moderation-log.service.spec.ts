@@ -257,6 +257,26 @@ describe('CommunityModerationLogService', () => {
         },
         null,
       ],
+      [
+        {
+          ...base,
+          action: 'report_approved',
+          targetType: 'post',
+          targetId: 'post-1',
+          metadata: { reports: 3 },
+        },
+        { reports: 3 },
+      ],
+      [
+        {
+          ...base,
+          action: 'report_removed',
+          targetType: 'comment',
+          targetId: 'comment-1',
+          metadata: { reports: 1 },
+        },
+        { reports: 1 },
+      ],
     ];
 
     it('covers every declared action', () => {

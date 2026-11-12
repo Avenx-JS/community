@@ -81,6 +81,10 @@ describe('CommentRemovalService', () => {
         if (sql.startsWith('SELECT removed_at, removed_by, removal_reason')) {
           return Promise.resolve([[comment], []]);
         }
+        // Closing the comment's community reports (migration 036): none open.
+        if (sql.startsWith('UPDATE user_reports')) {
+          return Promise.resolve([{ affectedRows: 0 }, []]);
+        }
         return Promise.reject(new Error(`Unexpected SQL: ${sql}`));
       },
     };

@@ -24,6 +24,7 @@ import { SavedPostsService } from './saved-posts.service';
     VotesModule,
   ],
   providers: [PostsService, SavedPostsService],
+  exports: [PostsService],
   controllers: [
     PostsController,
     CommunityPostsController,

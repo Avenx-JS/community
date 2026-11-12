@@ -79,15 +79,33 @@ describe('ReportsService', () => {
             [],
           ]);
         }
-        if (sql.startsWith('SELECT author_id FROM posts')) {
+        if (sql.startsWith('SELECT author_id, community_id FROM posts')) {
           return Promise.resolve([
-            key in posts ? [{ author_id: posts[key] }] : [],
+            key in posts
+              ? [
+                  {
+                    author_id: posts[key],
+                    community_id: 'community-of-content',
+                  },
+                ]
+              : [],
             [],
           ]);
         }
-        if (sql.startsWith('SELECT author_id FROM comments')) {
+        if (
+          sql.startsWith(
+            'SELECT comments.author_id, posts.community_id FROM comments',
+          )
+        ) {
           return Promise.resolve([
-            key in comments ? [{ author_id: comments[key] }] : [],
+            key in comments
+              ? [
+                  {
+                    author_id: comments[key],
+                    community_id: 'community-of-content',
+                  },
+                ]
+              : [],
             [],
           ]);
         }
@@ -133,6 +151,7 @@ describe('ReportsService', () => {
         reported: 'reported-id',
         author: null,
         username: 'reported_user',
+        community: null,
       },
       {
         type: 'post' as const,
@@ -141,6 +160,7 @@ describe('ReportsService', () => {
         reported: AUTHOR,
         author: AUTHOR,
         username: null,
+        community: 'community-of-content',
       },
       {
         type: 'comment' as const,
@@ -149,6 +169,7 @@ describe('ReportsService', () => {
         reported: AUTHOR,
         author: AUTHOR,
         username: null,
+        community: 'community-of-content',
       },
       {
         type: 'community' as const,
@@ -157,10 +178,20 @@ describe('ReportsService', () => {
         reported: null,
         author: null,
         username: null,
+        // Account and community reports go to administrators only.
+        community: null,
       },
     ])(
       'stores a $type target and returns only the receipt',
-      async ({ type, target, targetId, reported, author, username }) => {
+      async ({
+        type,
+        target,
+        targetId,
+        reported,
+        author,
+        username,
+        community,
+      }) => {
         const response = await service.create(report(type, target), REPORTER);
 
         expect(response).toEqual({
@@ -183,6 +214,9 @@ describe('ReportsService', () => {
           type,
           targetId,
           author,
+          // Routed to the content's community, open there.
+          community,
+          community ? 'open' : null,
         ]);
         expect(duplicateCheck()?.values).toEqual([
           REPORTER,
@@ -624,7 +658,11 @@ describe('ReportsService: the reporter’s own reports', () => {
       release: jest.fn(),
       execute: (sql, values) => {
         connectionCalls.push({ sql, values });
-        if (sql.startsWith('SELECT reporter_id, status, withdrawn_at')) {
+        if (
+          sql.startsWith(
+            'SELECT reporter_id, status, community_status, withdrawn_at',
+          )
+        ) {
           return Promise.resolve([lockedRow ? [lockedRow] : [], []]);
         }
         if (sql.startsWith('UPDATE user_reports')) {
@@ -724,6 +762,7 @@ describe('ReportsService: the reporter’s own reports', () => {
             reason: 'spam',
             description: 'My own words',
             status: 'resolved',
+            community_status: null,
             created_at: '2026-10-25T10:00:00.000Z',
             withdrawn_at: null,
           },
@@ -819,6 +858,7 @@ describe('ReportsService: the reporter’s own reports', () => {
           'created_at',
           'description',
           'id',
+          'community_status',
           'reason',
           'status',
           'target_label',
@@ -846,7 +886,7 @@ describe('ReportsService: the reporter’s own reports', () => {
 
       expect(connection.beginTransaction).toHaveBeenCalled();
       expect(connectionCalls[0].sql).toContain(
-        'SELECT reporter_id, status, withdrawn_at FROM user_reports',
+        'SELECT reporter_id, status, community_status, withdrawn_at FROM user_reports',
       );
       expect(connectionCalls[0].sql).toContain(
         'WHERE id = ? LIMIT 1 FOR UPDATE',

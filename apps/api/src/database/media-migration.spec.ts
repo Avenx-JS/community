@@ -15,7 +15,7 @@ describe('migration 035 (media)', () => {
   it('is in the snapshot verbatim, with its version recorded', () => {
     expect(snapshot).toContain(migration);
     expect(snapshot).toContain(
-      "('034_add_content_ranking'), ('035_create_media');",
+      "('034_add_content_ranking'), ('035_create_media')",
     );
   });
 

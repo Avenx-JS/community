@@ -37,6 +37,10 @@ export const COMMUNITY_MODERATION_ACTIONS = [
   'rules_published',
   'community_updated',
   'community_deleted',
+  // A moderator's decision on the reports of a post or comment (migration
+  // 036): approved (the content stays) or removed.
+  'report_approved',
+  'report_removed',
 ] as const;
 
 export type CommunityModerationAction =
@@ -114,6 +118,12 @@ export type CommunityModerationEntry =
       action: 'community_deleted';
       targetType: 'community';
       metadata?: Record<string, never>;
+    })
+  | (EntryBase & {
+      action: 'report_approved' | 'report_removed';
+      targetType: 'post' | 'comment';
+      // How many reports the decision closed; never who filed them.
+      metadata?: { reports?: number };
     });
 
 // The community fields PATCH /communities/:name may change; a
@@ -247,6 +257,19 @@ function isoDateValue(
   return value;
 }
 
+function reportCountValue(
+  metadata: Record<string, unknown>,
+): number | undefined {
+  const value = metadata.reports;
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+    throw invalid('reports');
+  }
+  return value;
+}
+
 function versionValue(metadata: Record<string, unknown>): number | undefined {
   const value = metadata.version;
   if (value === undefined) {
@@ -315,6 +338,10 @@ export function buildCommunityModerationMetadata(
       break;
     case 'community_updated':
       keep('fields', fieldsValue(metadata));
+      break;
+    case 'report_approved':
+    case 'report_removed':
+      keep('reports', reportCountValue(metadata));
       break;
     default:
       // Lock, unlock, restore, pin and unpin carry no metadata.

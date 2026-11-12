@@ -22,6 +22,7 @@ import type {
   ReportTargetType,
 } from './report.constants';
 import { REPORT_TARGET_JOINS_SQL } from './report-target.sql';
+import type { CommunityReportStatus } from './community-report-review';
 import { visibleCommunityColumnsSql } from '../common/community-visibility';
 
 interface ReportedUserRow extends RowDataPacket {
@@ -31,6 +32,7 @@ interface ReportedUserRow extends RowDataPacket {
 
 interface ContentAuthorRow extends RowDataPacket {
   author_id: string;
+  community_id: string;
 }
 
 interface ReportedCommunityRow extends RowDataPacket {
@@ -53,6 +55,7 @@ interface OwnReportRow extends RowDataPacket {
   reason: ReportReason;
   description: string | null;
   status: ReportStatus;
+  community_status: CommunityReportStatus | null;
   created_at: Date | string;
   withdrawn_at: Date | string | null;
 }
@@ -60,6 +63,7 @@ interface OwnReportRow extends RowDataPacket {
 interface WithdrawalRow extends RowDataPacket {
   reporter_id: string | null;
   status: ReportStatus;
+  community_status: CommunityReportStatus | null;
   withdrawn_at: Date | string | null;
 }
 
@@ -79,6 +83,10 @@ export interface OwnReportDto {
   reason: ReportReason;
   description: string | null;
   status: ReportStatus;
+  // The community moderators' review of a post or comment report
+  // (migration 036): open, approved (the content stays) or removed; null for
+  // a report only administrators review. Never who decided.
+  community_status: CommunityReportStatus | null;
   created_at: string;
   withdrawn_at: string | null;
 }
@@ -105,7 +113,7 @@ const OWN_REPORT_TARGET_LABEL_SQL = `CASE ur.target_type
 // The column list is the response's allow-list: nothing moderator-only is ever
 // selected, so nothing moderator-only can leak through a mapping mistake.
 const OWN_REPORT_SELECT_SQL = `SELECT ur.id, ur.target_type, ${OWN_REPORT_TARGET_LABEL_SQL},
-         ur.reason, ur.description, ur.status, ur.created_at, ur.withdrawn_at
+         ur.reason, ur.description, ur.status, ur.community_status, ur.created_at, ur.withdrawn_at
        FROM user_reports ur
        ${REPORT_TARGET_JOINS_SQL}`;
 
@@ -117,6 +125,7 @@ function toOwnReport(row: OwnReportRow): OwnReportDto {
     reason: row.reason,
     description: row.description,
     status: row.status,
+    community_status: row.community_status ?? null,
     created_at: new Date(row.created_at).toISOString(),
     withdrawn_at:
       row.withdrawn_at === null
@@ -141,6 +150,9 @@ interface ResolvedTarget {
   reportedUserId: string | null;
   targetAuthorId: string | null;
   reportedUsername: string | null;
+  // The community whose moderators review it: a post's, or a comment's
+  // post's. null for an account or community report: administrators only.
+  communityId: string | null;
 }
 
 // The same formats the API addresses each resource by in its routes.
@@ -210,12 +222,29 @@ export class ReportsService {
       if (existingReports[0]) {
         throw new ConflictException('An active report already exists');
       }
+      // A report the community's moderators closed stays closed: the same
+      // reporter cannot put the content back in the queue by reporting it
+      // again. Another reporter can; that is new information.
+      if (target.communityId) {
+        const [decided] = await connection.execute<ExistingReportRow[]>(
+          `SELECT id FROM user_reports
+           WHERE reporter_id = ? AND target_type = ? AND target_id = ?
+             AND community_status IN ('approved', 'removed')
+           LIMIT 1`,
+          [reporterId, target.type, target.id],
+        );
+        if (decided[0]) {
+          throw new ConflictException(
+            "The community's moderators have already reviewed your report of this content",
+          );
+        }
+      }
 
       await connection.execute<ResultSetHeader>(
         `INSERT INTO user_reports
          (id, reporter_id, reported_user_id, reason, description, context_type, context_id,
-          target_type, target_id, target_author_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          target_type, target_id, target_author_id, community_id, community_status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           reporterId,
@@ -227,6 +256,8 @@ export class ReportsService {
           target.type,
           target.id,
           target.targetAuthorId,
+          target.communityId,
+          target.communityId ? 'open' : null,
         ],
       );
 
@@ -326,7 +357,7 @@ export class ReportsService {
       transactionStarted = true;
 
       const [rows] = await connection.execute<WithdrawalRow[]>(
-        `SELECT reporter_id, status, withdrawn_at FROM user_reports
+        `SELECT reporter_id, status, community_status, withdrawn_at FROM user_reports
          WHERE id = ? LIMIT 1 FOR UPDATE`,
         [id],
       );
@@ -337,7 +368,12 @@ export class ReportsService {
       if (report.withdrawn_at !== null) {
         throw new ConflictException('Report is already withdrawn');
       }
-      if (report.status !== 'open') {
+      // Open at both levels: once a moderator of either has decided, there
+      // is nothing left to withdraw.
+      if (
+        report.status !== 'open' ||
+        (report.community_status ?? 'open') !== 'open'
+      ) {
         throw new ConflictException('Only an open report can be withdrawn');
       }
 
@@ -411,6 +447,7 @@ export class ReportsService {
       reportedUserId: user.id,
       targetAuthorId: null,
       reportedUsername: user.username,
+      communityId: null,
     };
   }
 
@@ -419,7 +456,8 @@ export class ReportsService {
     id: string,
     reporterId: string,
   ): Promise<ResolvedTarget> {
-    const authorId = await this.contentAuthor(type, id);
+    const { author_id: authorId, community_id: communityId } =
+      await this.contentAuthor(type, id);
     // chk_user_reports_not_self would also refuse this, with a worse message.
     if (authorId === reporterId) {
       throw new BadRequestException(`You cannot report your own ${type}`);
@@ -432,6 +470,7 @@ export class ReportsService {
       reportedUserId: authorId,
       targetAuthorId: authorId,
       reportedUsername: null,
+      communityId,
     };
   }
 
@@ -459,6 +498,7 @@ export class ReportsService {
       reportedUserId: null,
       targetAuthorId: null,
       reportedUsername: null,
+      communityId: null,
     };
   }
 
@@ -467,19 +507,23 @@ export class ReportsService {
     reportedUserId: string,
   ): Promise<void> {
     if (
-      (await this.contentAuthor(context.type, context.id)) !== reportedUserId
+      (await this.contentAuthor(context.type, context.id)).author_id !==
+      reportedUserId
     ) {
       throw new BadRequestException('Invalid report context');
     }
   }
 
+  // The content's author and community: a post's own, a comment's through
+  // its post.
   private async contentAuthor(
     type: ReportContextType,
     id: string,
-  ): Promise<string> {
-    const table = this.contextTable(type);
+  ): Promise<ContentAuthorRow> {
     const [rows] = await this.pool.execute<ContentAuthorRow[]>(
-      `SELECT author_id FROM ${table} WHERE id = ? LIMIT 1`,
+      type === 'post'
+        ? 'SELECT author_id, community_id FROM posts WHERE id = ? LIMIT 1'
+        : 'SELECT comments.author_id, posts.community_id FROM comments JOIN posts ON posts.id = comments.post_id WHERE comments.id = ? LIMIT 1',
       [id],
     );
     if (!rows[0]) {
@@ -487,10 +531,6 @@ export class ReportsService {
         type === 'post' ? 'Post not found' : 'Comment not found',
       );
     }
-    return rows[0].author_id;
-  }
-
-  private contextTable(contextType: ReportContextType): 'posts' | 'comments' {
-    return contextType === 'post' ? 'posts' : 'comments';
+    return rows[0];
   }
 }

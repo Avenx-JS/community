@@ -1,3 +1,7 @@
+import {
+  COMMUNITY_REPORT_STATUSES,
+  type CommunityReportStatus,
+} from './community-report-review';
 import { ApiProperty } from '@nestjs/swagger';
 import {
   REPORT_REASONS,
@@ -74,10 +78,21 @@ export class OwnReportResponse implements OwnReportDto {
   @ApiProperty({
     enum: REPORT_STATUSES,
     description:
-      'Where the report is in the moderation queue. The outcome is never ' +
+      "Where the report is in the platform administrators' queue. The outcome is never " +
       'disclosed beyond this.',
   })
   status!: ReportStatus;
+
+  @ApiProperty({
+    enum: COMMUNITY_REPORT_STATUSES,
+    nullable: true,
+    description:
+      "The community moderators' review of a post or comment report: open, " +
+      'approved (the content stays) or removed. null for an account or ' +
+      'community report, which only administrators review. Never says who ' +
+      'decided.',
+  })
+  community_status!: CommunityReportStatus | null;
 
   @ApiProperty({ format: 'date-time' })
   created_at!: string;
