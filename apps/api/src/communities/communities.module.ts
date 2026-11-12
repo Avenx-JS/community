@@ -14,6 +14,15 @@ import { CommunityRulesService } from './community-rules.service';
 import { CommunityStatsService } from './community-stats.service';
 import { NotificationPreferencesService } from './notification-preferences.service';
 import { SubscriptionsController } from './subscriptions.controller';
+import { CommunityDiscoveryService } from './community-discovery.service';
+import { CommunityFlairsService } from './community-flairs.service';
+import { CommunityJoinRequestsService } from './community-join-requests.service';
+import { CommunityModeratorInvitesService } from './community-moderator-invites.service';
+import {
+  CommunitySettingsController,
+  OwnModeratorInvitesController,
+  PostFlairController,
+} from './community-settings.controller';
 
 @Module({
   imports: [AuthModule, DatabaseModule],
@@ -21,6 +30,10 @@ import { SubscriptionsController } from './subscriptions.controller';
     CommunitiesService,
     CommunityBanPolicyService,
     CommunityBansService,
+    CommunityDiscoveryService,
+    CommunityFlairsService,
+    CommunityJoinRequestsService,
+    CommunityModeratorInvitesService,
     CommunityModerationLogService,
     CommunityRuleAcceptanceService,
     CommunityRulesService,
@@ -32,6 +45,9 @@ import { SubscriptionsController } from './subscriptions.controller';
     CommunityBansController,
     CommunityModerationLogController,
     CommunityRulesController,
+    CommunitySettingsController,
+    OwnModeratorInvitesController,
+    PostFlairController,
     SubscriptionsController,
   ],
   exports: [

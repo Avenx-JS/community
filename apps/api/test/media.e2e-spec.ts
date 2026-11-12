@@ -1,3 +1,4 @@
+import { COMMUNITY_COLUMNS } from '../src/communities/communities.service';
 import {
   afterEach,
   beforeEach,
@@ -34,7 +35,11 @@ import {
 } from '../src/media/media-sql';
 import { MEDIA_STORAGE } from '../src/media/storage/media-storage';
 import { NotificationsService } from '../src/notifications/notifications.service';
-import { POST_COLUMNS, REMOVAL_COLUMNS } from '../src/posts/posts.service';
+import {
+  POST_COLUMNS,
+  REMOVAL_COLUMNS,
+  POSTING_COMMUNITY_SQL,
+} from '../src/posts/posts.service';
 import { USER_PROFILE_SQL } from '../src/users/users.service';
 import { answerSavedFlags } from './fakes/saved-posts';
 import { answerVoteScores } from './fakes/vote-scores';
@@ -312,7 +317,7 @@ describe('Media (e2e)', () => {
       }
       if (
         sql.startsWith(
-          'SELECT id, creator_id, name, description, created_at, icon_media_id, banner_media_id FROM communities WHERE name = ?',
+          `SELECT ${COMMUNITY_COLUMNS}, icon_media_id, banner_media_id FROM communities WHERE name = ?`,
         )
       ) {
         return [
@@ -322,17 +327,25 @@ describe('Media (e2e)', () => {
               ...c,
               description: null,
               created_at: new Date('2026-01-01T00:00:00Z'),
+              visibility: 'public',
+              nsfw: 0,
+              allowed_post_types: 'text,link,media',
             })),
           [],
         ];
       }
 
       // Posts.
-      if (sql.startsWith('SELECT id FROM communities WHERE id = ?')) {
+      // The community a post goes to (values: author, community).
+      if (sql === POSTING_COMMUNITY_SQL) {
         return [
           communities
-            .filter((c) => c.id === values[0] && !c.hidden)
-            .map(({ id }) => ({ id })),
+            .filter((c) => c.id === values[1] && !c.hidden)
+            .map(() => ({
+              visibility: 'public',
+              allowed_post_types: 'text,link,media',
+              member: 1,
+            })),
           [],
         ];
       }

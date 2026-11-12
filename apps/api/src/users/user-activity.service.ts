@@ -6,10 +6,7 @@ import {
 } from '@nestjs/common';
 import type { Pool, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
-import {
-  visibleCommunityColumnsSql,
-  visibleCommunitySql,
-} from '../common/community-visibility';
+import { readableCommunitySql } from '../common/community-visibility';
 import { loadVoteScores } from '../votes/vote-scores';
 import { UserBlockPolicyService } from './user-block-policy.service';
 import {
@@ -33,14 +30,21 @@ import type {
 //
 // What a listing shows is exactly what a reader of the community could see:
 // nothing from a deleted or suspended community, nothing removed by a
-// moderator, and no comment on a removed post.
+// moderator, and no comment on a removed post. And what this viewer may see:
+// nothing from a private community the viewer is not a member of (not even
+// that the person takes part in it), nothing nsfw unless the viewer's
+// show_nsfw preference is on. Each statement binds the viewer (null when
+// anonymous) once, right after the account.
+
+// A profile spans communities: nsfw ones only for viewers who opted in.
+const PROFILE_CONTENT = { nsfw: true };
 
 export const USER_ID_BY_USERNAME_SQL =
   'SELECT id FROM users WHERE username = ? AND deleted_at IS NULL LIMIT 1';
 
 // Served by idx_posts_author_created (author_id, created_at, id): rows come
 // in index order, so neither direction needs a filesort.
-const USER_POSTS_WHERE = `WHERE author_id = ? AND removed_at IS NULL AND ${visibleCommunitySql('posts.community_id')}`;
+const USER_POSTS_WHERE = `WHERE author_id = ? AND removed_at IS NULL AND ${readableCommunitySql('posts.community_id', PROFILE_CONTENT)}`;
 
 export const userPostsSql = (sort: UserActivitySort): string =>
   `SELECT ${POST_COLUMNS} FROM posts ${USER_POSTS_WHERE} ORDER BY ${order(sort, 'created_at', 'id')} LIMIT ? OFFSET ?`;
@@ -60,7 +64,7 @@ const USER_COMMENTS_FROM = `FROM comments c
        WHERE c.author_id = ?
          AND c.removed_at IS NULL
          AND p.removed_at IS NULL
-         AND ${visibleCommunityColumnsSql('co')}`;
+         AND ${readableCommunitySql('p.community_id', PROFILE_CONTENT)}`;
 
 export const userCommentsSql = (sort: UserActivitySort): string =>
   `SELECT c.id, c.post_id, c.content, c.created_at, c.edited_at,
@@ -89,7 +93,7 @@ const USER_COMMUNITY_IDS = `(
          WHERE c.author_id = ? AND c.removed_at IS NULL AND p.removed_at IS NULL
        ) activity
        JOIN communities co ON co.id = activity.community_id
-       WHERE ${visibleCommunityColumnsSql('co')}`;
+       WHERE ${readableCommunitySql('co.id', PROFILE_CONTENT)}`;
 
 // By name: deterministic, and unlike a recency order it does not reveal when
 // the person was last active there. The strongest role wins.
@@ -179,12 +183,14 @@ export class UserActivityService {
     const userId = await this.resolve(username, viewerId);
     const { page, limit, offset } = paging(query);
     const sort = query.sort ?? 'new';
+    const viewer = viewerId ?? null;
     const [rows] = await this.pool.execute<PostRow[]>(userPostsSql(sort), [
       userId,
+      viewer,
       limit,
       offset,
     ]);
-    const total = await this.count(USER_POSTS_COUNT_SQL, [userId]);
+    const total = await this.count(USER_POSTS_COUNT_SQL, [userId, viewer]);
     return {
       items: await toPostDtos(this.pool, rows, viewerId),
       page,
@@ -201,11 +207,12 @@ export class UserActivityService {
     const userId = await this.resolve(username, viewerId);
     const { page, limit, offset } = paging(query);
     const sort = query.sort ?? 'new';
+    const viewer = viewerId ?? null;
     const [rows] = await this.pool.execute<UserCommentRow[]>(
       userCommentsSql(sort),
-      [userId, limit, offset],
+      [userId, viewer, limit, offset],
     );
-    const total = await this.count(USER_COMMENTS_COUNT_SQL, [userId]);
+    const total = await this.count(USER_COMMENTS_COUNT_SQL, [userId, viewer]);
     const scores = await loadVoteScores(
       this.pool,
       'comment',
@@ -235,7 +242,7 @@ export class UserActivityService {
   ): Promise<Page<UserCommunityDto>> {
     const userId = await this.resolve(username, viewerId);
     const { page, limit, offset } = paging(query);
-    const activity = [userId, userId, userId, userId];
+    const activity = [userId, userId, userId, userId, viewerId ?? null];
     const [rows] = await this.pool.execute<UserCommunityRow[]>(
       USER_COMMUNITIES_SQL,
       [userId, userId, ...activity, limit, offset],
@@ -275,7 +282,7 @@ export class UserActivityService {
     return user.id;
   }
 
-  private async count(sql: string, values: string[]): Promise<number> {
+  private async count(sql: string, values: (string | null)[]): Promise<number> {
     const [rows] = await this.pool.execute<TotalRow[]>(sql, values);
     return Number(rows[0]?.total ?? 0);
   }

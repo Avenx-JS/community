@@ -338,7 +338,7 @@ describe('AdminCommunitiesService', () => {
 
   describe('update', () => {
     const update = (body: Partial<AdminUpdateCommunityDto>) =>
-      service.update('c-1', body, 'admin-id');
+      service.update('c-1', body as AdminUpdateCommunityDto, 'admin-id');
 
     beforeEach(() => {
       detailRow = {

@@ -13,7 +13,6 @@ import {
   Validate,
 } from 'class-validator';
 import { PlainTextConstraint } from '../../common/safe-text.constraint';
-import { UpdateCommunityDto } from '../../communities/dto/update-community.dto';
 
 export const ADMIN_COMMUNITY_STATES = [
   'any',
@@ -85,11 +84,28 @@ export class ListAdminCommunitiesDto {
   sort: 'new' | 'oldest' = 'new';
 }
 
-// Exactly the creator's PATCH /communities/:name body, so the two cannot drift:
-// description only, trimmed, at most 16383 characters, "" clears it, at least
-// one field required. name, rules and every other property are rejected by
-// the global pipe's forbidNonWhitelisted.
-export class AdminUpdateCommunityDto extends UpdateCommunityDto {}
+// The description only, validated as the creator's PATCH /communities/:name
+// validates it: trimmed, at most 16383 characters, "" clears it. Narrower
+// than the creator's body on purpose: an administrator corrects content, and
+// never changes who may see or post in a community (visibility, nsfw,
+// allowed_post_types are the creator's). name, rules and every other
+// property are rejected by the global pipe's forbidNonWhitelisted.
+export class AdminUpdateCommunityDto {
+  /**
+   * Plain-text description, at most 16383 characters after trimming. An
+   * empty string clears it.
+   */
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsString()
+  @MaxLength(16383)
+  @Validate(PlainTextConstraint)
+  description!: string;
+}
+
+// What an administrator may edit: AdminUpdateCommunityDto's fields.
+export const ADMIN_EDITABLE_COMMUNITY_FIELDS = ['description'] as const;
 
 const trim = ({ value }: { value: unknown }) =>
   typeof value === 'string' ? value.trim() : value;

@@ -1,4 +1,6 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { POSTING_COMMUNITY_SQL } from '../posts/posts.service';
+import { COMMUNITY_ACCESS_SQL } from '../common/community-visibility';
 import { Test } from '@nestjs/testing';
 import {
   createRulesStore,
@@ -119,13 +121,22 @@ describe('Rule acceptance enforcement', () => {
         const id = communityNames[values[0] as string];
         return rows(id ? [{ id }] : []);
       }
-      if (
-        sql ===
-        'SELECT id FROM communities WHERE id = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1'
-      ) {
+      if (sql === POSTING_COMMUNITY_SQL) {
         return rows(
-          rules.communities.has(values[0] as string) ? [{ id: values[0] }] : [],
+          rules.communities.has(values[1] as string)
+            ? [
+                {
+                  visibility: 'public',
+                  allowed_post_types: 'text,link,media',
+                  member: 1,
+                },
+              ]
+            : [],
         );
+      }
+      // Subscribing reads the community's visibility: public here.
+      if (sql === COMMUNITY_ACCESS_SQL) {
+        return rows([{ visibility: 'public', member: 0 }]);
       }
       if (sql.startsWith('INSERT INTO community_subscriptions')) {
         db.subscriptions.push(values as [string, string]);

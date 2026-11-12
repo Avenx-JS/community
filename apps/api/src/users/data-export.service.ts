@@ -108,6 +108,24 @@ export const EXPORT_SECTIONS: Array<[string, string]> = [
     'media',
     'SELECT id, purpose, kind, mime_type, size_bytes, width, height, created_at FROM media WHERE uploader_id = ? AND released_at IS NULL ORDER BY created_at',
   ],
+  // Community settings (migration 038). Who decided a request is the
+  // moderator's data, never exported.
+  [
+    'join_requests',
+    'SELECT c.name AS community, r.status, r.message, r.created_at, r.decided_at FROM community_join_requests r JOIN communities c ON c.id = r.community_id WHERE r.user_id = ? ORDER BY r.created_at',
+  ],
+  [
+    'moderator_invitations',
+    'SELECT c.name AS community, i.created_at FROM community_moderator_invites i JOIN communities c ON c.id = i.community_id WHERE i.user_id = ? ORDER BY i.created_at',
+  ],
+  [
+    'user_flairs',
+    'SELECT c.name AS community, f.text AS flair, uf.updated_at FROM community_user_flairs uf JOIN communities c ON c.id = uf.community_id JOIN community_flairs f ON f.id = uf.flair_id WHERE uf.user_id = ? ORDER BY c.name',
+  ],
+  [
+    'muted_communities',
+    'SELECT c.name AS community, m.created_at FROM community_mutes m JOIN communities c ON c.id = m.community_id WHERE m.user_id = ? ORDER BY m.created_at',
+  ],
   [
     'sessions',
     'SELECT created_at, last_used_at, ip_prefix, user_agent FROM auth_sessions WHERE user_id = ? ORDER BY created_at',

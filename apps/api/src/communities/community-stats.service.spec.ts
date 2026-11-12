@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach } from '@jest/globals';
-import { NotFoundException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { MYSQL_POOL } from '../auth/auth.service';
 import {
@@ -13,6 +13,7 @@ import {
   MEMBER_COUNT_SQL,
   MODERATOR_COUNT_SQL,
   POST_STATS_SQL,
+  STATS_COMMUNITY_SQL,
   WINDOW_START,
 } from './community-stats.service';
 
@@ -20,6 +21,8 @@ const community = {
   id: 'community-1',
   creator_id: 'creator-id',
   created_at: new Date('2026-01-14T09:12:00.000Z'),
+  access_visibility: 'public',
+  access_member: 0,
 };
 
 describe('CommunityStatsService', () => {
@@ -55,9 +58,12 @@ describe('CommunityStatsService', () => {
     await service.get('gardening');
 
     expect(queries[0]).toEqual({
-      sql: 'SELECT id, creator_id, created_at FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1',
-      values: ['gardening'],
+      sql: STATS_COMMUNITY_SQL,
+      values: [null, 'gardening'],
     });
+    expect(STATS_COMMUNITY_SQL).toContain(
+      'WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1',
+    );
     expect(queries.slice(1)).toEqual([
       { sql: MEMBER_COUNT_SQL, values: ['community-1'] },
       { sql: MODERATOR_COUNT_SQL, values: ['community-1', 'creator-id'] },
@@ -149,6 +155,29 @@ describe('CommunityStatsService', () => {
       comments_last_7_days: 0,
     });
     expect(Object.keys(stats)).toContain('last_post_at');
+  });
+
+  // A private community's figures are its members' (migration 038).
+  it('answers a non-member of a private community 403 without aggregating', async () => {
+    answers.set('community', [
+      { ...community, access_visibility: 'private', access_member: 0 },
+    ]);
+
+    await expect(service.get('gardening', 'outsider')).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(queries).toHaveLength(1);
+    expect(queries[0].values).toEqual(['outsider', 'gardening']);
+  });
+
+  it('serves a member of a private community', async () => {
+    answers.set('community', [
+      { ...community, access_visibility: 'private', access_member: 1 },
+    ]);
+
+    await expect(service.get('gardening', 'member')).resolves.toMatchObject({
+      created_at: '2026-01-14T09:12:00.000Z',
+    });
   });
 
   it('answers 404 for an unknown or deleted community without aggregating', async () => {

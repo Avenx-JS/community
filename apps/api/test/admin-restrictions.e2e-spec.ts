@@ -1,3 +1,4 @@
+import { answerCommunityAccess } from './fakes/community-access';
 import {
   afterEach,
   beforeAll,
@@ -231,6 +232,13 @@ describe('Admin restrictions API (e2e)', () => {
         'SELECT id FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1'
       ) {
         return result(values[0] === 'general' ? [{ id: 'community-1' }] : []);
+      }
+      // Subscribing reads the community's visibility (migration 038).
+      const access = answerCommunityAccess(sql, values, [
+        { id: 'community-1' },
+      ]);
+      if (access) {
+        return Promise.resolve(access);
       }
       if (sql.startsWith('INSERT INTO community_subscriptions')) {
         return result({ affectedRows: 1 });

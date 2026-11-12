@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Logger,
@@ -11,7 +12,7 @@ import { CommunityModerationLogService } from '../communities/community-moderati
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { COMMUNITY_NEW_POST_RECIPIENTS_SQL } from '../communities/community-notification-recipients';
 import { NotificationsService } from '../notifications/notifications.service';
-import { PostsService } from './posts.service';
+import { PostsService, POSTING_COMMUNITY_SQL } from './posts.service';
 import { RELEASE_POST_MEDIA_SQL } from '../media/media-sql';
 
 // Every community's rules count as accepted unless a test says otherwise.
@@ -105,13 +106,19 @@ describe('PostsService', () => {
     expect(queries[0].sql).toContain(
       'ORDER BY (pinned_at IS NULL), pinned_at DESC, created_at DESC, id DESC LIMIT ? OFFSET ?',
     );
-    expect(queries[0].values).toEqual(['community-1', 1, 1]);
-    expect(queries[1].values).toEqual(['community-1']);
+    expect(queries[0].values).toEqual(['community-1', null, 1, 1]);
+    expect(queries[1].values).toEqual(['community-1', null]);
   });
 
   it('creates a post with the supplied author and community', async () => {
     results = [
-      [{ id: 'community-1' }],
+      [
+        {
+          visibility: 'public',
+          allowed_post_types: 'text,link,media',
+          member: 1,
+        },
+      ],
       [],
       [
         {
@@ -182,6 +189,12 @@ describe('PostsService.create notifications', () => {
     content: ' World ',
     community_id: 'community-1',
   };
+  // The community POST /posts reads (migration 038).
+  let postingCommunity: {
+    visibility: string;
+    allowed_post_types: string;
+    member: number;
+  };
   const createdPost = {
     id: 'post-new',
     title: 'Hello',
@@ -227,6 +240,11 @@ describe('PostsService.create notifications', () => {
   }
 
   beforeEach(() => {
+    postingCommunity = {
+      visibility: 'public',
+      allowed_post_types: 'text,link,media',
+      member: 1,
+    };
     queries = [];
     recipientCount = 2;
     failFanOut = false;
@@ -237,9 +255,9 @@ describe('PostsService.create notifications', () => {
       release: jest.fn(),
       execute: (sql, values) => {
         queries.push({ sql, values });
-        if (sql.startsWith('SELECT id FROM communities')) {
+        if (sql === POSTING_COMMUNITY_SQL) {
           return Promise.resolve([
-            values[0] === 'community-1' ? [{ id: 'community-1' }] : [],
+            values[1] === 'community-1' ? [postingCommunity] : [],
             [],
           ]);
         }
@@ -296,6 +314,7 @@ describe('PostsService.create notifications', () => {
       score: 0,
       saved: false,
       media: null,
+      flair: null,
     });
     expect(
       queries.find((query) => query.sql.startsWith('INSERT INTO posts'))
@@ -395,6 +414,61 @@ describe('PostsService.create notifications', () => {
     expect(connection.release).toHaveBeenCalledTimes(1);
   });
 
+  // Migration 038: who may post where, and what.
+  it.each(['restricted', 'private'])(
+    'takes posts in a %s community from members only',
+    async (visibility) => {
+      postingCommunity = { ...postingCommunity, visibility, member: 1 };
+      const service = await createService();
+      await expect(service.create(input, 'author')).resolves.toBeDefined();
+    },
+  );
+
+  it('answers a non-member 403 membership_required in a restricted community, writing nothing', async () => {
+    postingCommunity = {
+      ...postingCommunity,
+      visibility: 'restricted',
+      member: 0,
+    };
+    const service = await createService();
+
+    await expect(service.create(input, 'author')).rejects.toMatchObject({
+      status: 403,
+      response: { reason: 'membership_required' },
+    });
+    expect(queries.some((q) => q.sql.startsWith('INSERT INTO posts'))).toBe(
+      false,
+    );
+  });
+
+  it('answers a non-member of a private community 404, as if it were not there', async () => {
+    postingCommunity = {
+      ...postingCommunity,
+      visibility: 'private',
+      member: 0,
+    };
+    const service = await createService();
+
+    await expect(service.create(input, 'author')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+  });
+
+  it('refuses a post type the community does not accept with 400', async () => {
+    postingCommunity = {
+      ...postingCommunity,
+      allowed_post_types: 'link,media',
+    };
+    const service = await createService();
+
+    await expect(service.create(input, 'author')).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(queries.some((q) => q.sql.startsWith('INSERT INTO posts'))).toBe(
+      false,
+    );
+  });
+
   it('keeps its 404 and releases the connection on it', async () => {
     const service = await createService();
 
@@ -402,9 +476,7 @@ describe('PostsService.create notifications', () => {
       service.create({ ...input, community_id: 'unknown' }, 'author'),
     ).rejects.toThrow(new NotFoundException('Community not found'));
 
-    expect(queries.map((query) => query.sql)).toEqual([
-      'SELECT id FROM communities WHERE id = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1',
-    ]);
+    expect(queries.map((query) => query.sql)).toEqual([POSTING_COMMUNITY_SQL]);
     expect(connection.rollback).toHaveBeenCalledTimes(1);
     expect(connection.release).toHaveBeenCalledTimes(1);
   });
@@ -604,7 +676,8 @@ describe('PostsService.findAll ordering', () => {
     expect(queries[0].sql).toMatch(
       / ORDER BY \(pinned_at IS NULL\), pinned_at DESC, created_at DESC, id DESC LIMIT \? OFFSET \?$/,
     );
-    expect(queries[0].values).toEqual(['community-1', 2, 4]);
+    // The community, then the viewer (anonymous) of the readability check.
+    expect(queries[0].values).toEqual(['community-1', null, 2, 4]);
     // The total counts pinned and unpinned posts alike.
     expect(queries[1].sql).not.toContain('pinned_at');
   });
@@ -616,7 +689,7 @@ describe('PostsService.findAll ordering', () => {
       / ORDER BY created_at DESC, id DESC LIMIT \? OFFSET \?$/,
     );
     expect(queries[0].sql).not.toContain('pinned_at IS NULL');
-    expect(queries[0].values).toEqual([20, 0]);
+    expect(queries[0].values).toEqual([null, 20, 0]);
   });
 
   it('returns pinned_at and pinned_by on every post, null when unpinned', async () => {

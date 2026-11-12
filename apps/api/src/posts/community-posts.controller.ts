@@ -40,6 +40,7 @@ export class CommunityPostsController {
   @ApiOkResponse({ type: PostListResponse })
   @ApiErrorResponses({
     400: 'Invalid community name or query parameters.',
+    403: 'The community is private and the caller is not a member (`{ "reason": "private_community" }`).',
     404: 'Community not found, deleted or suspended.',
   })
   async findAll(
@@ -47,7 +48,10 @@ export class CommunityPostsController {
     @Query() query: ListCommunityPostsDto,
     @Req() request?: OptionallyAuthenticatedRequest,
   ) {
-    const communityId = await this.communities.resolveListedId(name);
+    const communityId = await this.communities.resolveListedId(
+      name,
+      request?.user?.id,
+    );
     return this.posts.findAll(
       { ...query, community_id: communityId },
       request?.user?.id,

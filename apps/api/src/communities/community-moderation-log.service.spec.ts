@@ -277,6 +277,56 @@ describe('CommunityModerationLogService', () => {
         },
         { reports: 1 },
       ],
+      [
+        {
+          ...base,
+          action: 'moderator_invited',
+          targetType: 'user',
+          targetId: 'user-2',
+          metadata: { username: 'sam_42' },
+        },
+        { username: 'sam_42' },
+      ],
+      [
+        {
+          ...base,
+          action: 'moderator_invite_revoked',
+          targetType: 'user',
+          targetId: 'user-2',
+          metadata: { username: 'sam_42' },
+        },
+        { username: 'sam_42' },
+      ],
+      [
+        {
+          ...base,
+          action: 'moderator_invite_declined',
+          targetType: 'user',
+          targetId: 'user-2',
+          metadata: { username: 'sam_42' },
+        },
+        { username: 'sam_42' },
+      ],
+      [
+        {
+          ...base,
+          action: 'join_request_approved',
+          targetType: 'user',
+          targetId: 'user-2',
+          metadata: { username: 'sam_42' },
+        },
+        { username: 'sam_42' },
+      ],
+      [
+        {
+          ...base,
+          action: 'join_request_denied',
+          targetType: 'user',
+          targetId: 'user-2',
+          metadata: { username: 'sam_42' },
+        },
+        { username: 'sam_42' },
+      ],
     ];
 
     it('covers every declared action', () => {
@@ -301,6 +351,31 @@ describe('CommunityModerationLogService', () => {
         );
       },
     );
+
+    // Migration 038: who could see the community, from when.
+    it('keeps the new visibility of a settings change, and only an enum value', () => {
+      expect(
+        buildCommunityModerationMetadata({
+          ...base,
+          action: 'community_updated',
+          targetType: 'community',
+          targetId: 'community-1',
+          metadata: { fields: 'visibility,nsfw', visibility: 'private' },
+        }),
+      ).toEqual({ fields: 'visibility,nsfw', visibility: 'private' });
+      expect(() =>
+        buildCommunityModerationMetadata({
+          ...base,
+          action: 'community_updated',
+          targetType: 'community',
+          targetId: 'community-1',
+          metadata: {
+            fields: 'visibility',
+            visibility: 'secret',
+          } as unknown as { fields: string },
+        }),
+      ).toThrow(TypeError);
+    });
 
     it('never stores a submitted content body, even alongside a reason', () => {
       const metadata = buildCommunityModerationMetadata({

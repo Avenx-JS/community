@@ -104,6 +104,9 @@ export function ApiAuthenticated(options: AuthenticatedOptions = {}) {
 
 const errorDecorators = {
   400: ApiBadRequestResponse,
+  // For a public route's 403; an authenticated route documents its 403
+  // through ApiAuthenticated({ forbidden }).
+  403: ApiForbiddenResponse,
   404: ApiNotFoundResponse,
   409: ApiConflictResponse,
   413: ApiPayloadTooLargeResponse,

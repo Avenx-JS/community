@@ -92,6 +92,10 @@ function makePool() {
     created_at: day(index + 1),
     deleted_at,
     suspended_at,
+    // The settings of migration 038, as a fresh community has them.
+    visibility: 'public',
+    nsfw: 0,
+    allowed_post_types: 'text,link,media',
   }));
   const post = (
     id: string,
@@ -307,7 +311,8 @@ function makePool() {
     }
     if (flat.includes('FROM posts WHERE MATCH (posts.title, posts.content)')) {
       const terms = String(values[termsAt]);
-      const filters = contentFilters(flat, values, termsAt + 1);
+      // After the term: the viewer of the community predicate, then filters.
+      const filters = contentFilters(flat, values, termsAt + 2);
       const rows = posts
         .map((row) => ({
           ...row,
@@ -336,7 +341,7 @@ function makePool() {
     }
     if (flat.includes('FROM comments c JOIN posts p ON p.id = c.post_id')) {
       const terms = String(values[termsAt]);
-      const filters = contentFilters(flat, values, termsAt + 1);
+      const filters = contentFilters(flat, values, termsAt + 2);
       const rows = comments
         .map((row) => {
           const parent = postOf(row.post_id);
@@ -357,9 +362,9 @@ function makePool() {
               row.removed_at === null) &&
             (!flat.includes('p.removed_at IS NULL') ||
               row.parent.removed_at === null) &&
-            (!flat.includes('co.deleted_at IS NULL') ||
+            (!flat.includes('communities.deleted_at IS NULL') ||
               row.home.deleted_at === null) &&
-            (!flat.includes('co.suspended_at IS NULL') ||
+            (!flat.includes('communities.suspended_at IS NULL') ||
               row.home.suspended_at === null) &&
             (filters.community === undefined ||
               row.parent.community_id === filters.community) &&
@@ -502,6 +507,7 @@ describe('Search (e2e)', () => {
           'score',
           'saved',
           'media',
+          'flair',
         ].sort(),
       );
     });
@@ -516,6 +522,9 @@ describe('Search (e2e)', () => {
           name: 'pets',
           description: 'All about kitten and puppy care',
           created_at: day(1),
+          visibility: 'public',
+          nsfw: false,
+          allowed_post_types: ['text', 'link', 'media'],
         },
       ]);
     });

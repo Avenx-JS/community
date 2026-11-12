@@ -1,3 +1,4 @@
+import { POSTING_COMMUNITY_SQL } from '../src/posts/posts.service';
 import {
   afterEach,
   beforeEach,
@@ -277,6 +278,24 @@ describe('Post endpoints (e2e)', () => {
             sql.includes('deleted_at IS NULL') && deletedCommunities.has(id)
           );
           return [communities.includes(id) && live ? [{ id }] : [], []];
+        }
+        // The community a post goes to (migration 038): public, all post
+        // types. Values: the author, the community.
+        if (sql === POSTING_COMMUNITY_SQL) {
+          const id = values[1] as string;
+          const live = !deletedCommunities.has(id);
+          return [
+            communities.includes(id) && live
+              ? [
+                  {
+                    visibility: 'public',
+                    allowed_post_types: 'text,link,media',
+                    member: 1,
+                  },
+                ]
+              : [],
+            [],
+          ];
         }
         if (sql.startsWith('INSERT INTO posts')) {
           const [id, title, content, type, authorId, communityId] = values as [
@@ -771,6 +790,7 @@ describe('Post endpoints (e2e)', () => {
           'score',
           'saved',
           'media',
+          'flair',
           'title',
           'type',
         ].sort(),
@@ -1381,6 +1401,7 @@ describe('Post endpoints (e2e)', () => {
           score: 0,
           saved: false,
           media: null,
+          flair: null,
         });
         expect(JSON.stringify(response.body)).not.toMatch(
           /email|password_hash/,
@@ -1702,6 +1723,7 @@ describe('Post endpoints (e2e)', () => {
         score: 0,
         saved: false,
         media: null,
+        flair: null,
       });
       expect(stored('post-1')).toMatchObject({
         title: 'Corrected',

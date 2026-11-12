@@ -152,7 +152,13 @@ describe('Saved posts (e2e)', () => {
         return Promise.resolve([{ affectedRows: before - saves.length }, []]);
       }
       if (sql === savedPostsSql('new') || sql === savedPostsSql('oldest')) {
-        const [userId, limit, offset] = values as [string, number, number];
+        // Values: the caller, the caller again (read access), limit, offset.
+        const [userId, , limit, offset] = values as [
+          string,
+          string,
+          number,
+          number,
+        ];
         const direction = sql === savedPostsSql('oldest') ? 1 : -1;
         const rows = listed(userId, sql)
           .sort(
@@ -378,6 +384,7 @@ describe('Saved posts (e2e)', () => {
           score: 0,
           saved: true,
           media: null,
+          flair: null,
         },
         saved_at: '2026-11-01T08:02:00.000Z',
       });

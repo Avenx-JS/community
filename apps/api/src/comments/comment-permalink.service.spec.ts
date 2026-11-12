@@ -1,7 +1,7 @@
 import { describe, expect, it, jest } from '@jest/globals';
 import { NotFoundException } from '@nestjs/common';
 import type { Pool } from 'mysql2/promise';
-import { visibleCommunitySql } from '../common/community-visibility';
+import { readableCommunitySql } from '../common/community-visibility';
 import { REMOVED_CONTENT_REVIEWER_SQL } from '../common/removed-content';
 import type { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import type { NotificationsService } from '../notifications/notifications.service';
@@ -156,8 +156,10 @@ describe('GET /comments/:id', () => {
     expect(PERMALINK_COMMENT_SQL).toContain(
       'INNER JOIN posts ON posts.id = comments.post_id',
     );
+    // Viewer-aware (migration 038): a private community's comments are its
+    // members'.
     expect(PERMALINK_COMMENT_SQL).toContain(
-      visibleCommunitySql('posts.community_id'),
+      readableCommunitySql('posts.community_id'),
     );
     const { service } = harness(CHAIN, { communityHidden: true });
     await expect(service.findPermalink('c-3')).rejects.toBeInstanceOf(

@@ -12,7 +12,7 @@ import type {
 } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { escapeLikeSearch } from '../common/like-search';
-import { EDITABLE_COMMUNITY_FIELDS } from '../communities/community-moderation-log.service';
+import { ADMIN_EDITABLE_COMMUNITY_FIELDS } from './dto/admin-communities.dto';
 import { AuditLogService } from './audit-log.service';
 import type {
   AdminCommunityState,
@@ -272,7 +272,7 @@ export class AdminCommunitiesService {
     const assignments: string[] = [];
     const values: (string | null)[] = [];
     const fields: string[] = [];
-    for (const field of EDITABLE_COMMUNITY_FIELDS) {
+    for (const field of ADMIN_EDITABLE_COMMUNITY_FIELDS) {
       const value = changes[field];
       if (value !== undefined) {
         assignments.push(`${field} = ?`);

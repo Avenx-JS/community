@@ -180,7 +180,12 @@ CREATE TABLE community_moderation_actions (
         'community_updated',
         'community_deleted',
         'report_approved',
-        'report_removed'
+        'report_removed',
+        'moderator_invited',
+        'moderator_invite_revoked',
+        'moderator_invite_declined',
+        'join_request_approved',
+        'join_request_denied'
     ) NOT NULL,
     target_type ENUM('post', 'comment', 'user', 'rule_document', 'community') NOT NULL,
     target_id VARCHAR(36) NOT NULL,
@@ -789,6 +794,90 @@ CREATE TABLE data_exports (
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+-- Community settings (038_add_community_settings).
+ALTER TABLE communities
+  ADD COLUMN visibility ENUM('public', 'restricted', 'private') NOT NULL DEFAULT 'public',
+  ADD COLUMN nsfw BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN allowed_post_types SET('text', 'link', 'media') NOT NULL DEFAULT 'text,link,media';
+
+CREATE TABLE community_join_requests (
+    community_id VARCHAR(36) NOT NULL,
+    user_id VARCHAR(36) NOT NULL,
+    status ENUM('pending', 'approved', 'denied') NOT NULL DEFAULT 'pending',
+    message VARCHAR(500) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    decided_at TIMESTAMP NULL DEFAULT NULL,
+    decided_by VARCHAR(36) NULL,
+    PRIMARY KEY (community_id, user_id),
+    INDEX idx_community_join_requests_queue (community_id, status, created_at),
+    INDEX idx_community_join_requests_user (user_id),
+    CONSTRAINT fk_community_join_requests_community
+        FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE,
+    CONSTRAINT fk_community_join_requests_user
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_community_join_requests_decided_by
+        FOREIGN KEY (decided_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE community_moderator_invites (
+    community_id VARCHAR(36) NOT NULL,
+    user_id VARCHAR(36) NOT NULL,
+    invited_by VARCHAR(36) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (community_id, user_id),
+    INDEX idx_community_moderator_invites_user (user_id, created_at),
+    CONSTRAINT fk_community_moderator_invites_community
+        FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE,
+    CONSTRAINT fk_community_moderator_invites_user
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_community_moderator_invites_invited_by
+        FOREIGN KEY (invited_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE community_flairs (
+    id VARCHAR(36) PRIMARY KEY,
+    community_id VARCHAR(36) NOT NULL,
+    kind ENUM('post', 'user') NOT NULL,
+    text VARCHAR(64) NOT NULL,
+    background_color CHAR(7) NULL,
+    mod_only BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_community_flairs_text (community_id, kind, text),
+    CONSTRAINT fk_community_flairs_community
+        FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE
+);
+
+ALTER TABLE posts
+  ADD COLUMN flair_id VARCHAR(36) NULL,
+  ADD CONSTRAINT fk_posts_flair FOREIGN KEY (flair_id) REFERENCES community_flairs(id) ON DELETE SET NULL;
+
+CREATE TABLE community_user_flairs (
+    community_id VARCHAR(36) NOT NULL,
+    user_id VARCHAR(36) NOT NULL,
+    flair_id VARCHAR(36) NOT NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (community_id, user_id),
+    INDEX idx_community_user_flairs_flair (flair_id),
+    CONSTRAINT fk_community_user_flairs_community
+        FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE,
+    CONSTRAINT fk_community_user_flairs_user
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_community_user_flairs_flair
+        FOREIGN KEY (flair_id) REFERENCES community_flairs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE community_mutes (
+    user_id VARCHAR(36) NOT NULL,
+    community_id VARCHAR(36) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, community_id),
+    INDEX idx_community_mutes_community (community_id),
+    CONSTRAINT fk_community_mutes_user
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_community_mutes_community
+        FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE
+);
+
 CREATE TABLE schema_migrations (
     version VARCHAR(64) PRIMARY KEY,
     applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -832,4 +921,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('034_add_content_ranking'),
     ('035_create_media'),
     ('036_add_community_report_review'),
-    ('037_add_account_settings');
+    ('037_add_account_settings'),
+    ('038_add_community_settings');

@@ -57,6 +57,13 @@ export const DELETE_PRIVATE_STATE_SQL = [
   'DELETE FROM email_changes WHERE user_id = ?',
   'DELETE FROM user_preferences WHERE user_id = ?',
   'DELETE FROM data_exports WHERE user_id = ?',
+  // Community settings (migration 038): the account's join requests,
+  // moderator invitations, user flairs and mutes. Anonymising would not fire
+  // their cascades, and a deleted account can neither join nor moderate.
+  'DELETE FROM community_join_requests WHERE user_id = ?',
+  'DELETE FROM community_moderator_invites WHERE user_id = ?',
+  'DELETE FROM community_user_flairs WHERE user_id = ?',
+  'DELETE FROM community_mutes WHERE user_id = ?',
   // The avatar and uploads never posted are released (migration 035); the
   // sweep deletes them. Files in the account's posts stay with the posts.
   ...RELEASE_ACCOUNT_MEDIA_SQL,

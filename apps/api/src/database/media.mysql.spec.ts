@@ -44,7 +44,7 @@ const snapshot = readFileSync(
 // The snapshot with 035 undone: its appended block and the version.
 const preceding = snapshot
   .replace(
-    /-- Uploaded media and profile images \(035_create_media\)\.[\s\S]*?(?=CREATE TABLE schema_migrations)/,
+    /-- Uploaded media and profile images \(035_create_media\)\.\r?\n[\s\S]*?(?=-- [^\n]*\(\d{3}_[a-z_]+\)\.\r?\n|CREATE TABLE schema_migrations)/,
     '',
   )
   .replace(/,\r?\n\s*\('035_create_media'\)/, '');
@@ -255,11 +255,15 @@ integration('media (MySQL)', () => {
       const bytes = await readFile(join(directory, String(row.storage_key)));
       expect(bytes.includes(Buffer.from('Secret Phone'))).toBe(false);
 
-      expect(await rows(VISIBLE_MEDIA_SQL, [upload.id, 'alice'])).toHaveLength(
-        1,
-      );
-      expect(await rows(VISIBLE_MEDIA_SQL, [upload.id, null])).toHaveLength(0);
-      expect(await rows(VISIBLE_MEDIA_SQL, [upload.id, 'bob'])).toHaveLength(0);
+      expect(
+        await rows(VISIBLE_MEDIA_SQL, [upload.id, 'alice', 'alice']),
+      ).toHaveLength(1);
+      expect(
+        await rows(VISIBLE_MEDIA_SQL, [upload.id, null, null]),
+      ).toHaveLength(0);
+      expect(
+        await rows(VISIBLE_MEDIA_SQL, [upload.id, 'bob', 'bob']),
+      ).toHaveLength(0);
     });
 
     it('attaches to one post only, enforced by the schema too', async () => {
@@ -274,7 +278,9 @@ integration('media (MySQL)', () => {
         'alice',
       );
       expect(post.media).toMatchObject({ id: upload.id });
-      expect(await rows(VISIBLE_MEDIA_SQL, [upload.id, null])).toHaveLength(1);
+      expect(
+        await rows(VISIBLE_MEDIA_SQL, [upload.id, null, null]),
+      ).toHaveLength(1);
       await expect(
         connection.query(
           "INSERT INTO posts (id, title, type, author_id, community_id, media_id) VALUES ('p-dup', 'Dup', 'media', 'alice', 'c-garden', ?)",

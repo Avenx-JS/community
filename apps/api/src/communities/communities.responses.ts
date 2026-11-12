@@ -1,5 +1,11 @@
 import { MediaResponse } from '../media/media.responses';
 import { ApiProperty } from '@nestjs/swagger';
+import { COMMUNITY_VISIBILITIES } from '../common/community-visibility';
+import {
+  COMMUNITY_POST_TYPES,
+  type CommunityPostType,
+} from './dto/update-community.dto';
+import type { CommunityVisibility } from '../common/community-visibility';
 import type {
   CommunityCreatorDto,
   CommunityDetailDto,
@@ -50,6 +56,29 @@ export class CommunityResponse implements CommunityDto {
 
   @ApiProperty({ format: 'date-time' })
   created_at!: string;
+
+  @ApiProperty({
+    enum: COMMUNITY_VISIBILITIES,
+    description:
+      'public: anyone reads and joins. restricted: anyone reads, members ' +
+      'post, joining is by request. private: content, moderators and stats ' +
+      'for members only, joining is by request.',
+  })
+  visibility!: CommunityVisibility;
+
+  @ApiProperty({
+    description:
+      'Not safe for work: its posts appear in cross-community listings only ' +
+      'for viewers whose show_nsfw preference is on.',
+  })
+  nsfw!: boolean;
+
+  @ApiProperty({
+    enum: COMMUNITY_POST_TYPES,
+    isArray: true,
+    description: 'The post types POST /posts accepts in this community.',
+  })
+  allowed_post_types!: CommunityPostType[];
 }
 
 export class CommunityDetailResponse

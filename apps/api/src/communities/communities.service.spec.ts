@@ -9,7 +9,11 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { MYSQL_POOL } from '../auth/auth.service';
 import type { PoolConnection } from 'mysql2/promise';
 import { canModerateCommunitySql } from '../common/community-moderation';
-import { CommunitiesService } from './communities.service';
+import { listedCommunitySql } from '../common/community-visibility';
+import {
+  CommunitiesService,
+  LISTED_COMMUNITY_ID_SQL,
+} from './communities.service';
 import { CommunityModerationLogService } from './community-moderation-log.service';
 import { CommunityRuleAcceptanceService } from './community-rule-acceptance.service';
 import { ListCommunityMembersDto } from './dto/list-community-members.dto';
@@ -25,11 +29,21 @@ describe('CommunitiesService', () => {
   beforeEach(async () => {
     queries = [];
     results = [];
+    const execute = (sql: string, values: unknown[]) => {
+      queries.push({ sql, values });
+      return Promise.resolve([results.shift() ?? [], []]);
+    };
     const pool = {
-      execute: (sql: string, values: unknown[]) => {
-        queries.push({ sql, values });
-        return Promise.resolve([results.shift() ?? [], []]);
-      },
+      execute,
+      // Transactions run on one connection over the same answers.
+      getConnection: () =>
+        Promise.resolve({
+          execute,
+          beginTransaction: () => Promise.resolve(),
+          commit: () => Promise.resolve(),
+          rollback: () => Promise.resolve(),
+          release: () => undefined,
+        }),
     };
     // Every community's rules count as accepted unless a test says otherwise.
     ruleAcceptance = {
@@ -76,8 +90,9 @@ describe('CommunitiesService', () => {
     expect(queries[0].sql).toContain(
       'ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?',
     );
-    expect(queries[0].values).toEqual(['%garden%', '%garden%', 1, 1]);
-    expect(queries[1].values).toEqual(['%garden%', '%garden%']);
+    // The viewer of the nsfw filter (anonymous here), then the search.
+    expect(queries[0].values).toEqual([null, '%garden%', '%garden%', 1, 1]);
+    expect(queries[1].values).toEqual([null, '%garden%', '%garden%']);
   });
 
   it('escapes LIKE wildcards in community search through the shared helper', async () => {
@@ -86,6 +101,7 @@ describe('CommunitiesService', () => {
     await service.findAll({ search: '100%_safe=' });
 
     expect(queries[0].values).toEqual([
+      null,
       '%100=%=_safe==%',
       '%100=%=_safe==%',
       20,
@@ -146,17 +162,22 @@ describe('CommunitiesService', () => {
     const created = await service.create({ name: 'gardening' }, 'user-1');
     const found = await service.findOne('gardening');
 
+    // With the settings of migration 038.
     for (const community of [listed.items[0], created]) {
       expect(Object.keys(community).sort()).toEqual([
+        'allowed_post_types',
         'created_at',
         'creator_id',
         'description',
         'id',
         'name',
+        'nsfw',
+        'visibility',
       ]);
     }
     // The detail adds its images (migration 035), and nothing else.
     expect(Object.keys(found).sort()).toEqual([
+      'allowed_post_types',
       'banner',
       'created_at',
       'creator_id',
@@ -164,6 +185,8 @@ describe('CommunitiesService', () => {
       'icon',
       'id',
       'name',
+      'nsfw',
+      'visibility',
     ]);
     for (const { sql } of queries) {
       expect(sql).not.toMatch(/\brules\b/);
@@ -197,41 +220,47 @@ describe('CommunitiesService', () => {
     );
   });
 
-  it('lets only the community creator assign and remove moderators', async () => {
-    results = [
-      [{ id: 'community-1', creator_id: 'creator' }],
-      [{ id: 'mod' }],
-      [{ user_id: 'mod' }],
-      [],
-    ];
-    await service.addModerator('gardening', 'moderator', 'creator');
-    expect(queries[3].sql).toContain('INSERT INTO community_moderators');
-    expect(queries[3].values).toEqual(['community-1', 'mod', 'creator']);
+  // Moderators join only by accepting an invitation (migration 038); there
+  // is no direct appointment left to test.
+  it('has no direct appointment', () => {
+    expect('addModerator' in service).toBe(false);
+  });
 
-    results = [[{ id: 'community-1', creator_id: 'creator' }], []];
+  it('lets only the creator remove a moderator, logged in the same transaction', async () => {
+    results = [
+      [{ id: 'community-1', creator_id: 'creator', visibility: 'public' }],
+      [{ id: 'mod' }],
+      { affectedRows: 1 } as unknown as unknown[],
+    ];
     await service.removeModerator('gardening', 'moderator', 'creator');
-    expect(queries[5].sql).toContain('DELETE FROM community_moderators');
+    expect(queries[0].sql).toMatch(/FOR UPDATE$/);
+    expect(queries[2]).toEqual({
+      sql: 'DELETE FROM community_moderators WHERE community_id = ? AND user_id = ?',
+      values: ['community-1', 'mod'],
+    });
+    expect(moderationLog.record).toHaveBeenCalledWith(expect.anything(), {
+      actorId: 'creator',
+      communityId: 'community-1',
+      action: 'moderator_removed',
+      targetType: 'user',
+      targetId: 'mod',
+      metadata: { username: 'moderator' },
+    });
 
     results = [[{ id: 'community-1', creator_id: 'creator' }]];
     await expect(
-      service.addModerator('gardening', 'moderator', 'ordinary-member'),
+      service.removeModerator('gardening', 'moderator', 'ordinary-member'),
     ).rejects.toBeInstanceOf(ForbiddenException);
   });
 
-  it('does not appoint a non-member as moderator', async () => {
+  it('logs nothing when the user was not a moderator', async () => {
     results = [
-      [{ id: 'community-1', creator_id: 'creator' }],
-      [{ id: 'user-2' }],
-      [],
+      [{ id: 'community-1', creator_id: 'creator', visibility: 'public' }],
+      [{ id: 'mod' }],
+      { affectedRows: 0 } as unknown as unknown[],
     ];
-    await expect(
-      service.addModerator('gardening', 'non_member', 'creator'),
-    ).rejects.toBeInstanceOf(ForbiddenException);
-    expect(
-      queries.some((query) =>
-        query.sql.includes('INSERT INTO community_moderators'),
-      ),
-    ).toBe(false);
+    await service.removeModerator('gardening', 'moderator', 'creator');
+    expect(moderationLog.record).not.toHaveBeenCalled();
   });
 
   it('lists only the given user subscriptions, newest first, with paging', async () => {
@@ -321,21 +350,25 @@ describe('CommunitiesService', () => {
   it('excludes deleted communities from every community read', async () => {
     results = [[], [{ total: 0 }]];
     await service.findAll({ search: 'garden' });
+    // Visibility, then the nsfw filter, then the search.
     expect(queries[0].sql).toContain(
-      "WHERE deleted_at IS NULL AND suspended_at IS NULL AND (LOWER(name) LIKE LOWER(?) ESCAPE '=' OR LOWER(description) LIKE LOWER(?) ESCAPE '=')",
+      'WHERE deleted_at IS NULL AND suspended_at IS NULL AND EXISTS (',
+    );
+    expect(queries[0].sql).toContain(
+      "AND (LOWER(name) LIKE LOWER(?) ESCAPE '=' OR LOWER(description) LIKE LOWER(?) ESCAPE '=')",
     );
     expect(queries[1].sql).toContain(
-      'WHERE deleted_at IS NULL AND suspended_at IS NULL AND (',
+      'WHERE deleted_at IS NULL AND suspended_at IS NULL AND EXISTS (',
     );
 
     queries = [];
     results = [[], [{ total: 0 }]];
     await service.findAll({});
     expect(queries[0].sql).toContain(
-      'FROM communities WHERE deleted_at IS NULL AND suspended_at IS NULL ORDER BY',
+      `FROM communities WHERE deleted_at IS NULL AND suspended_at IS NULL AND ${listedCommunitySql('communities')} ORDER BY`,
     );
     expect(queries[1].sql).toBe(
-      'SELECT COUNT(*) AS total FROM communities WHERE deleted_at IS NULL AND suspended_at IS NULL',
+      `SELECT COUNT(*) AS total FROM communities WHERE deleted_at IS NULL AND suspended_at IS NULL AND ${listedCommunitySql('communities')}`,
     );
 
     queries = [];
@@ -350,7 +383,6 @@ describe('CommunitiesService', () => {
       () => service.subscribe('gardening', 'user-1'),
       () => service.getSubscription('gardening', 'user-1'),
       () => service.unsubscribe('gardening', 'user-1'),
-      () => service.addModerator('gardening', 'member', 'creator'),
       () => service.removeModerator('gardening', 'member', 'creator'),
     ];
     for (const lookup of lookups) {
@@ -650,6 +682,9 @@ describe('CommunitiesService', () => {
       name: 'gardening',
       description: 'Fixed typo',
       created_at: new Date('2026-10-20T12:00:00.000Z'),
+      visibility: 'public',
+      nsfw: 0,
+      allowed_post_types: 'text,link,media',
     };
 
     beforeEach(async () => {
@@ -691,10 +726,12 @@ describe('CommunitiesService', () => {
       ).resolves.toEqual({
         ...updated,
         created_at: '2026-10-20T12:00:00.000Z',
+        nsfw: false,
+        allowed_post_types: ['text', 'link', 'media'],
       });
 
       expect(statements[0].sql).toBe(
-        'SELECT id, creator_id FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1 FOR UPDATE',
+        'SELECT id, creator_id, visibility FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1 FOR UPDATE',
       );
       expect(statements[1]).toEqual({
         sql: 'UPDATE communities SET description = ? WHERE id = ?',
@@ -769,6 +806,67 @@ describe('CommunitiesService', () => {
       },
     );
 
+    // Migration 038: the settings, and a visibility change in the log.
+    it('updates the settings, storing the post types as a SET, and logs the new visibility', async () => {
+      answers = [
+        [{ ...community, visibility: 'public' }],
+        [{ affectedRows: 1 }],
+        [
+          {
+            ...updated,
+            visibility: 'private',
+            nsfw: 1,
+            allowed_post_types: 'text',
+          },
+        ],
+      ];
+
+      await expect(
+        transactional.update(
+          'gardening',
+          { visibility: 'private', nsfw: true, allowed_post_types: ['text'] },
+          'creator',
+        ),
+      ).resolves.toMatchObject({
+        visibility: 'private',
+        nsfw: true,
+        allowed_post_types: ['text'],
+      });
+      expect(statements[1]).toEqual({
+        sql: 'UPDATE communities SET visibility = ?, nsfw = ?, allowed_post_types = ? WHERE id = ?',
+        values: ['private', true, 'text', 'community-1'],
+      });
+      expect(moderationLog.record).toHaveBeenCalledWith(connection, {
+        actorId: 'creator',
+        communityId: 'community-1',
+        action: 'community_updated',
+        targetType: 'community',
+        targetId: 'community-1',
+        metadata: {
+          fields: 'visibility,nsfw,allowed_post_types',
+          visibility: 'private',
+        },
+      });
+    });
+
+    it('names no visibility when it did not change', async () => {
+      answers = [
+        [{ ...community, visibility: 'restricted' }],
+        [{ affectedRows: 1 }],
+        [{ ...updated, visibility: 'restricted' }],
+      ];
+
+      await transactional.update(
+        'gardening',
+        { visibility: 'restricted' },
+        'creator',
+      );
+      expect(moderationLog.record).toHaveBeenCalledWith(
+        connection,
+        expect.objectContaining({ metadata: { fields: 'visibility' } }),
+      );
+    });
+
     it('soft-deletes under a row lock and logs the deletion in the transaction', async () => {
       answers = [[community], [{ affectedRows: 1 }]];
 
@@ -776,7 +874,7 @@ describe('CommunitiesService', () => {
 
       expect(statements).toHaveLength(5);
       expect(statements[0].sql).toBe(
-        'SELECT id, creator_id FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1 FOR UPDATE',
+        'SELECT id, creator_id, visibility FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1 FOR UPDATE',
       );
       expect(statements[1]).toEqual({
         sql: 'UPDATE communities SET deleted_at = UTC_TIMESTAMP(), deleted_by = ? WHERE id = ?',
@@ -881,11 +979,11 @@ describe('CommunitiesService.resolveListedId', () => {
       'community-1',
     );
     expect(queries).toEqual([
-      {
-        sql: 'SELECT id FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1',
-        values: ['general'],
-      },
+      { sql: LISTED_COMMUNITY_ID_SQL, values: [null, 'general'] },
     ]);
+    expect(LISTED_COMMUNITY_ID_SQL).toContain(
+      'WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1',
+    );
   });
 
   it('answers 404 for an unknown, deleted or suspended community', async () => {

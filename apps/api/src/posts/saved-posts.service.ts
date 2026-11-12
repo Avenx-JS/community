@@ -1,7 +1,7 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
-import { visibleCommunitySql } from '../common/community-visibility';
+import { readableCommunitySql } from '../common/community-visibility';
 import type {
   ListSavedPostsDto,
   SavedPostSort,
@@ -33,7 +33,9 @@ interface SavedPostRow extends PostRow {
 // A post may be saved only while it is readable: not removed by moderation
 // and in a community that is neither deleted nor suspended. Same predicate
 // as the listing, so nothing can be saved that the list would hide.
-export const SAVEABLE_POST_SQL = `SELECT id FROM posts WHERE id = ? AND posts.removed_at IS NULL AND ${visibleCommunitySql('posts.community_id')} LIMIT 1`;
+// Values: the post id, then the caller (a private community's posts only for
+// its members).
+export const SAVEABLE_POST_SQL = `SELECT id FROM posts WHERE id = ? AND posts.removed_at IS NULL AND ${readableCommunitySql('posts.community_id')} LIMIT 1`;
 
 // Unsaving needs only the post to exist, in any state: a user may always
 // drop a bookmark, including one to a post that has since been hidden.
@@ -51,12 +53,14 @@ export const UNSAVE_POST_SQL =
 // those posts are omitted here, not deleted, so a restored post reappears.
 // A post whose author deleted their account is kept: it is still readable
 // under the placeholder username. STRAIGHT_JOIN keeps saved_posts first, so
-// the order is idx_saved_posts_user_created's.
+// the order is idx_saved_posts_user_created's. A post in a private
+// community the caller has left is omitted the same way. Values: the caller,
+// twice.
 export const SAVED_POSTS_FROM = `FROM saved_posts s
        STRAIGHT_JOIN posts p ON p.id = s.post_id
        WHERE s.user_id = ?
          AND p.removed_at IS NULL
-         AND ${visibleCommunitySql('p.community_id')}`;
+         AND ${readableCommunitySql('p.community_id')}`;
 
 const PREFIXED_POST_COLUMNS = POST_COLUMNS.split(', ')
   .map((column) => `p.${column}`)
@@ -85,13 +89,13 @@ export class SavedPostsService {
   // Idempotent: a repeat save leaves one row and keeps its created_at, the
   // listing's order key.
   async save(postId: string, userId: string): Promise<void> {
-    await this.ensurePost(SAVEABLE_POST_SQL, postId);
+    await this.ensurePost(SAVEABLE_POST_SQL, [postId, userId]);
     await this.pool.execute<ResultSetHeader>(SAVE_POST_SQL, [userId, postId]);
   }
 
   // Idempotent: removing a save that does not exist is still a success.
   async unsave(postId: string, userId: string): Promise<void> {
-    await this.ensurePost(ANY_POST_SQL, postId);
+    await this.ensurePost(ANY_POST_SQL, [postId]);
     await this.pool.execute<ResultSetHeader>(UNSAVE_POST_SQL, [userId, postId]);
   }
 
@@ -106,11 +110,11 @@ export class SavedPostsService {
 
     const [rows] = await this.pool.execute<SavedPostRow[]>(
       savedPostsSql(sort),
-      [userId, limit, offset],
+      [userId, userId, limit, offset],
     );
     const [counts] = await this.pool.execute<
       (RowDataPacket & { total: number | string })[]
-    >(SAVED_POSTS_COUNT_SQL, [userId]);
+    >(SAVED_POSTS_COUNT_SQL, [userId, userId]);
     // Every listed post is the caller's saved post: no lookup needed.
     const posts = await toPostDtos(this.pool, rows, userId, true);
 
@@ -126,10 +130,10 @@ export class SavedPostsService {
     };
   }
 
-  private async ensurePost(sql: string, postId: string): Promise<void> {
+  private async ensurePost(sql: string, values: string[]): Promise<void> {
     const [posts] = await this.pool.execute<(RowDataPacket & { id: string })[]>(
       sql,
-      [postId],
+      values,
     );
     if (!posts[0]) {
       throw new NotFoundException('Post not found');

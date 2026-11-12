@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { MediaResponse } from '../media/media.responses';
+import { AssignedFlairResponse } from '../communities/community-settings.responses';
 import type { PostDto, PostListDto } from './posts.service';
 import type { SavedPostDto, SavedPostListDto } from './saved-posts.service';
 import {
@@ -109,6 +110,13 @@ export class PostResponse implements PostDto {
       'content is still their URL.',
   })
   media!: MediaResponse | null;
+
+  @ApiProperty({
+    type: AssignedFlairResponse,
+    nullable: true,
+    description: 'The post flair (PUT /posts/{id}/flair); null when none.',
+  })
+  flair!: AssignedFlairResponse | null;
 
   @ApiPropertyOptional({
     enum: [true],

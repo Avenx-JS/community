@@ -21,7 +21,10 @@ import {
   canModerateCommunitySql,
   isSqlTrue,
 } from '../common/community-moderation';
-import { visibleCommunitySql } from '../common/community-visibility';
+import {
+  readableCommunitySql,
+  visibleCommunitySql,
+} from '../common/community-visibility';
 import type { NotificationEntry } from '../notifications/notification-metadata';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -90,7 +93,9 @@ export const MAX_COMMENTS_PER_THREAD = 500;
 
 // The tree route's post lookup: the community for the reviewer check, and
 // the removal state that hides the whole thread from everyone else.
-export const THREAD_POST_SQL = `SELECT community_id, removed_at FROM posts WHERE id = ? AND ${visibleCommunitySql('posts.community_id')} LIMIT 1`;
+// Values: the post id, then the viewer (null when anonymous): a private
+// community's threads are not there for a non-member.
+export const THREAD_POST_SQL = `SELECT community_id, removed_at FROM posts WHERE id = ? AND ${readableCommunitySql('posts.community_id')} LIMIT 1`;
 
 // The furthest a reply's ancestor walk goes. A chain this deep cannot be
 // shown by the tree route anyway (MAX_COMMENTS_PER_THREAD), and the bound
@@ -250,11 +255,12 @@ const PERMALINK_COLUMNS = (table: string) =>
     .join(', ');
 
 // The permalink's comment, its post's community and removal state. A
-// primary-key lookup joined to its post by primary key.
+// primary-key lookup joined to its post by primary key. Values: the comment
+// id, then the viewer (null when anonymous).
 export const PERMALINK_COMMENT_SQL = `SELECT ${PERMALINK_COLUMNS('comments')}, posts.community_id, posts.removed_at AS post_removed_at
        FROM comments
        INNER JOIN posts ON posts.id = comments.post_id
-       WHERE comments.id = ? AND ${visibleCommunitySql('posts.community_id')}
+       WHERE comments.id = ? AND ${readableCommunitySql('posts.community_id')}
        LIMIT 1`;
 
 // The chain above a comment, from its parent up to the root, one
@@ -333,7 +339,7 @@ export class CommentsService {
         community_id: string;
         removed_at: Date | string | null;
       })[]
-    >(THREAD_POST_SQL, [postId]);
+    >(THREAD_POST_SQL, [postId, viewerId ?? null]);
     const post = posts[0];
     if (!post) {
       throw new NotFoundException('Post not found');
@@ -438,7 +444,7 @@ export class CommentsService {
           community_id: string;
           post_removed_at: Date | string | null;
         })[]
-    >(PERMALINK_COMMENT_SQL, [id]);
+    >(PERMALINK_COMMENT_SQL, [id, viewerId ?? null]);
     const target = targets[0];
     if (!target) {
       throw new NotFoundException('Comment not found');
@@ -504,16 +510,17 @@ export class CommentsService {
   async findReplies(
     commentId: string,
     query: ListCommentRepliesDto,
+    viewerId?: string,
   ): Promise<CommentReplyListDto> {
     const [parents] = await this.pool.execute<
       (RowDataPacket & { id: string })[]
     >(
       `SELECT comments.id FROM comments
        INNER JOIN posts ON posts.id = comments.post_id
-       WHERE comments.id = ? AND ${visibleCommunitySql('posts.community_id')}
+       WHERE comments.id = ? AND ${readableCommunitySql('posts.community_id')}
          AND posts.removed_at IS NULL
        LIMIT 1`,
-      [commentId],
+      [commentId, viewerId ?? null],
     );
     if (!parents[0]) {
       throw new NotFoundException('Comment not found');
@@ -530,8 +537,9 @@ export class CommentsService {
   async findTopLevel(
     postId: string,
     query: ListCommentRepliesDto,
+    viewerId?: string,
   ): Promise<CommentReplyListDto> {
-    await this.ensurePostExists(postId);
+    await this.ensurePostExists(postId, viewerId);
     return this.listComments(
       `post_id = ? AND parent_id IS NULL AND ${VISIBLE_COMMENT_SQL}`,
       [postId],
@@ -728,8 +736,8 @@ export class CommentsService {
           removed_at?: Date | string | null;
         })[]
       >(
-        `SELECT id, author_id, community_id, title, locked_at, removed_at FROM posts WHERE id = ? AND ${visibleCommunitySql('posts.community_id')} LIMIT 1 FOR SHARE`,
-        [postId],
+        `SELECT id, author_id, community_id, title, locked_at, removed_at FROM posts WHERE id = ? AND ${readableCommunitySql('posts.community_id')} LIMIT 1 FOR SHARE`,
+        [postId, authorId],
       );
       const post = posts[0];
       if (!post) {
@@ -930,12 +938,15 @@ export class CommentsService {
     }
   }
 
-  private async ensurePostExists(postId: string): Promise<void> {
+  private async ensurePostExists(
+    postId: string,
+    viewerId?: string,
+  ): Promise<void> {
     const [posts] = await this.pool.execute<(RowDataPacket & { id: string })[]>(
       // Visible posts only: a removed post's flat routes are 404 for
       // everyone; reviewers read it through the tree route.
-      `SELECT id FROM posts WHERE id = ? AND ${visibleCommunitySql('posts.community_id')} AND posts.removed_at IS NULL LIMIT 1`,
-      [postId],
+      `SELECT id FROM posts WHERE id = ? AND ${readableCommunitySql('posts.community_id')} AND posts.removed_at IS NULL LIMIT 1`,
+      [postId, viewerId ?? null],
     );
     if (!posts[0]) {
       throw new NotFoundException('Post not found');

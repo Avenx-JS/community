@@ -400,6 +400,7 @@ export class MediaService {
     const [rows] = await this.pool.execute<MediaRow[]>(VISIBLE_MEDIA_SQL, [
       id,
       viewerId ?? null,
+      viewerId ?? null,
     ]);
     if (!rows[0]) {
       throw new NotFoundException(MEDIA_NOT_FOUND);

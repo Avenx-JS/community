@@ -13,7 +13,11 @@ import {
 } from '../common/community-moderation';
 import { hasControlCharacters } from '../common/safe-text.constraint';
 import type { ListCommunityModerationActionsDto } from './dto/list-community-moderation-actions.dto';
-import { visibleCommunityColumnsSql } from '../common/community-visibility';
+import {
+  COMMUNITY_VISIBILITIES,
+  visibleCommunityColumnsSql,
+  type CommunityVisibility,
+} from '../common/community-visibility';
 
 // Mirrors the community_moderation_actions.action and target_type enums; read
 // filters validate against these lists so they cannot drift from what is
@@ -41,6 +45,13 @@ export const COMMUNITY_MODERATION_ACTIONS = [
   // 036): approved (the content stays) or removed.
   'report_approved',
   'report_removed',
+  // Community settings (migration 038): moderator invitations, which nobody
+  // becomes a moderator without accepting, and decisions on join requests.
+  'moderator_invited',
+  'moderator_invite_revoked',
+  'moderator_invite_declined',
+  'join_request_approved',
+  'join_request_denied',
 ] as const;
 
 export type CommunityModerationAction =
@@ -100,7 +111,15 @@ export type CommunityModerationEntry =
       metadata?: { username?: string; reason?: string };
     })
   | (EntryBase & {
-      action: 'member_unbanned' | 'moderator_added' | 'moderator_removed';
+      action:
+        | 'member_unbanned'
+        | 'moderator_added'
+        | 'moderator_removed'
+        | 'moderator_invited'
+        | 'moderator_invite_revoked'
+        | 'moderator_invite_declined'
+        | 'join_request_approved'
+        | 'join_request_denied';
       targetType: 'user';
       metadata?: { username?: string };
     })
@@ -112,7 +131,8 @@ export type CommunityModerationEntry =
   | (EntryBase & {
       action: 'community_updated';
       targetType: 'community';
-      metadata?: { fields?: string };
+      // visibility: the new one, when it changed. An enum value, never text.
+      metadata?: { fields?: string; visibility?: CommunityVisibility };
     })
   | (EntryBase & {
       action: 'community_deleted';
@@ -128,7 +148,12 @@ export type CommunityModerationEntry =
 
 // The community fields PATCH /communities/:name may change; a
 // community_updated entry names which of them changed, never their values.
-export const EDITABLE_COMMUNITY_FIELDS = ['description'] as const;
+export const EDITABLE_COMMUNITY_FIELDS = [
+  'description',
+  'visibility',
+  'nsfw',
+  'allowed_post_types',
+] as const;
 // The fields a community_updated entry may name: those, and the images set
 // through PUT and DELETE /communities/:name/icon and /banner.
 export const LOGGED_COMMUNITY_FIELDS = [
@@ -286,6 +311,19 @@ function versionValue(metadata: Record<string, unknown>): number | undefined {
   return value;
 }
 
+function visibilityValue(
+  metadata: Record<string, unknown>,
+): CommunityVisibility | undefined {
+  const value = stringValue(metadata, 'visibility');
+  if (
+    value !== undefined &&
+    !(COMMUNITY_VISIBILITIES as readonly string[]).includes(value)
+  ) {
+    throw invalid('visibility');
+  }
+  return value as CommunityVisibility | undefined;
+}
+
 // A comma-separated list of distinct editable field names, e.g. "description".
 function fieldsValue(metadata: Record<string, unknown>): string | undefined {
   const value = stringValue(metadata, 'fields');
@@ -331,6 +369,11 @@ export function buildCommunityModerationMetadata(
     case 'member_unbanned':
     case 'moderator_added':
     case 'moderator_removed':
+    case 'moderator_invited':
+    case 'moderator_invite_revoked':
+    case 'moderator_invite_declined':
+    case 'join_request_approved':
+    case 'join_request_denied':
       keep('username', usernameValue(metadata));
       break;
     case 'rules_published':
@@ -338,6 +381,7 @@ export function buildCommunityModerationMetadata(
       break;
     case 'community_updated':
       keep('fields', fieldsValue(metadata));
+      keep('visibility', visibilityValue(metadata));
       break;
     case 'report_approved':
     case 'report_removed':

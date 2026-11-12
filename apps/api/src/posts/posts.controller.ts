@@ -460,6 +460,7 @@ export class PostsController {
   }
 
   @Get(':postId/comments/top-level')
+  @UseGuards(OptionalAuthGuard)
   @ApiTags('comments')
   @ApiOperation({
     summary: "List a post's top-level comments",
@@ -474,13 +475,16 @@ export class PostsController {
   @ApiOkResponse({ type: CommentReplyListResponse })
   @ApiErrorResponses({
     400: 'Invalid post ID or query parameters.',
-    404: 'Post not found, or its community is deleted or suspended.',
+    404:
+      'Post not found, its community is deleted or suspended, or it is ' +
+      'private and the caller is not a member.',
   })
   getTopLevelComments(
     @Param('postId', new SafeRouteParamPipe('id')) postId: string,
     @Query() query: ListCommentRepliesDto,
+    @Req() request?: OptionallyAuthenticatedRequest,
   ) {
-    return this.commentsService.findTopLevel(postId, query);
+    return this.commentsService.findTopLevel(postId, query, request?.user?.id);
   }
 
   @Post(':postId/comments')

@@ -5,7 +5,7 @@ import {
   NEW_POST_HOT_RANK_SQL,
   NEW_POST_RISING_RANK_SQL,
 } from '../common/content-ranking';
-import { visibleCommunitySql } from '../common/community-visibility';
+import { readableCommunitySql } from '../common/community-visibility';
 import type { CommunityModerationLogService } from '../communities/community-moderation-log.service';
 import type { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import type { NotificationsService } from '../notifications/notifications.service';
@@ -15,6 +15,7 @@ import {
   FEED_UNBLOCKED_AUTHOR_SQL,
   PostsService,
   VISIBLE_POST_SQL,
+  POSTING_COMMUNITY_SQL,
 } from './posts.service';
 
 // The one listing path behind GET /posts, GET /communities/:name/posts and
@@ -30,8 +31,17 @@ function harness() {
     if (sql.includes('FROM community_bans')) {
       return Promise.resolve([[], []]);
     }
-    if (sql.startsWith('SELECT id FROM communities')) {
-      return Promise.resolve([[{ id: 'community-1' }], []]);
+    if (sql === POSTING_COMMUNITY_SQL) {
+      return Promise.resolve([
+        [
+          {
+            visibility: 'public',
+            allowed_post_types: 'text,link,media',
+            member: 1,
+          },
+        ],
+        [],
+      ]);
     }
     return Promise.resolve([[], []]);
   };
@@ -109,7 +119,7 @@ describe('post listings: sort', () => {
       sort: sort as PostListSort,
     });
     expect(listing().sql).toContain(`${order} LIMIT ? OFFSET ?`);
-    expect(listing().values).toEqual(['community-1', 20, 0]);
+    expect(listing().values).toEqual(['community-1', null, 20, 0]);
   });
 });
 
@@ -165,16 +175,17 @@ describe('GET /feed', () => {
     const { service, listing, count } = harness();
     await service.findFeed({ sort: 'hot', page: 3, limit: 10 }, 'user-1');
 
+    // The feed hides nsfw content without the opt-in, and muted communities.
     const where = ` WHERE ${[
       FEED_COMMUNITIES_SQL,
-      visibleCommunitySql('posts.community_id'),
+      readableCommunitySql('posts.community_id', { nsfw: true, muted: true }),
       VISIBLE_POST_SQL,
       FEED_UNBLOCKED_AUTHOR_SQL,
     ].join(' AND ')}`;
     expect(listing().sql).toContain(`FROM posts${where} ${ORDER.hot}`);
-    expect(listing().values).toEqual(['user-1', 'user-1', 10, 20]);
+    expect(listing().values).toEqual(['user-1', 'user-1', 'user-1', 10, 20]);
     expect(count().sql).toBe(`SELECT COUNT(*) AS total FROM posts${where}`);
-    expect(count().values).toEqual(['user-1', 'user-1']);
+    expect(count().values).toEqual(['user-1', 'user-1', 'user-1']);
   });
 
   it('excludes a community the caller is banned from now', () => {

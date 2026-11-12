@@ -1,4 +1,12 @@
+import { COMMUNITY_COLUMNS } from '../../src/communities/communities.service';
 import { ADMIN_COMMUNITY_DETAIL_SQL } from '../../src/admin/admin-communities.service';
+
+// Every fake community has the settings of a fresh one (migration 038).
+const PUBLIC_SETTINGS = {
+  visibility: 'public',
+  nsfw: 0,
+  allowed_post_types: 'text,link,media',
+};
 
 export interface FakeDirectoryUser {
   id: string;
@@ -181,7 +189,7 @@ export function executeCommunityDirectoryQuery(
   // GET /communities/:name: one visible community by name.
   if (
     flat ===
-    'SELECT id, creator_id, name, description, created_at, icon_media_id, banner_media_id FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1'
+    `SELECT ${COMMUNITY_COLUMNS}, icon_media_id, banner_media_id FROM communities WHERE name = ? AND deleted_at IS NULL AND suspended_at IS NULL LIMIT 1`
   ) {
     return [
       store.communities
@@ -195,6 +203,7 @@ export function executeCommunityDirectoryQuery(
           name,
           description,
           created_at,
+          ...PUBLIC_SETTINGS,
         })),
       [],
     ];
@@ -210,7 +219,8 @@ export function executeCommunityDirectoryQuery(
       (row) => !row.deleted_at && !row.suspended_at,
     );
     if (flat.includes('LIKE LOWER(?)')) {
-      const pattern = like(String(values[0]));
+      // After the viewer of the nsfw filter (migration 038).
+      const pattern = like(String(values[1]));
       rows = rows.filter(
         (row) => pattern.test(row.name) || pattern.test(row.description ?? ''),
       );
@@ -226,6 +236,7 @@ export function executeCommunityDirectoryQuery(
           name: row.name,
           description: row.description,
           created_at: row.created_at,
+          ...PUBLIC_SETTINGS,
         })),
       ),
       [],

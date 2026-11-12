@@ -13,7 +13,7 @@ describe('migration 037 (account settings)', () => {
   it('is in the snapshot verbatim, with its version recorded', () => {
     expect(snapshot).toContain(migration);
     expect(snapshot).toContain(
-      "('036_add_community_report_review'), ('037_add_account_settings');",
+      "('036_add_community_report_review'), ('037_add_account_settings'),",
     );
   });
 

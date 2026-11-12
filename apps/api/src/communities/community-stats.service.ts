@@ -7,6 +7,18 @@ import {
   MODERATORS_FROM,
 } from './communities.service';
 import { COMMUNITY_VISIBLE_PREDICATE } from '../common/community-visibility';
+import {
+  accessColumnsSql,
+  assertReadableRow,
+  VIEWER_JOIN_SQL,
+  type AccessColumns,
+} from './community-access';
+
+// The community by name, with the viewer's access (one placeholder, before
+// the name). Values: viewer or null, name.
+export const STATS_COMMUNITY_SQL = `SELECT id, creator_id, created_at, ${accessColumnsSql('communities')}
+       FROM communities ${VIEWER_JOIN_SQL}
+       WHERE name = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1`;
 
 // The recent-activity window, fixed in the server: a public summary takes no
 // caller-supplied range (see README, "Community statistics").
@@ -75,21 +87,21 @@ export class CommunityStatsService {
 
   // Counts only, no per-row data. Not cached: each statement is index-served
   // and the global read rate limits bound abuse.
-  async get(name: string): Promise<CommunityStatsDto> {
+  // A private community's figures are for its members (403 otherwise).
+  async get(name: string, viewerId?: string): Promise<CommunityStatsDto> {
     const [communities] = await this.pool.execute<
-      (RowDataPacket & {
-        id: string;
-        creator_id: string;
-        created_at: Date | string;
-      })[]
-    >(
-      `SELECT id, creator_id, created_at FROM communities WHERE name = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1`,
-      [name],
-    );
+      (RowDataPacket &
+        AccessColumns & {
+          id: string;
+          creator_id: string;
+          created_at: Date | string;
+        })[]
+    >(STATS_COMMUNITY_SQL, [viewerId ?? null, name]);
     const community = communities[0];
     if (!community) {
       throw new NotFoundException('Community not found');
     }
+    assertReadableRow(community);
 
     const [[members], [moderators], [posts], [comments]] = await Promise.all([
       this.pool.execute<CountRow[]>(MEMBER_COUNT_SQL, [community.id]),

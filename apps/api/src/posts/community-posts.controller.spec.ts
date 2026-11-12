@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from '@jest/globals';
-import { NotFoundException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import type { Pool } from 'mysql2/promise';
 import { LISTED_COMMUNITY_ID_SQL } from '../communities/communities.service';
 import { CommunitiesService } from '../communities/communities.service';
@@ -73,13 +73,14 @@ describe('CommunityPostsController', () => {
 
     expect(byName[0]).toEqual({
       sql: LISTED_COMMUNITY_ID_SQL,
-      values: ['general'],
+      values: [null, 'general'],
     });
     // The same statements, with the same values, as the id-filtered listing.
     expect(byName.slice(1)).toEqual(queries);
     expect(result).toEqual(direct);
-    expect(byName[1].values).toEqual(['community-1', 2, 4]);
-    expect(byName[2].values).toEqual(['community-1']);
+    // The community, then the viewer the readability check binds.
+    expect(byName[1].values).toEqual(['community-1', null, 2, 4]);
+    expect(byName[2].values).toEqual(['community-1', null]);
   });
 
   it('floats pins and omits removed posts, as the filtered listing does', async () => {
@@ -91,10 +92,34 @@ describe('CommunityPostsController', () => {
     );
     for (const { sql } of [listing, count]) {
       expect(sql).toContain('WHERE community_id = ?');
-      expect(sql).toContain('communities.deleted_at IS NULL AND communities.suspended_at IS NULL');
+      expect(sql).toContain(
+        'communities.deleted_at IS NULL AND communities.suspended_at IS NULL',
+      );
       expect(sql).toContain('posts.removed_at IS NULL');
     }
-    expect(listing.values).toEqual(['community-1', 20, 0]);
+    expect(listing.values).toEqual(['community-1', null, 20, 0]);
+  });
+
+  // Migration 038: a private community's listing is its members'.
+  it('answers a non-member of a private community 403 without listing', async () => {
+    communityRows = [
+      { id: 'community-1', access_visibility: 'private', access_member: 0 },
+    ];
+    await expect(
+      controller.findAll('general', {}, { user: { id: 'outsider' } } as never),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(queries).toHaveLength(1);
+    expect(queries[0].values).toEqual(['outsider', 'general']);
+  });
+
+  it('lists a private community for a member', async () => {
+    communityRows = [
+      { id: 'community-1', access_visibility: 'private', access_member: 1 },
+    ];
+    await controller.findAll('general', {}, {
+      user: { id: 'member' },
+    } as never);
+    expect(queries[1].values).toEqual(['community-1', 'member', 20, 0]);
   });
 
   it('returns the shared envelope, including sort', async () => {

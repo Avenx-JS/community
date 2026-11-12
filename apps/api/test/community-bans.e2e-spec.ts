@@ -1,3 +1,4 @@
+import { answerCommunityAccess } from './fakes/community-access';
 import {
   afterEach,
   beforeEach,
@@ -302,6 +303,18 @@ describe('Community bans (e2e)', () => {
       }
       if (flat.includes('FROM community_rule_documents')) {
         return [];
+      }
+      // Subscribing reads the community's visibility (migration 038).
+      const access = answerCommunityAccess(
+        sql,
+        values,
+        communities,
+        (community, user) =>
+          subscriptions.has(key(community, user)) ||
+          moderators.has(key(community, user)),
+      );
+      if (access) {
+        return access[0];
       }
       if (flat.startsWith('INSERT INTO community_subscriptions')) {
         const [user, community] = values as string[];

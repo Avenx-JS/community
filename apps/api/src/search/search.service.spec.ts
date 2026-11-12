@@ -60,6 +60,9 @@ describe('SearchService', () => {
         'communities.id = posts.community_id',
         'communities.deleted_at IS NULL AND communities.suspended_at IS NULL',
         'communities.suspended_at IS NULL',
+        "communities.visibility <> 'private'",
+        'viewer_preferences.show_nsfw = TRUE',
+        'FROM community_mutes viewer_mute',
       ],
     ],
     [
@@ -68,8 +71,12 @@ describe('SearchService', () => {
       [
         'c.removed_at IS NULL',
         'p.removed_at IS NULL',
-        'co.deleted_at IS NULL',
-        'co.suspended_at IS NULL',
+        'communities.id = p.community_id',
+        'communities.deleted_at IS NULL AND communities.suspended_at IS NULL',
+        // Migration 038: private, nsfw and muted communities.
+        "communities.visibility <> 'private'",
+        'viewer_preferences.show_nsfw = TRUE',
+        'FROM community_mutes viewer_mute',
       ],
     ],
     [
@@ -123,7 +130,8 @@ describe('SearchService', () => {
         /ORDER BY (\w+)\.created_at DESC, \1\.id DESC LIMIT \? OFFSET \?$/,
       );
       expect(page().sql).not.toContain('AS relevance');
-      expect(page().values).toEqual(['kitten', 20, 0]);
+      // The term, then the viewer (anonymous here) of the community filter.
+      expect(page().values).toEqual(['kitten', null, 20, 0]);
     });
 
     it('pages by LIMIT and OFFSET', async () => {
@@ -224,6 +232,7 @@ describe('SearchService', () => {
         }
         expect(count().values).toEqual([
           'kitten',
+          null,
           'community-id',
           'author-id',
           '2026-01-01 00:00:00',

@@ -22,7 +22,9 @@ import {
   isSqlTrue,
 } from '../common/community-moderation';
 import {
-  COMMUNITY_VISIBLE_PREDICATE,
+  communityMemberSql,
+  readableCommunitySql,
+  visibleCommunityColumnsSql,
   visibleCommunitySql,
 } from '../common/community-visibility';
 import { readPositiveInteger } from '../common/read-positive-integer';
@@ -59,6 +61,10 @@ import {
 } from '../common/removed-content';
 import { RemoveContentDto } from '../common/remove-content.dto';
 import {
+  loadPostFlairs,
+  type AssignedFlairDto,
+} from '../communities/community-flairs.service';
+import {
   loadMediaByIds,
   toMediaDto,
   type MediaDto,
@@ -86,14 +92,32 @@ export interface PostRow extends RowDataPacket {
   // The uploaded file of a media post (migration 035); NULL otherwise, and
   // on media posts created before uploads existed.
   media_id?: string | null;
+  // Set with PUT /posts/:id/flair (migration 038); absent in older fixtures.
+  flair_id?: string | null;
 }
 
 // Every column of a post DTO, in DTO order.
 // A post removed by moderation (removed_at, migration 017) is not listed.
 export const VISIBLE_POST_SQL = 'posts.removed_at IS NULL';
 
+// The community a new post goes to, with what POST /posts checks: its
+// visibility, whether the author (first placeholder) is a member, and the
+// post types it accepts. Ban and rules are checked after.
+export const POSTING_COMMUNITY_SQL = `SELECT communities.visibility, communities.allowed_post_types,
+         ${communityMemberSql('communities', 'author.id')} AS member
+       FROM communities
+       CROSS JOIN (SELECT CAST(? AS CHAR(36)) AS id) author
+       WHERE communities.id = ? AND ${visibleCommunityColumnsSql('communities')}
+       LIMIT 1`;
+
+interface PostingCommunityRow extends RowDataPacket {
+  visibility: 'public' | 'restricted' | 'private';
+  allowed_post_types: string;
+  member: number | string | boolean;
+}
+
 export const POST_COLUMNS =
-  'id, title, content, type, author_id, community_id, created_at, pinned_at, pinned_by, edited_at, locked_at, locked_by, media_id';
+  'id, title, content, type, author_id, community_id, created_at, pinned_at, pinned_by, edited_at, locked_at, locked_by, media_id, flair_id';
 
 interface EditablePostRow extends RowDataPacket {
   id: string;
@@ -154,6 +178,8 @@ export interface PostDto {
   saved: boolean;
   // A media post's file; null on every other post.
   media: MediaDto | null;
+  // The post flair (PUT /posts/:id/flair); null when none.
+  flair: AssignedFlairDto | null;
 }
 
 // A post as a reviewer sees it: removal state only on removed posts.
@@ -215,13 +241,26 @@ export const FEED_UNBLOCKED_AUTHOR_SQL = notBlockedByViewerSql(
   'posts.author_id',
 );
 
+// Which communities' posts a listing shows: readable by the viewer (private
+// ones only to members) everywhere; on the cross-community listings
+// (GET /posts and the feed) not nsfw unless the viewer opted in; on the feed
+// not muted either. A community's own listing shows its posts whatever its
+// nsfw flag: the viewer went there.
+export function postListingCommunitySql(scope: PostListScope): string {
+  return readableCommunitySql('posts.community_id', {
+    nsfw: !scope.community_id,
+    muted: Boolean(scope.subscriber_id),
+  });
+}
+
 export function postListingWhere(
   scope: PostListScope,
   sort: PostListSort,
   time?: PostTopWindow,
-): { where: string; values: string[] } {
+  viewerId?: string,
+): { where: string; values: (string | null)[] } {
   const conditions: string[] = [];
-  const values: string[] = [];
+  const values: (string | null)[] = [];
   if (scope.community_id) {
     conditions.push('community_id = ?');
     values.push(scope.community_id);
@@ -230,7 +269,8 @@ export function postListingWhere(
     conditions.push(FEED_COMMUNITIES_SQL);
     values.push(scope.subscriber_id);
   }
-  conditions.push(visibleCommunitySql('posts.community_id'), VISIBLE_POST_SQL);
+  conditions.push(postListingCommunitySql(scope), VISIBLE_POST_SQL);
+  values.push(viewerId ?? null);
   if (scope.subscriber_id) {
     conditions.push(FEED_UNBLOCKED_AUTHOR_SQL);
     values.push(scope.subscriber_id);
@@ -332,7 +372,10 @@ export class PostsService {
     return media;
   }
 
-  // GET /posts and GET /communities/:name/posts (with community_id).
+  // GET /posts and GET /communities/:name/posts (with community_id). A
+  // private community's posts are not readable by a non-member, so its
+  // community_id listing is empty for them, like an unknown id's;
+  // GET /communities/:name/posts answers them 403 instead.
   findAll(query: ListPostsDto, viewerId?: string): Promise<PostListDto> {
     return query.community_id
       ? this.list({ community_id: query.community_id }, query, viewerId)
@@ -360,7 +403,7 @@ export class PostsService {
     const offset = (page - 1) * limit;
     const sort = query.sort ?? 'new';
     const time = sort === 'top' ? (query.time ?? 'all') : undefined;
-    const { where, values } = postListingWhere(scope, sort, time);
+    const { where, values } = postListingWhere(scope, sort, time, viewerId);
     const [posts] = await this.pool.execute<PostRow[]>(
       `SELECT ${POST_COLUMNS} FROM posts${where} ${postListingOrder(scope, sort)} LIMIT ? OFFSET ?`,
       [...values, limit, offset],
@@ -389,22 +432,39 @@ export class PostsService {
       await connection.beginTransaction();
       transactionStarted = true;
 
-      const [communities] = await connection.execute<
-        (RowDataPacket & { id: string })[]
-      >(
-        `SELECT id FROM communities WHERE id = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1`,
-        [input.community_id],
+      const [communities] = await connection.execute<PostingCommunityRow[]>(
+        POSTING_COMMUNITY_SQL,
+        [authorId, input.community_id],
       );
+      const community = communities[0];
 
-      if (!communities[0]) {
+      // A private community is not there for a non-member; a restricted one
+      // is readable by all but takes posts from members only.
+      if (
+        !community ||
+        (community.visibility === 'private' && !isSqlTrue(community.member))
+      ) {
         throw new NotFoundException('Community not found');
       }
-      // Ban first, then rules: a banned user is told the actionable fact.
+      // Ban first, then membership and post type, then rules: each caller
+      // is told the most actionable fact.
       await this.bans.assertNotBannedOrThrow(
         authorId,
         input.community_id,
         connection,
       );
+      if (community.visibility !== 'public' && !isSqlTrue(community.member)) {
+        throw new ForbiddenException({
+          reason: 'membership_required',
+          message: 'Only members can post in this community',
+        });
+      }
+      if (!community.allowed_post_types.split(',').includes(input.type)) {
+        throw new BadRequestException(
+          `This community does not accept ${input.type} posts`,
+        );
+      }
+
       await this.ruleAcceptance.assertAcceptedOrThrow(
         authorId,
         input.community_id,
@@ -478,8 +538,8 @@ export class PostsService {
   // its removal state. The reviewer check only runs for a removed post.
   async findOne(id: string, viewerId?: string): Promise<ReviewablePostDto> {
     const [posts] = await this.pool.execute<(PostRow & RemovalStateRow)[]>(
-      `SELECT ${POST_COLUMNS}, ${REMOVAL_COLUMNS} FROM posts WHERE id = ? AND ${visibleCommunitySql('posts.community_id')} LIMIT 1`,
-      [id],
+      `SELECT ${POST_COLUMNS}, ${REMOVAL_COLUMNS} FROM posts WHERE id = ? AND ${readableCommunitySql('posts.community_id')} LIMIT 1`,
+      [id, viewerId ?? null],
     );
     const post = posts[0];
 
@@ -1093,12 +1153,17 @@ export async function toPostDtos(
     knownSaved === undefined
       ? await loadSavedFlags(executor, viewerId, ids)
       : null;
+  const flairs = await loadPostFlairs(
+    executor,
+    posts.map((post) => post.flair_id),
+  );
   return posts.map((post) =>
     toPostDto(
       post,
       scores.get(post.id) ?? 0,
       saved ? saved.has(post.id) : (knownSaved ?? false),
       (post.media_id && media.get(post.media_id)) || null,
+      (post.flair_id && flairs.get(post.flair_id)) || null,
     ),
   );
 }
@@ -1110,6 +1175,7 @@ export function toPostDto(
   score: number,
   saved: boolean,
   media: MediaDto | null = null,
+  flair: AssignedFlairDto | null = null,
 ): PostDto {
   return {
     id: post.id,
@@ -1127,5 +1193,6 @@ export function toPostDto(
     score,
     saved,
     media,
+    flair,
   };
 }

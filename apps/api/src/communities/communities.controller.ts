@@ -26,6 +26,10 @@ import {
 } from '@nestjs/swagger';
 import { AuthGuard, type AuthenticatedRequest } from '../auth/auth.guard';
 import {
+  OptionalAuthGuard,
+  type OptionallyAuthenticatedRequest,
+} from '../auth/optional-auth.guard';
+import {
   ApiAuthenticated,
   ApiErrorResponses,
   ApiRouteParam,
@@ -42,6 +46,9 @@ import {
 } from './communities.responses';
 import { CommunitiesService } from './communities.service';
 import { CommunityStatsService } from './community-stats.service';
+import { CommunityDiscoveryService } from './community-discovery.service';
+import { DiscoveryQueryDto } from './dto/community-discovery.dto';
+import { DiscoveredCommunityListResponse } from './community-settings.responses';
 import { NotificationPreferencesService } from './notification-preferences.service';
 import { CreateCommunityDto } from './dto/create-community.dto';
 import { DeleteCommunityDto } from './dto/delete-community.dto';
@@ -62,17 +69,67 @@ export class CommunitiesController {
     private readonly communitiesService: CommunitiesService,
     private readonly notificationPreferencesService: NotificationPreferencesService,
     private readonly communityStatsService: CommunityStatsService,
+    private readonly discovery: CommunityDiscoveryService,
   ) {}
 
   @Get()
+  @UseGuards(OptionalAuthGuard)
   @ApiOperation({
     summary: 'List communities',
-    description: 'Newest first, then by ID descending.',
+    description:
+      'Newest first, then by ID descending. Private communities are listed ' +
+      '(name and description are public); nsfw ones only for a caller ' +
+      'whose show_nsfw preference is on. An invalid token reads as anonymous.',
   })
   @ApiOkResponse({ type: CommunityListResponse })
   @ApiErrorResponses({ 400: 'Invalid query parameters.' })
-  findAll(@Query() query: ListCommunitiesDto) {
-    return this.communitiesService.findAll(query);
+  findAll(
+    @Query() query: ListCommunitiesDto,
+    @Req() request?: OptionallyAuthenticatedRequest,
+  ) {
+    return this.communitiesService.findAll(query, request?.user?.id);
+  }
+
+  // Before GET :name, so that "trending" and "recommended" are routes, not
+  // community names.
+  @Get('trending')
+  @UseGuards(OptionalAuthGuard)
+  @ApiOperation({
+    summary: 'List trending communities',
+    description:
+      'Communities with posts in the last 24 hours or members gained in ' +
+      'the last 7 days, most posts first, then most new members. Never ' +
+      'private communities, nsfw ones only for a caller whose show_nsfw ' +
+      "preference is on, never the caller's muted ones. An invalid token " +
+      'reads as anonymous.',
+  })
+  @ApiOkResponse({ type: DiscoveredCommunityListResponse })
+  @ApiErrorResponses({ 400: 'Invalid query parameters.' })
+  trending(
+    @Query() query: DiscoveryQueryDto,
+    @Req() request?: OptionallyAuthenticatedRequest,
+  ) {
+    return this.discovery.trending(query, request?.user?.id);
+  }
+
+  @Get('recommended')
+  @UseGuards(AuthGuard)
+  @ApiOperation({
+    summary: 'Recommend communities',
+    description:
+      "Communities the caller's fellow members also belong to, by how many " +
+      'of them do, then the largest communities as a fallback. Never ' +
+      'communities the caller belongs to, private ones, muted ones, or ' +
+      'nsfw ones unless show_nsfw is on.',
+  })
+  @ApiAuthenticated()
+  @ApiOkResponse({ type: DiscoveredCommunityListResponse })
+  @ApiErrorResponses({ 400: 'Invalid query parameters.' })
+  recommended(
+    @Query() query: DiscoveryQueryDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.discovery.recommended(query, request.user.id);
   }
 
   @Post()
@@ -100,7 +157,11 @@ export class CommunitiesController {
   @Get(':name')
   @ApiOperation({
     summary: 'Get a community by name',
-    description: 'With its icon and banner, each null when unset.',
+    description:
+      'With its icon and banner, each null when unset, and its settings ' +
+      '(visibility, nsfw, allowed_post_types). Public for every ' +
+      'visibility, so that a private community can be found and joined by ' +
+      'request.',
   })
   @ApiRouteParam('name', 'communityName', 'Exact community name.')
   @ApiOkResponse({ type: CommunityDetailResponse })
@@ -119,10 +180,15 @@ export class CommunitiesController {
   @ApiOperation({
     summary: 'Edit a community',
     description:
-      'Only the description is editable; an empty string clears it. name ' +
-      'is the route key and published identity and cannot be changed; ' +
-      'rules are published through PUT /communities/:name/rules. Records a ' +
-      'community_updated moderation-log entry.',
+      'Editable: description (an empty string clears it), visibility ' +
+      '(public, restricted, private), nsfw and allowed_post_types (at least ' +
+      'one of text, link, media). Every change takes effect on the next ' +
+      'request: making a community private hides its content, moderators ' +
+      'and stats from non-members at once. name is the route key and ' +
+      'published identity and cannot be changed; rules are published ' +
+      'through PUT /communities/:name/rules. Records a community_updated ' +
+      'moderation-log entry naming the changed fields, and the new ' +
+      'visibility when it changed.',
   })
   @ApiAuthenticated({
     forbidden: 'Only the community creator may edit the community.',
@@ -130,7 +196,7 @@ export class CommunitiesController {
   @ApiRouteParam('name', 'communityName', 'Exact community name.')
   @ApiOkResponse({ type: CommunityResponse })
   @ApiErrorResponses({
-    400: 'Invalid community name, empty body, unknown property (including name and rules), or an invalid description.',
+    400: 'Invalid community name, empty body, unknown property (including name and rules), or an invalid field value.',
     404: 'Community not found.',
   })
   update(
@@ -175,23 +241,26 @@ export class CommunitiesController {
   // an open range would make a public route an arbitrary aggregation service
   // over the whole content history; /admin/analytics is where ranges live.
   @Get(':name/stats')
-  @UseGuards(NoQueryParamsGuard)
+  @UseGuards(NoQueryParamsGuard, OptionalAuthGuard)
   @ApiOperation({
     summary: 'Get community statistics',
     description:
-      'Public. Point-in-time counts plus fixed 7-day activity windows on ' +
-      'the database clock; takes no query parameters. Counts only.',
+      'Public, except for a private community: members only. Point-in-time ' +
+      'counts plus fixed 7-day activity windows on the database clock; ' +
+      'takes no query parameters. Counts only.',
   })
   @ApiRouteParam('name', 'communityName', 'Exact community name.')
   @ApiOkResponse({ type: CommunityStatsResponse })
   @ApiErrorResponses({
     400: 'Invalid community name, or any query parameter.',
+    403: `The community is private and the caller is not a member (\`{ "reason": "private_community" }\`).`,
     404: 'Community not found.',
   })
   getStats(
     @Param('name', new SafeRouteParamPipe('communityName')) name: string,
+    @Req() request?: OptionallyAuthenticatedRequest,
   ) {
-    return this.communityStatsService.get(name);
+    return this.communityStatsService.get(name, request?.user?.id);
   }
 
   @Post(':name/subscribe')
@@ -200,11 +269,13 @@ export class CommunitiesController {
   @ApiOperation({
     summary: 'Subscribe to a community',
     description:
-      'Idempotent. Refused for an account banned from the community; ' +
-      'leaving (DELETE) never is.',
+      'Idempotent. Public communities only: a restricted or private one is ' +
+      'joined through POST /communities/{name}/join-requests (its creator ' +
+      'and moderators may subscribe directly). Refused for an account ' +
+      'banned from the community; leaving (DELETE) never is.',
   })
   @ApiAuthenticated({
-    forbidden: `The caller has not accepted the community's current rules. ${COMMUNITY_BANNED_FORBIDDEN_DOC}`,
+    forbidden: `The caller has not accepted the community's current rules, or the community is joined by request (\`{ "reason": "join_request_required" }\`). ${COMMUNITY_BANNED_FORBIDDEN_DOC}`,
   })
   @ApiRouteParam('name', 'communityName', 'Exact community name.')
   @ApiNoContentResponse({ description: 'The user is subscribed.' })
@@ -316,10 +387,12 @@ export class CommunitiesController {
   // list is also a target list, but an unnameable moderator is worse, and
   // their actions are attributable through the moderation log.
   @Get(':name/moderators')
+  @UseGuards(OptionalAuthGuard)
   @ApiOperation({
     summary: 'List the people who run a community',
     description:
-      'Public. The creator is a separate top-level object on every page; ' +
+      'Public, except for a private community: members only. The creator ' +
+      'is a separate top-level object on every page; ' +
       'items, total and paging cover appointed moderators only, oldest ' +
       'appointment first. Deleted accounts are omitted.',
   })
@@ -327,13 +400,19 @@ export class CommunitiesController {
   @ApiOkResponse({ type: CommunityModeratorListResponse })
   @ApiErrorResponses({
     400: 'Invalid community name or query parameters.',
+    403: `The community is private and the caller is not a member (\`{ "reason": "private_community" }\`).`,
     404: 'Community not found.',
   })
   listModerators(
     @Param('name', new SafeRouteParamPipe('communityName')) name: string,
     @Query() query: ListCommunityModeratorsDto,
+    @Req() request?: OptionallyAuthenticatedRequest,
   ) {
-    return this.communitiesService.listModerators(name, query);
+    return this.communitiesService.listModerators(
+      name,
+      query,
+      request?.user?.id,
+    );
   }
 
   // A roster is a bulk extract of who belongs where, so only the people who
@@ -366,44 +445,15 @@ export class CommunitiesController {
     return this.communitiesService.listMembers(name, request.user.id, query);
   }
 
-  @Post(':name/moderators')
-  @UseGuards(AuthGuard)
-  @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({
-    summary: 'Appoint a moderator',
-    description:
-      'Only the community creator may appoint, and only subscribed members ' +
-      'can be appointed. Idempotent.',
-  })
-  @ApiAuthenticated({
-    forbidden:
-      'The caller is not the community creator, or the user is not a ' +
-      'subscribed member.',
-  })
-  @ApiRouteParam('name', 'communityName', 'Exact community name.')
-  @ApiNoContentResponse({ description: 'The user is a moderator.' })
-  @ApiErrorResponses({
-    400: 'Invalid community name or username.',
-    404: 'Community or user not found.',
-  })
-  addModerator(
-    @Param('name', new SafeRouteParamPipe('communityName')) name: string,
-    @Body() body: ManageModeratorDto,
-    @Req() request: AuthenticatedRequest,
-  ): Promise<void> {
-    return this.communitiesService.addModerator(
-      name,
-      body.username,
-      request.user.id,
-    );
-  }
-
   @Delete(':name/moderators')
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({
     summary: 'Remove a moderator',
-    description: 'Only the community creator may remove. Idempotent.',
+    description:
+      'Only the community creator may remove. Idempotent; a removal is ' +
+      'logged as moderator_removed. Moderators are added only by accepting ' +
+      'an invitation (POST /communities/{name}/moderators/invites).',
   })
   @ApiAuthenticated({ forbidden: 'The caller is not the community creator.' })
   @ApiRouteParam('name', 'communityName', 'Exact community name.')

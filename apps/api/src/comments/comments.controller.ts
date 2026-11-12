@@ -101,6 +101,7 @@ export class CommentsController {
   }
 
   @Get(':id/replies')
+  @UseGuards(OptionalAuthGuard)
   @ApiOperation({
     summary: "List a comment's direct replies",
     description:
@@ -114,13 +115,16 @@ export class CommentsController {
   @ApiOkResponse({ type: CommentReplyListResponse })
   @ApiErrorResponses({
     400: 'Invalid comment ID or query parameters.',
-    404: 'Comment not found, or its community is deleted or suspended.',
+    404:
+      'Comment not found, its community is deleted or suspended, or it is ' +
+      'private and the caller is not a member.',
   })
   findReplies(
     @Param('id', new SafeRouteParamPipe('id')) id: string,
     @Query() query: ListCommentRepliesDto,
+    @Req() request?: OptionallyAuthenticatedRequest,
   ): Promise<CommentReplyListDto> {
-    return this.commentsService.findReplies(id, query);
+    return this.commentsService.findReplies(id, query, request?.user?.id);
   }
 
   @Patch(':id')

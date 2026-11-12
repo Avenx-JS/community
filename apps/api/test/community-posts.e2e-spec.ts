@@ -116,11 +116,23 @@ describe('GET /communities/:name/posts (e2e)', () => {
       if (sql === LISTED_COMMUNITY_ID_SQL) {
         const community = communities.find(
           (entry) =>
-            entry.name === values[0] &&
+            // Values: the viewer (null without a token), the name.
+            entry.name === values[1] &&
             !entry.deleted_at &&
             !entry.suspended_at,
         );
-        return Promise.resolve([community ? [{ id: community.id }] : [], []]);
+        return Promise.resolve([
+          community
+            ? [
+                {
+                  id: community.id,
+                  access_visibility: 'public',
+                  access_member: 0,
+                },
+              ]
+            : [],
+          [],
+        ]);
       }
       if (sql.startsWith('SELECT COUNT(*) AS total FROM posts')) {
         return Promise.resolve([[{ total: visible(sql, values).length }], []]);
@@ -203,6 +215,7 @@ describe('GET /communities/:name/posts (e2e)', () => {
         'score',
         'saved',
         'media',
+        'flair',
         'title',
         'type',
       ].sort(),

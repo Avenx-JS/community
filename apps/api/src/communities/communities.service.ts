@@ -37,8 +37,18 @@ import { ListSubscriptionsDto } from './dto/list-subscriptions.dto';
 import { UpdateCommunityDto } from './dto/update-community.dto';
 import {
   COMMUNITY_VISIBLE_PREDICATE,
+  listedCommunitySql,
   visibleCommunityColumnsSql,
+  type CommunityVisibility,
 } from '../common/community-visibility';
+import {
+  accessColumnsSql,
+  assertReadableRow,
+  readCommunityAccess,
+  VIEWER_JOIN_SQL,
+  type AccessColumns,
+} from './community-access';
+import type { CommunityPostType } from './dto/update-community.dto';
 
 interface CreatorCheckOptions {
   executor?: Pool | PoolConnection;
@@ -46,12 +56,35 @@ interface CreatorCheckOptions {
   forbidden?: string;
 }
 
-interface CommunityRow extends RowDataPacket {
+export interface CommunityRow extends RowDataPacket {
   id: string;
   creator_id: string;
   name: string;
   description: string | null;
   created_at: Date | string;
+  visibility: CommunityVisibility;
+  nsfw: number | boolean;
+  allowed_post_types: string;
+}
+
+// Every column of a CommunityDto, for each statement that builds one.
+export const COMMUNITY_COLUMNS =
+  'id, creator_id, name, description, created_at, visibility, nsfw, allowed_post_types';
+
+export function toCommunityDto(community: CommunityRow): CommunityDto {
+  return {
+    id: community.id,
+    creator_id: community.creator_id,
+    name: community.name,
+    description: community.description,
+    created_at: new Date(community.created_at).toISOString(),
+    visibility: community.visibility,
+    nsfw: Boolean(community.nsfw),
+    // A SET column: never NULL, possibly empty.
+    allowed_post_types: (community.allowed_post_types ?? '')
+      .split(',')
+      .filter(Boolean) as CommunityPostType[],
+  };
 }
 
 export interface CommunityDto {
@@ -60,6 +93,9 @@ export interface CommunityDto {
   name: string;
   description: string | null;
   created_at: string;
+  visibility: CommunityVisibility;
+  nsfw: boolean;
+  allowed_post_types: CommunityPostType[];
 }
 
 // GET /communities/:name: the community with its images
@@ -121,7 +157,7 @@ interface PersonRow extends RowDataPacket {
   display_name: string | null;
 }
 
-interface CreatorRow extends PersonRow {
+interface CreatorRow extends PersonRow, AccessColumns {
   id: string;
   created_at: Date | string;
   creator_id: string;
@@ -173,8 +209,15 @@ export interface CommunityMemberListDto {
   total: number;
 }
 
+export const JOIN_REQUEST_REQUIRED_REASON = 'join_request_required';
+
+// Values: the community id, the account id.
+export const REMOVE_MODERATOR_SQL =
+  'DELETE FROM community_moderators WHERE community_id = ? AND user_id = ?';
+
 // Both community predicates: soft deletion (022) and suspension (025).
-export const LISTED_COMMUNITY_ID_SQL = `SELECT id FROM communities WHERE name = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1`;
+// Values: viewer or null, name.
+export const LISTED_COMMUNITY_ID_SQL = `SELECT id, ${accessColumnsSql('communities')} FROM communities ${VIEWER_JOIN_SQL} WHERE name = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1`;
 
 @Injectable()
 export class CommunitiesService {
@@ -189,23 +232,29 @@ export class CommunitiesService {
     this.bans = bans ?? new CommunityBanPolicyService(pool);
   }
 
-  async findAll(query: ListCommunitiesDto): Promise<CommunityListDto> {
+  // The directory. Private communities are listed (their name and
+  // description are public, so one can ask to join); nsfw ones only for a
+  // viewer whose show_nsfw preference is on.
+  async findAll(
+    query: ListCommunitiesDto,
+    viewerId?: string,
+  ): Promise<CommunityListDto> {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
     const offset = (page - 1) * limit;
     const search = query.search?.trim();
-    let where = ` WHERE ${COMMUNITY_VISIBLE_PREDICATE}`;
-    let values: (string | number)[] = [];
+    let where = ` WHERE ${COMMUNITY_VISIBLE_PREDICATE} AND ${listedCommunitySql('communities')}`;
+    let values: (string | number | null)[] = [viewerId ?? null];
 
     if (search) {
       const term = `%${escapeLikeSearch(search)}%`;
       where +=
         " AND (LOWER(name) LIKE LOWER(?) ESCAPE '=' OR LOWER(description) LIKE LOWER(?) ESCAPE '=')";
-      values = [term, term];
+      values = [...values, term, term];
     }
 
     const [communities] = await this.pool.execute<CommunityRow[]>(
-      `SELECT id, creator_id, name, description, created_at FROM communities${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+      `SELECT ${COMMUNITY_COLUMNS} FROM communities${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
       [...values, limit, offset],
     );
     const [countRows] = await this.pool.execute<
@@ -239,7 +288,7 @@ export class CommunitiesService {
     }
 
     const [communities] = await this.pool.execute<CommunityRow[]>(
-      'SELECT id, creator_id, name, description, created_at FROM communities WHERE id = ? LIMIT 1',
+      `SELECT ${COMMUNITY_COLUMNS} FROM communities WHERE id = ? LIMIT 1`,
       [id],
     );
     const community = communities[0];
@@ -255,14 +304,16 @@ export class CommunitiesService {
   // community by name and then delegate to an id-keyed service (GET
   // /communities/:name/posts). A deleted or suspended community is a 404,
   // never an empty listing that would imply it exists and is merely quiet.
-  async resolveListedId(name: string): Promise<string> {
+  // A private community is 403 for a non-member (reason private_community).
+  async resolveListedId(name: string, viewerId?: string): Promise<string> {
     const [communities] = await this.pool.execute<
-      (RowDataPacket & { id: string })[]
-    >(LISTED_COMMUNITY_ID_SQL, [name]);
+      (RowDataPacket & AccessColumns & { id: string })[]
+    >(LISTED_COMMUNITY_ID_SQL, [viewerId ?? null, name]);
     const community = communities[0];
     if (!community) {
       throw new NotFoundException('Community not found');
     }
+    assertReadableRow(community);
     return community.id;
   }
 
@@ -273,7 +324,7 @@ export class CommunitiesService {
         banner_media_id?: string | null;
       })[]
     >(
-      `SELECT id, creator_id, name, description, created_at, icon_media_id, banner_media_id FROM communities WHERE name = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1`,
+      `SELECT ${COMMUNITY_COLUMNS}, icon_media_id, banner_media_id FROM communities WHERE name = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1`,
       [name],
     );
     const community = communities[0];
@@ -299,12 +350,24 @@ export class CommunitiesService {
   // Joining is participation, so it requires the current rules to be
   // accepted. Leaving (unsubscribe) deliberately does not: a user who
   // declines the rules must not be trapped in the community.
+  // A restricted or private community is joined through an approved join
+  // request (POST /communities/:name/join-requests), never directly: 403
+  // with reason join_request_required. Its creator and moderators may still
+  // subscribe, and so may a member again (idempotent).
   async subscribe(name: string, userId: string): Promise<void> {
     const communityId = await this.getCommunityId(name);
     // Without this a ban is defeated at once: banning deletes the membership,
     // and nothing else stops an immediate rejoin. Before the rule gate, so a
     // banned user is told the actionable fact.
     await this.bans.assertNotBannedOrThrow(userId, communityId);
+    const access = await readCommunityAccess(this.pool, communityId, userId);
+    if (access && access.visibility !== 'public' && !access.member) {
+      throw new ForbiddenException({
+        reason: JOIN_REQUEST_REQUIRED_REASON,
+        message:
+          'This community is joined by request: POST /communities/:name/join-requests',
+      });
+    }
     await this.ruleAcceptance.assertAcceptedOrThrow(userId, communityId);
     await this.pool.execute<ResultSetHeader>(
       'INSERT INTO community_subscriptions (user_id, community_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE created_at = created_at',
@@ -389,50 +452,53 @@ export class CommunitiesService {
     );
   }
 
-  async addModerator(
-    name: string,
-    username: string,
-    actorId: string,
-  ): Promise<void> {
-    const community = await this.getCommunityForRoleChange(name, actorId);
-    const [users] = await this.pool.execute<(RowDataPacket & { id: string })[]>(
-      'SELECT id FROM users WHERE username = ? LIMIT 1',
-      [username],
-    );
-    const user = users[0];
-    if (!user) {
-      throw new NotFoundException('User not found');
-    }
-    if (user.id !== community.creator_id) {
-      const [memberships] = await this.pool.execute<
-        (RowDataPacket & { user_id: string })[]
-      >(
-        'SELECT user_id FROM community_subscriptions WHERE community_id = ? AND user_id = ? LIMIT 1',
-        [community.id, user.id],
-      );
-      if (!memberships[0]) {
-        throw new ForbiddenException(
-          'Only a subscribed community member can be appointed moderator',
-        );
-      }
-    }
-
-    await this.pool.execute<ResultSetHeader>(
-      'INSERT INTO community_moderators (community_id, user_id, assigned_by) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE user_id = user_id',
-      [community.id, user.id, actorId],
-    );
-  }
-
+  // Creator only, idempotent. Nobody becomes a moderator without accepting
+  // an invitation (CommunityModeratorInvitesService); removing one is the
+  // creator's decision alone, logged as moderator_removed in the same
+  // transaction, and only when a moderator was actually removed.
   async removeModerator(
     name: string,
     username: string,
     actorId: string,
   ): Promise<void> {
-    const community = await this.getCommunityForRoleChange(name, actorId);
-    await this.pool.execute<ResultSetHeader>(
-      'DELETE FROM community_moderators WHERE community_id = ? AND user_id = (SELECT id FROM users WHERE username = ? LIMIT 1)',
-      [community.id, username],
-    );
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+      const community = await this.getCommunityForRoleChange(name, actorId, {
+        executor: connection,
+        forUpdate: true,
+      });
+      const [users] = await connection.execute<
+        (RowDataPacket & { id: string })[]
+      >('SELECT id FROM users WHERE username = ? LIMIT 1', [username]);
+      const user = users[0];
+      const [result] = user
+        ? await connection.execute<ResultSetHeader>(REMOVE_MODERATOR_SQL, [
+            community.id,
+            user.id,
+          ])
+        : [{ affectedRows: 0 }];
+      if (user && result.affectedRows > 0) {
+        await this.moderationLog.record(connection, {
+          actorId,
+          communityId: community.id,
+          action: 'moderator_removed',
+          targetType: 'user',
+          targetId: user.id,
+          metadata: { username },
+        });
+      }
+      await connection.commit();
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
   }
 
   // Public. The creator is a separate top-level object, not the first item:
@@ -444,6 +510,7 @@ export class CommunitiesService {
   async listModerators(
     name: string,
     query: ListCommunityModeratorsDto,
+    viewerId?: string,
   ): Promise<CommunityModeratorListDto> {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
@@ -451,16 +518,20 @@ export class CommunitiesService {
 
     const [communities] = await this.pool.execute<CreatorRow[]>(
       `SELECT c.id, c.created_at, c.creator_id,
-         u.username, u.display_name, u.deleted_at AS creator_deleted_at
+         u.username, u.display_name, u.deleted_at AS creator_deleted_at,
+         ${accessColumnsSql('c')}
        FROM communities c
        JOIN users u ON u.id = c.creator_id
+       ${VIEWER_JOIN_SQL}
        WHERE c.name = ? AND ${visibleCommunityColumnsSql('c')} LIMIT 1`,
-      [name],
+      [viewerId ?? null, name],
     );
     const community = communities[0];
     if (!community) {
       throw new NotFoundException('Community not found');
     }
+    // A private community's people are for its members.
+    assertReadableRow(community);
 
     const from = MODERATORS_FROM;
     const values = [community.id, community.creator_id];
@@ -578,18 +649,23 @@ export class CommunitiesService {
     actorId: string,
   ): Promise<CommunityDto> {
     const assignments: string[] = [];
-    const values: (string | null)[] = [];
+    const values: (string | boolean | null)[] = [];
     const fields: string[] = [];
     for (const field of EDITABLE_COMMUNITY_FIELDS) {
       const value = changes[field];
       if (value !== undefined) {
         assignments.push(`${field} = ?`);
-        values.push(value === '' ? null : value);
+        // allowed_post_types is a SET column: a comma-separated string.
+        values.push(
+          Array.isArray(value) ? value.join(',') : value === '' ? null : value,
+        );
         fields.push(field);
       }
     }
     if (assignments.length === 0) {
-      throw new BadRequestException('description must be provided');
+      throw new BadRequestException(
+        'At least one of description, visibility, nsfw and allowed_post_types must be provided',
+      );
     }
 
     const connection = await this.pool.getConnection();
@@ -607,16 +683,24 @@ export class CommunitiesService {
         `UPDATE communities SET ${assignments.join(', ')} WHERE id = ?`,
         [...values, community.id],
       );
+      // A visibility change names the new visibility too: who could see the
+      // community, and from when, is what a moderation log is read for.
+      const visibilityChanged =
+        changes.visibility !== undefined &&
+        changes.visibility !== community.visibility;
       await this.moderationLog.record(connection, {
         actorId,
         communityId: community.id,
         action: 'community_updated',
         targetType: 'community',
         targetId: community.id,
-        metadata: { fields: fields.join(',') },
+        metadata: {
+          fields: fields.join(','),
+          ...(visibilityChanged ? { visibility: changes.visibility } : {}),
+        },
       });
       const [communities] = await connection.execute<CommunityRow[]>(
-        'SELECT id, creator_id, name, description, created_at FROM communities WHERE id = ? LIMIT 1',
+        `SELECT ${COMMUNITY_COLUMNS} FROM communities WHERE id = ? LIMIT 1`,
         [community.id],
       );
       const updated = communities[0];
@@ -700,11 +784,19 @@ export class CommunitiesService {
       forUpdate = false,
       forbidden = 'Only the community creator can manage moderators',
     }: CreatorCheckOptions = {},
-  ): Promise<{ id: string; creator_id: string }> {
+  ): Promise<{
+    id: string;
+    creator_id: string;
+    visibility: CommunityVisibility;
+  }> {
     const [communities] = await executor.execute<
-      (RowDataPacket & { id: string; creator_id: string })[]
+      (RowDataPacket & {
+        id: string;
+        creator_id: string;
+        visibility: CommunityVisibility;
+      })[]
     >(
-      `SELECT id, creator_id FROM communities WHERE name = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1${
+      `SELECT id, creator_id, visibility FROM communities WHERE name = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1${
         forUpdate ? ' FOR UPDATE' : ''
       }`,
       [name],
@@ -736,13 +828,7 @@ export class CommunitiesService {
   }
 
   private toDto(community: CommunityRow): CommunityDto {
-    return {
-      id: community.id,
-      creator_id: community.creator_id,
-      name: community.name,
-      description: community.description,
-      created_at: new Date(community.created_at).toISOString(),
-    };
+    return toCommunityDto(community);
   }
 
   private isDuplicateEntry(error: unknown): boolean {

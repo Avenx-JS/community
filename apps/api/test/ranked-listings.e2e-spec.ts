@@ -220,8 +220,14 @@ describe('Ranked listings, the feed and comment permalinks (e2e)', () => {
         return Promise.resolve(flags);
       }
       if (sql === LISTED_COMMUNITY_ID_SQL) {
-        const id = names[values[0] as string];
-        return Promise.resolve([id && !hidden.has(id) ? [{ id }] : [], []]);
+        // Values: the viewer, the name.
+        const id = names[values[1] as string];
+        return Promise.resolve([
+          id && !hidden.has(id)
+            ? [{ id, access_visibility: 'public', access_member: 0 }]
+            : [],
+          [],
+        ]);
       }
       if (sql.startsWith(`SELECT ${POST_COLUMNS} FROM posts WHERE`)) {
         const { rows, bound } = listed(sql, values);

@@ -3,11 +3,21 @@ import type { Pool, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import {
   COMMUNITY_VISIBLE_PREDICATE,
+  listedCommunitySql,
+  readableCommunitySql,
   visibleCommunityColumnsSql,
-  visibleCommunitySql,
 } from '../common/community-visibility';
+
+// Search spans communities, so it hides nsfw content from viewers who did
+// not opt in, and the viewer's muted communities.
+const SEARCH_CONTENT = { nsfw: true, muted: true };
 import { escapeLikeSearch } from '../common/like-search';
-import type { CommunityDto } from '../communities/communities.service';
+import {
+  COMMUNITY_COLUMNS,
+  toCommunityDto,
+  type CommunityDto,
+  type CommunityRow,
+} from '../communities/communities.service';
 import {
   POST_COLUMNS,
   toPostDtos,
@@ -78,16 +88,8 @@ interface UserRow extends RowDataPacket {
   avatar_media_id?: string | null;
 }
 
-interface CommunityRow extends RowDataPacket {
-  id: string;
-  creator_id: string;
-  name: string;
-  description: string | null;
-  created_at: Date | string;
-}
-
 type TotalRow = RowDataPacket & { total: number | string };
-type Bind = string | number;
+type Bind = string | number | null;
 
 // The same UTC reading of an ISO 8601 bound as the admin report queue.
 function toUtcSqlDate(value: string): string {
@@ -122,6 +124,7 @@ export class SearchService {
           sort,
           limit,
           offset,
+          viewerId,
         );
         return { ...envelope, items, total };
       }
@@ -141,6 +144,7 @@ export class SearchService {
           sort,
           limit,
           offset,
+          viewerId,
         );
         return { ...envelope, items, total };
       }
@@ -189,17 +193,21 @@ export class SearchService {
     };
   }
 
+  // Private communities are found (name and description are public); nsfw
+  // ones only for a viewer who opted in, muted ones never.
   private async communities(
     terms: string,
     sort: SearchSort,
     limit: number,
     offset: number,
+    viewerId?: string,
   ) {
     const query: Query = {
       from: `FROM communities
        WHERE ${COMMUNITIES_MATCH_SQL}
-         AND ${visibleCommunityColumnsSql('communities')}`,
-      values: [terms],
+         AND ${visibleCommunityColumnsSql('communities')}
+         AND ${listedCommunitySql('communities', { muted: true })}`,
+      values: [terms, viewerId ?? null],
     };
     const { select, order, values } = this.ranking(
       sort,
@@ -207,27 +215,25 @@ export class SearchService {
       COMMUNITIES_MATCH_SQL,
       'communities',
     );
+    const columns = COMMUNITY_COLUMNS.split(', ')
+      .map((column) => `communities.${column}`)
+      .join(', ');
     const [rows] = await this.pool.execute<CommunityRow[]>(
-      `SELECT communities.id, communities.creator_id, communities.name,
-         communities.description, communities.created_at${select}
+      `SELECT ${columns}${select}
        ${query.from}
        ORDER BY ${order} LIMIT ? OFFSET ?`,
       [...values, ...query.values, limit, offset],
     );
     return {
-      items: rows.map((row): CommunityDto => ({
-        id: row.id,
-        creator_id: row.creator_id,
-        name: row.name,
-        description: row.description,
-        created_at: iso(row.created_at),
-      })),
+      items: rows.map((row): CommunityDto => toCommunityDto(row)),
       total: await this.count(query),
     };
   }
 
   // What a reader of the community could see, as in the author listings: not
-  // removed by a moderator, not in a deleted or suspended community.
+  // removed by a moderator, not in a deleted or suspended community, not in
+  // a private one the viewer is not a member of; nor nsfw unless the viewer
+  // opted in, nor muted.
   private async posts(
     input: SearchQueryDto,
     sort: SearchSort,
@@ -245,8 +251,8 @@ export class SearchService {
       from: `FROM posts
        WHERE ${POSTS_MATCH_SQL}
          AND posts.removed_at IS NULL
-         AND ${visibleCommunitySql('posts.community_id')}${filters.sql}`,
-      values: [terms, ...filters.values],
+         AND ${readableCommunitySql('posts.community_id', SEARCH_CONTENT)}${filters.sql}`,
+      values: [terms, viewerId ?? null, ...filters.values],
     };
     const { select, order, values } = this.ranking(
       sort,
@@ -277,6 +283,7 @@ export class SearchService {
     sort: SearchSort,
     limit: number,
     offset: number,
+    viewerId?: string,
   ) {
     const terms = booleanModeTerms(input.q);
     const filters = await this.contentFilters(input, {
@@ -291,8 +298,8 @@ export class SearchService {
        WHERE ${COMMENTS_MATCH_SQL}
          AND c.removed_at IS NULL
          AND p.removed_at IS NULL
-         AND ${visibleCommunityColumnsSql('co')}${filters.sql}`,
-      values: [terms, ...filters.values],
+         AND ${readableCommunitySql('p.community_id', SEARCH_CONTENT)}${filters.sql}`,
+      values: [terms, viewerId ?? null, ...filters.values],
     };
     const { select, order, values } = this.ranking(
       sort,

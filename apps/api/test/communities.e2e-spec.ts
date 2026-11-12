@@ -1,3 +1,4 @@
+import { answerCommunityAccess } from './fakes/community-access';
 import {
   afterEach,
   beforeEach,
@@ -42,6 +43,17 @@ interface LogEntry {
 // community row the fake returns carries it, so the tests prove the API never
 // maps it into a response.
 const staleRulesColumn = { rules: 'stale legacy rules' };
+// The settings of a fresh community (migration 038).
+const SETTINGS = {
+  visibility: 'public',
+  nsfw: 0,
+  allowed_post_types: 'text,link,media',
+};
+const DTO_SETTINGS = {
+  visibility: 'public',
+  nsfw: false,
+  allowed_post_types: ['text', 'link', 'media'],
+};
 
 const tokenUsers: Record<string, string> = {
   'valid-token': 'authenticated-user',
@@ -183,6 +195,18 @@ describe('Community endpoints (e2e)', () => {
         const people = peopleAnswer(sql, values);
         if (people) {
           return people;
+        }
+
+        // Subscribing reads the community's visibility (migration 038).
+        const access = answerCommunityAccess(
+          sql,
+          values,
+          communities.filter((community) => !community.deleted_at),
+          (communityId, userId) =>
+            subscriptions.has(`${userId}:${communityId}`),
+        );
+        if (access) {
+          return access;
         }
 
         const ruleAnswer = rules.handle(sql, values);
@@ -351,9 +375,11 @@ describe('Community endpoints (e2e)', () => {
           const limit = values[values.length - 2] as number;
           const offset = values[values.length - 1] as number;
           return [
-            rows
-              .slice(offset, offset + limit)
-              .map((community) => ({ ...community, ...staleRulesColumn })),
+            rows.slice(offset, offset + limit).map((community) => ({
+              ...SETTINGS,
+              ...community,
+              ...staleRulesColumn,
+            })),
             [],
           ];
         }
@@ -363,7 +389,11 @@ describe('Community endpoints (e2e)', () => {
           return [
             communities
               .filter((community) => community.id === id)
-              .map((community) => ({ ...community, ...staleRulesColumn })),
+              .map((community) => ({
+                ...SETTINGS,
+                ...community,
+                ...staleRulesColumn,
+              })),
             [],
           ];
         }
@@ -373,7 +403,11 @@ describe('Community endpoints (e2e)', () => {
           return [
             communities
               .filter((community) => community.name === name)
-              .map((community) => ({ ...community, ...staleRulesColumn })),
+              .map((community) => ({
+                ...SETTINGS,
+                ...community,
+                ...staleRulesColumn,
+              })),
             [],
           ];
         }
@@ -489,7 +523,8 @@ describe('Community endpoints (e2e)', () => {
         !(sql.includes('u.deleted_at IS NULL') && users[id]?.deleted_at);
 
       if (sql.includes('JOIN users u ON u.id = c.creator_id')) {
-        const community = communities.find((entry) => entry.name === values[0]);
+        // Values: the viewer (null without a token), the name.
+        const community = communities.find((entry) => entry.name === values[1]);
         if (!community) return [[], []];
         const creator = userRow(community.creator_id);
         return [
@@ -501,6 +536,8 @@ describe('Community endpoints (e2e)', () => {
               creator_id: community.creator_id,
               creator_deleted_at:
                 users[community.creator_id].deleted_at ?? null,
+              access_visibility: 'public',
+              access_member: 0,
             },
           ],
           [],
@@ -606,7 +643,10 @@ describe('Community endpoints (e2e)', () => {
       if (!sql.includes("ESCAPE '='")) {
         return visible;
       }
-      const term = values[0] as string;
+      // The first bound pattern: the viewer of the nsfw filter comes first.
+      const term = values.find(
+        (value) => typeof value === 'string' && value.startsWith('%'),
+      ) as string;
       const search = term.slice(1, -1).toLowerCase();
       return visible.filter(
         (community) =>
@@ -777,6 +817,7 @@ describe('Community endpoints (e2e)', () => {
       .get('/communities/gardening')
       .expect(200);
     expect(Object.keys(found.body).sort()).toEqual([
+      'allowed_post_types',
       'banner',
       'created_at',
       'creator_id',
@@ -784,6 +825,8 @@ describe('Community endpoints (e2e)', () => {
       'icon',
       'id',
       'name',
+      'nsfw',
+      'visibility',
     ]);
     expect(found.body).toMatchObject({ icon: null, banner: null });
 
@@ -1259,6 +1302,7 @@ describe('Community endpoints (e2e)', () => {
         name: 'gardening',
         description: 'Growing plants, fixed',
         created_at: '2026-10-20T12:00:00.000Z',
+        ...DTO_SETTINGS,
       });
       expect(gardening().name).toBe('gardening');
       expect(logEntries).toEqual([

@@ -35,7 +35,7 @@ const snapshot = readFileSync(
 // The snapshot with 037 undone: its appended block and the version.
 const preceding = snapshot
   .replace(
-    /-- Account settings \(037_add_account_settings\)\.[\s\S]*?(?=CREATE TABLE schema_migrations)/,
+    /-- Account settings \(037_add_account_settings\)\.\r?\n[\s\S]*?(?=-- [^\n]*\(\d{3}_[a-z_]+\)\.\r?\n|CREATE TABLE schema_migrations)/,
     '',
   )
   .replace(/,\r?\n\s*\('037_add_account_settings'\)/, '');

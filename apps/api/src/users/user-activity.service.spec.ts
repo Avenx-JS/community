@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from '@jest/globals';
 import { NotFoundException } from '@nestjs/common';
 import type { Pool } from 'mysql2/promise';
-import { visibleCommunitySql } from '../common/community-visibility';
+import { readableCommunitySql } from '../common/community-visibility';
 import {
   USER_COMMENTS_COUNT_SQL,
   USER_COMMUNITIES_COUNT_SQL,
@@ -69,9 +69,10 @@ describe('UserActivityService', () => {
         );
         expect(sql).toContain('communities.suspended_at IS NULL');
       }
-      // The one shared visibility predicate, as every other post read uses.
+      // The one shared predicate, in its viewer-aware form: a private
+      // community's posts only for its members, nsfw only with the opt-in.
       expect(userPostsSql('new')).toContain(
-        visibleCommunitySql('posts.community_id'),
+        readableCommunitySql('posts.community_id', { nsfw: true }),
       );
     });
 
@@ -91,8 +92,8 @@ describe('UserActivityService', () => {
       });
 
       expect(listings()).toEqual([
-        { sql: userPostsSql('oldest'), values: ['user-7', 10, 20] },
-        { sql: USER_POSTS_COUNT_SQL, values: ['user-7'] },
+        { sql: userPostsSql('oldest'), values: ['user-7', null, 10, 20] },
+        { sql: USER_POSTS_COUNT_SQL, values: ['user-7', null] },
       ]);
       expect(result).toEqual({ items: [], page: 3, limit: 10, total: 42 });
     });
@@ -101,7 +102,7 @@ describe('UserActivityService', () => {
       await service.listPosts('some_user', {});
       expect(listings()[0]).toEqual({
         sql: userPostsSql('new'),
-        values: ['user-7', 20, 0],
+        values: ['user-7', null, 20, 0],
       });
     });
 
@@ -139,6 +140,7 @@ describe('UserActivityService', () => {
           score: 0,
           saved: false,
           media: null,
+          flair: null,
         },
       ]);
     });
@@ -150,8 +152,9 @@ describe('UserActivityService', () => {
         expect(sql).toContain('WHERE c.author_id = ?');
         expect(sql).toContain('AND c.removed_at IS NULL');
         expect(sql).toContain('AND p.removed_at IS NULL');
-        expect(sql).toContain('AND co.deleted_at IS NULL');
-        expect(sql).toContain('AND co.suspended_at IS NULL');
+        expect(sql).toContain(
+          readableCommunitySql('p.community_id', { nsfw: true }),
+        );
       }
     });
 
@@ -199,7 +202,7 @@ describe('UserActivityService', () => {
         limit: 5,
       });
 
-      expect(listings()[0].values).toEqual(['user-7', 5, 5]);
+      expect(listings()[0].values).toEqual(['user-7', null, 5, 5]);
       expect(result).toEqual({
         items: [
           {
@@ -253,9 +256,15 @@ describe('UserActivityService', () => {
       expect(USER_COMMUNITIES_COUNT_SQL).toContain(fragment);
     });
 
+    // The only subscription read is the viewer's own membership, for a
+    // private community: never one of the person's.
     it('never lists a subscription and returns no timestamp', () => {
       for (const sql of [USER_COMMUNITIES_SQL, USER_COMMUNITIES_COUNT_SQL]) {
-        expect(sql).not.toContain('community_subscriptions');
+        const activity = /FROM \(([\s\S]*?)\) activity/.exec(sql)?.[1];
+        expect(activity).toBeDefined();
+        expect(activity).not.toContain('community_subscriptions');
+        expect(sql.match(/community_subscriptions/g)).toHaveLength(1);
+        expect(sql).toContain('member_subscription.user_id = viewer.id');
       }
       const selected = /^SELECT ([\s\S]*?)\s+FROM \(/.exec(
         USER_COMMUNITIES_SQL,
@@ -265,12 +274,11 @@ describe('UserActivityService', () => {
     });
 
     it('excludes deleted and suspended communities and orders by name', () => {
-      expect(USER_COMMUNITIES_SQL).toContain(
-        'WHERE co.deleted_at IS NULL AND co.suspended_at IS NULL',
-      );
-      expect(USER_COMMUNITIES_COUNT_SQL).toContain(
-        'WHERE co.deleted_at IS NULL AND co.suspended_at IS NULL',
-      );
+      for (const sql of [USER_COMMUNITIES_SQL, USER_COMMUNITIES_COUNT_SQL]) {
+        expect(sql).toContain(
+          `WHERE ${readableCommunitySql('co.id', { nsfw: true })}`,
+        );
+      }
       expect(USER_COMMUNITIES_SQL).toMatch(
         /ORDER BY co\.name ASC LIMIT \? OFFSET \?$/,
       );
@@ -297,15 +305,16 @@ describe('UserActivityService', () => {
       expect(listings()).toEqual([
         {
           sql: USER_COMMUNITIES_SQL,
-          values: [...new Array<string>(6).fill('user-7'), 3, 3],
+          values: [...new Array<string>(6).fill('user-7'), null, 3, 3],
         },
         {
           sql: USER_COMMUNITIES_COUNT_SQL,
-          values: new Array<string>(4).fill('user-7'),
+          values: [...new Array<string>(4).fill('user-7'), null],
         },
       ]);
-      expect(USER_COMMUNITIES_SQL.split('?')).toHaveLength(9);
-      expect(USER_COMMUNITIES_COUNT_SQL.split('?')).toHaveLength(5);
+      // One more each: the viewer of the readability check.
+      expect(USER_COMMUNITIES_SQL.split('?')).toHaveLength(10);
+      expect(USER_COMMUNITIES_COUNT_SQL.split('?')).toHaveLength(6);
       expect(result).toEqual({
         items: [{ name: 'general', description: null, role: 'creator' }],
         page: 2,

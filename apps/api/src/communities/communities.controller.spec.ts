@@ -3,6 +3,7 @@ import { AuthService } from '../auth/auth.service';
 import { CommunitiesController } from './communities.controller';
 import { CommunitiesService } from './communities.service';
 import { CommunityStatsService } from './community-stats.service';
+import { CommunityDiscoveryService } from './community-discovery.service';
 import { NotificationPreferencesService } from './notification-preferences.service';
 
 describe('CommunitiesController', () => {
@@ -15,6 +16,7 @@ describe('CommunitiesController', () => {
         { provide: CommunitiesService, useValue: {} },
         { provide: NotificationPreferencesService, useValue: {} },
         { provide: CommunityStatsService, useValue: {} },
+        { provide: CommunityDiscoveryService, useValue: {} },
         { provide: AuthService, useValue: {} },
       ],
     }).compile();

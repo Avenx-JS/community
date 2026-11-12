@@ -15,7 +15,10 @@ import type {
 } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { CommunityBanPolicyService } from '../communities/community-ban-policy.service';
-import { visibleCommunitySql } from '../common/community-visibility';
+import {
+  readableCommunitySql,
+  visibleCommunitySql,
+} from '../common/community-visibility';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { UserBlockPolicyService } from '../users/user-block-policy.service';
 import {
@@ -102,6 +105,7 @@ export class VotesService {
         connection,
         input.target_type,
         input.target_id,
+        userId,
       );
       // A comment's community is its post's (findTarget's two hops). Ban
       // first, then rules: a banned user is told the actionable fact.
@@ -228,7 +232,7 @@ export class VotesService {
     targetId: string,
     userId: string,
   ): Promise<VoteStateDto> {
-    await this.findTarget(this.pool, targetType, targetId, false);
+    await this.findTarget(this.pool, targetType, targetId, false, userId);
     const [own] = await this.pool.execute<
       (RowDataPacket & { value: number })[]
     >(OWN_VOTE_SQL, [userId, targetType, targetId]);
@@ -274,18 +278,27 @@ export class VotesService {
     connection: PoolConnection,
     targetType: VoteTarget,
     targetId: string,
+    viewerId?: string,
   ): Promise<VoteTargetState> {
-    return this.findTarget(connection, targetType, targetId, true);
+    return this.findTarget(connection, targetType, targetId, true, viewerId);
   }
 
   // The one target lookup: 404 for an unknown target or one in a deleted
   // community, resolving a comment's community through comments → posts.
+  // With a viewer, also 404 in a private community the viewer is not a
+  // member of: voting and reading a vote need read access. Withdrawing a
+  // vote passes none, so leaving a private community never strands one.
   private async findTarget(
     executor: Executor,
     targetType: VoteTarget,
     targetId: string,
     lock: boolean,
+    viewerId?: string,
   ): Promise<VoteTargetState> {
+    const community =
+      viewerId === undefined
+        ? visibleCommunitySql('posts.community_id')
+        : readableCommunitySql('posts.community_id');
     const [targets] = await executor.execute<
       (RowDataPacket & {
         id: string;
@@ -295,15 +308,15 @@ export class VotesService {
       })[]
     >(
       targetType === 'post'
-        ? `SELECT id, community_id, author_id, removed_at IS NOT NULL AS removed FROM posts WHERE id = ? AND ${visibleCommunitySql('posts.community_id')}${lock ? ' FOR UPDATE' : ''}`
+        ? `SELECT id, community_id, author_id, removed_at IS NOT NULL AS removed FROM posts WHERE id = ? AND ${community}${lock ? ' FOR UPDATE' : ''}`
         : `SELECT comments.id, posts.community_id, comments.author_id,
              (comments.removed_at IS NOT NULL OR posts.removed_at IS NOT NULL) AS removed
            FROM comments
            INNER JOIN posts ON posts.id = comments.post_id
-           WHERE comments.id = ? AND ${visibleCommunitySql('posts.community_id')}${
+           WHERE comments.id = ? AND ${community}${
              lock ? '\n           FOR UPDATE OF comments' : ''
            }`,
-      [targetId],
+      viewerId === undefined ? [targetId] : [targetId, viewerId],
     );
 
     const target = targets[0];

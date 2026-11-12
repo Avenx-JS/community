@@ -168,6 +168,11 @@ describe('AccountDeletionService', () => {
       'DELETE FROM email_changes WHERE user_id = ?',
       'DELETE FROM user_preferences WHERE user_id = ?',
       'DELETE FROM data_exports WHERE user_id = ?',
+      // Community settings (migration 038).
+      'DELETE FROM community_join_requests WHERE user_id = ?',
+      'DELETE FROM community_moderator_invites WHERE user_id = ?',
+      'DELETE FROM community_user_flairs WHERE user_id = ?',
+      'DELETE FROM community_mutes WHERE user_id = ?',
       // Releases, never deletes: the sweep deletes the files (migration 035).
       ...RELEASE_ACCOUNT_MEDIA_SQL,
     ]);

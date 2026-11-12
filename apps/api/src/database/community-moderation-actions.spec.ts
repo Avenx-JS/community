@@ -17,7 +17,18 @@ const TABLE = /CREATE TABLE community_moderation_actions \(([\s\S]*?)\n\);/;
 const ADDED_ACTIONS = ['community_updated', 'community_deleted'];
 // Added by migration 036 (community report review), after 023's.
 const ACTIONS_036 = ['report_approved', 'report_removed'];
-const ACTIONS_THROUGH_023 = COMMUNITY_MODERATION_ACTIONS.filter(
+// Added by migration 038 (community settings), after 036's.
+const ACTIONS_038 = [
+  'moderator_invited',
+  'moderator_invite_revoked',
+  'moderator_invite_declined',
+  'join_request_approved',
+  'join_request_denied',
+];
+const ACTIONS_THROUGH_036 = COMMUNITY_MODERATION_ACTIONS.filter(
+  (action) => !ACTIONS_038.includes(action),
+);
+const ACTIONS_THROUGH_023 = ACTIONS_THROUGH_036.filter(
   (action) => !ACTIONS_036.includes(action),
 );
 const ADDED_TARGETS = ['community'];
@@ -139,7 +150,24 @@ describe('migration 036 (community report review) on the moderation log', () => 
   );
 
   it('appends the report actions to the action enum, last', () => {
-    expect(COMMUNITY_MODERATION_ACTIONS.slice(-2)).toEqual(ACTIONS_036);
+    expect(ACTIONS_THROUGH_036.slice(-2)).toEqual(ACTIONS_036);
+    expect(migration).toContain(
+      'ALTER TABLE community_moderation_actions ' +
+        `MODIFY COLUMN action ENUM( ${enumList(ACTIONS_THROUGH_036)} ) NOT NULL;`,
+    );
+  });
+});
+
+describe('migration 038 (community settings) on the moderation log', () => {
+  const migration = normalise(
+    read('../../../../data/migrations/038_add_community_settings.sql').replace(
+      /^--.*$/gm,
+      '',
+    ),
+  );
+
+  it('appends the invitation and join-request actions to the action enum, last', () => {
+    expect(COMMUNITY_MODERATION_ACTIONS.slice(-5)).toEqual(ACTIONS_038);
     expect(migration).toContain(
       'ALTER TABLE community_moderation_actions ' +
         `MODIFY COLUMN action ENUM( ${enumList(COMMUNITY_MODERATION_ACTIONS)} ) NOT NULL;`,

@@ -1,6 +1,6 @@
 import {
+  readableCommunitySql,
   visibleCommunityColumnsSql,
-  visibleCommunitySql,
 } from '../common/community-visibility';
 
 // The statements behind media's lifecycle, defined once (migration 035).
@@ -21,7 +21,9 @@ export const MEDIA_REFERENCED_SQL = `(EXISTS (SELECT 1 FROM posts WHERE posts.me
 // community visible); an avatar while the account exists; an icon or banner
 // while the community is visible; and the uploader's own file while it is
 // not released, so an upload can be previewed before it is posted. A
-// released file is visible to no one. Bound to [media id, viewer id or null].
+// released file is visible to no one, and a post's file in a private
+// community only to its members. Bound to [media id, viewer id or null,
+// viewer id or null].
 export const VISIBLE_MEDIA_SQL = `SELECT ${MEDIA_COLUMNS}
        FROM media
        WHERE media.id = ? AND media.released_at IS NULL
@@ -29,7 +31,7 @@ export const VISIBLE_MEDIA_SQL = `SELECT ${MEDIA_COLUMNS}
            EXISTS (
              SELECT 1 FROM posts
              WHERE posts.media_id = media.id AND posts.removed_at IS NULL
-               AND ${visibleCommunitySql('posts.community_id')}
+               AND ${readableCommunitySql('posts.community_id')}
            )
            OR EXISTS (
              SELECT 1 FROM users

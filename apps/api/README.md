@@ -2076,7 +2076,9 @@ whole operation back and the account stays fully intact):
    reports kept), for the same reason: anonymising does not fire
    `fk_user_reports_assigned_to`. See [Assigning reports](#assigning-reports).
    Its email verification codes, a pending email change, its preferences
-   and its data exports (each a copy of its data) are deleted too.
+   and its data exports (each a copy of its data) are deleted too, and so are
+   its join requests, moderator invitations, user flairs and community mutes
+   (migration 038).
    Its avatar and its uploads never attached to a post are
    [released](#releasing-and-cleaning-up-media) (`RELEASE_ACCOUNT_MEDIA_SQL`)
    and `avatar_media_id` is cleared; the files in its posts stay with the
@@ -2255,7 +2257,7 @@ defaults, and `GET` writes nothing.
 | --- | --- | --- |
 | `email_notifications` | `true` | Stored for notification emails to come; today only account emails exist, which it never turns off |
 | `new_community_notifications` | `true` | When off, a community you join starts with `new_posts` off; existing per-community settings are never overridden (`APPLY_DEFAULT_COMMUNITY_NOTIFICATIONS_SQL` on subscribe) |
-| `show_nsfw` | `false` | Stored for clients; content has no NSFW marking yet |
+| `show_nsfw` | `false` | When on, posts of [nsfw communities](#nsfw-and-post-types) appear in cross-community listings, search and discovery |
 | `timezone` | `UTC` | An IANA zone this runtime knows, in its proper case (`Europe/Berlin`) |
 | `language` | `en` | A BCP 47 tag: language, optional script and region (`de`, `en-GB`, `zh-Hant-TW`) |
 
@@ -2282,8 +2284,9 @@ The file (`community-data-export/1`) holds the account, its preferences, its
 posts and comments (removed ones included, marked), votes, subscriptions and
 per-community notification settings, communities it created or moderates,
 saved posts, the usernames it blocked, the reports it filed (as
-`GET /reports` shows them), the notifications it received, its media and its
-sessions (with network prefixes). **It never holds** a password hash, a token,
+`GET /reports` shows them), the notifications it received, its media, its
+sessions (with network prefixes), and its join requests, moderator
+invitations, user flairs and muted communities. **It never holds** a password hash, a token,
 another person's private data, or what others said about the account (reports
 about it, moderators' removal reasons): every section is one statement bound to
 the account id alone (`EXPORT_SECTIONS`). Both export routes are available to
@@ -3233,6 +3236,154 @@ also subscribed. The routes report membership only and say nothing about
 notification delivery. Like every other route except `GET /health`, both count
 against the API read rate limits.
 
+### Community settings
+
+Migration `038_add_community_settings`. Every community that existed before
+it is `public`, not nsfw, and accepts every post type: nothing changes until
+its creator changes it.
+
+#### Visibility
+
+`PATCH /communities/:name` (creator only) takes `visibility`, `nsfw` and
+`allowed_post_types` alongside `description`; `CommunityDto` returns all
+three.
+
+| Visibility | Reading posts, comments, votes | Moderators, stats, flairs | Posting | Joining |
+| --- | --- | --- | --- | --- |
+| `public` | everyone | everyone | members (as before: subscribing is open) | `POST .../subscribe` |
+| `restricted` | everyone | everyone | members only (`403`, `{ "reason": "membership_required" }`) | by request |
+| `private` | members only | members only (`403`, `{ "reason": "private_community" }`) | members only | by request |
+
+A **member** is the creator, a subscriber or a moderator. A private
+community's page (`GET /communities/:name`: name, description, settings,
+images) and its rules stay public, so that someone can find it and ask to
+join; the directory, search and `GET /communities/:name/members`
+(moderators only, as before) list it.
+
+**One predicate, everywhere content appears.** `readableCommunitySql`
+(`src/common/community-visibility.ts`) is the viewer-aware form of
+`visibleCommunitySql`: the community is visible *and* not private unless the
+viewer is a member. It binds exactly one placeholder, the viewer's id or
+`null` for an anonymous request, through a derived table, however many
+checks use it. Every content read applies it: `GET /posts`, `GET /feed`,
+`GET /communities/:name/posts` (`403` for a non-member, folded into the
+name lookup), `GET /posts/:id`, the comment thread and its flat routes,
+`GET /comments/:id`, votes, saving, the saved list, search (posts and
+comments), the three profile listings (`/users/:username/posts`,
+`/comments`, `/communities`: a private community a person takes part in is
+not even named to a non-member) and a post's media file. A non-member gets
+`404` for content by id, exactly as for content that does not exist.
+Writes by authors and moderators to their own content (edit, delete,
+moderation) keep `visibleCommunitySql`: leaving a private community never
+strands one's own posts.
+
+**Downgrading takes effect on the next request.** The predicate is evaluated
+per statement, nothing is cached, so making a community private hides it
+from non-members at once; making it public opens it at once. Content of a
+private community never appears in a non-member's listings or search, and
+the community's own listing answers `403`.
+
+Known limit: `GET /media/:id/file` of a private community's post needs the
+member's bearer token, so a plain `<img src>` without it is `404`.
+
+#### NSFW and post types
+
+- `nsfw`: the community's posts appear in cross-community listings
+  (`GET /posts`, `GET /feed`, search, profile listings) and in the directory,
+  search, trending and recommendations only for a viewer whose
+  `show_nsfw` [preference](#preferences) is on; anonymous viewers never see
+  them there. The community's own page and listing still show them: the viewer
+  went there, and clients gate on `nsfw`.
+- `allowed_post_types`: at least one of `text`, `link`, `media`, stored as a
+  MySQL `SET`. `POST /posts` with another type is `400`. Existing posts stay.
+
+#### Joining by request
+
+| Route | Who | Does |
+| --- | --- | --- |
+| `POST /communities/:name/join-requests` | any account | `{ "message"? }` (500 characters), `201` pending |
+| `GET /communities/:name/join-requests/me` | the asker | its request and status |
+| `GET /communities/:name/join-requests` | creator, moderators | pending requests, oldest first |
+| `POST .../join-requests/:username/approve` | creator, moderators | the account becomes a member at once (`204`) |
+| `POST .../join-requests/:username/deny` | creator, moderators | `204` |
+
+`POST .../subscribe` on a restricted or private community is `403` with
+`{ "reason": "join_request_required" }` (its creator and moderators may still
+subscribe). A request is `409` for a public community, for a member, while one
+is pending, and for `COMMUNITY_JOIN_REQUEST_RETRY_HOURS` (default 168) after a
+denial, compared on the database clock. A ban refuses the request and also an
+approval placed after the ban (`403`). One row per account and community
+(`community_join_requests`) keeps the decision; renewing makes it pending
+again. Approval writes the subscription exactly as subscribing does, including
+the account's default notification setting. Both decisions are logged.
+
+#### Moderator invitations
+
+Nobody becomes a moderator without consent. **Breaking change:**
+`POST /communities/:name/moderators` (direct appointment) is removed;
+`DELETE /communities/:name/moderators` (creator removes a moderator) stays.
+
+| Route | Who | Does |
+| --- | --- | --- |
+| `POST /communities/:name/moderators/invites` | creator | `{ "username" }`: a subscribed, unbanned member; `409` for a moderator or the creator; idempotent |
+| `GET /users/me/moderator-invites` | the invitee | pending invitations, newest first |
+| `POST /communities/:name/moderators/invites/accept` | the invitee | becomes a moderator; the invitation is consumed |
+| `DELETE /communities/:name/moderators/invites` | the invitee | declines |
+| `DELETE /communities/:name/moderators/invites?username=` | creator | revokes |
+
+#### Flairs
+
+`community_flairs` holds a community's `post` and `user` flairs (text up to
+64 characters, unique per kind; an optional `#rrggbb` colour; `mod_only`), at
+most `COMMUNITY_FLAIRS_MAX` (default 100).
+
+| Route | Who |
+| --- | --- |
+| `GET /communities/:name/flairs` (`?kind=`) | everyone; members only when private |
+| `POST`, `PATCH /flairs/:id`, `DELETE /flairs/:id` | creator, moderators |
+| `PUT /posts/:id/flair` `{ "flair_id" }` | the author picks a post flair not marked `mod_only`; moderators any |
+| `DELETE /posts/:id/flair` | the author clears one they could have chosen; a `mod_only` flair only moderators |
+| `GET` and `PUT /communities/:name/members/:username/flair` | a member sets their own from open user flairs; moderators any member's, any user flair; `{ "flair_id": null }` clears |
+
+Every post carries `flair` (`{ id, text, background_color }` or `null`),
+loaded per page in one statement and none for a page without flairs. Deleting
+a flair clears it from posts (`ON DELETE SET NULL`) and from members
+(`CASCADE`).
+
+#### Mutes and discovery
+
+- `POST` and `DELETE /communities/:name/mute` (idempotent, `204`): a muted
+  community leaves the caller's feed, search, trending and recommendations; its
+  own page, posts and the caller's membership stay.
+- `GET /communities/trending` (`?limit=`, 1 to 50, default 10; token optional):
+  communities with posts in the last 24 hours or members in the last 7 days,
+  most posts first, then most new members. It reads only communities with
+  recent rows, not the whole table.
+- `GET /communities/recommended` (token required): communities the caller's
+  fellow members also belong to, by how many of them do, reading at most the
+  `COMMUNITY_RECOMMENDATION_PEERS` (default 1000) most recent fellow members;
+  then the largest communities as a fallback. Never the caller's own.
+
+Neither ever lists a private community, an nsfw one without the opt-in, or a
+muted one.
+
+#### Moderation log
+
+Every visibility and moderator change is logged in the same transaction as
+the change:
+
+| Action | When | Metadata |
+| --- | --- | --- |
+| `community_updated` | settings changed | `fields`, and the new `visibility` when it changed |
+| `moderator_invited`, `moderator_invite_revoked`, `moderator_invite_declined` | invitations | `username` |
+| `moderator_added` | an invitation accepted (actor: the new moderator) | `username` |
+| `moderator_removed` | `DELETE .../moderators`, only when one was removed | `username` |
+| `join_request_approved`, `join_request_denied` | decisions | `username` |
+
+An account deletion removes the account's join requests, invitations, user
+flairs and mutes; the data export includes them (who decided a request is
+the moderator's data and is not exported).
+
 ### Community posts
 
 #### `GET /communities/:name/posts`
@@ -3538,7 +3689,8 @@ of these behaves as if the community did not exist:
 | `GET /subscriptions`                                                                   | omitted from `items` and `total`           |
 | `GET /communities/:name/subscription`, `POST` and `DELETE .../subscribe`               | `404`                                      |
 | `GET` and `PUT .../notification-preferences`                                           | `404`                                      |
-| `POST` and `DELETE .../moderators`                                                     | `404`                                      |
+| `DELETE .../moderators`, `.../moderators/invites` (all three)                          | `404`                                      |
+| `.../join-requests`, `.../flairs`, `.../members/:username/flair`, `.../mute`         | `404`                                      |
 | `GET` and `PUT .../rules`, `GET .../rules/versions`, `GET .../rules/versions/:version` | `404`                                      |
 | `GET` and `POST .../rules/acceptance`                                                  | `404`                                      |
 | `GET .../moderation-log`                                                               | `404`                                      |
@@ -3583,14 +3735,16 @@ assignments are stored separately in `community_moderators`, scoped by both
 community and user. Moderator authorization is always checked against the
 specific community. There is no global administrator role.
 
-Only the community creator can appoint or remove moderators using
-`POST /communities/:name/moderators` and
-`DELETE /communities/:name/moderators`, each with
-`{ "username": "member_name" }` and a bearer token. These operations return
-`204`, unknown communities/users return `404`, and non-creator attempts return
-`403`. The actor identity comes only from the validated bearer token; request
-data cannot set a role or actor ID. The creator cannot delegate moderator
-management, and moderators cannot appoint other moderators. Publishing
+Only the community creator invites moderators
+(`POST /communities/:name/moderators/invites`), and an invited member becomes a
+moderator only by accepting (see [Moderator invitations](#moderator-invitations));
+the direct appointment route was removed. The creator removes a moderator with
+`DELETE /communities/:name/moderators` and `{ "username": "member_name" }`
+(`204`, idempotent, logged as `moderator_removed`); unknown communities
+return `404`, and non-creator attempts return `403`. The actor identity comes
+only from the validated bearer token; request data cannot set a role or actor
+ID. The creator cannot delegate moderator management, and moderators cannot
+invite other moderators. Publishing
 community rules is likewise creator-only (see [Rules API](#rules-api)).
 
 **Authors delete; moderators remove.** `DELETE /posts/:id` and
@@ -4565,9 +4719,10 @@ check. A guard would repeat those lookups outside that transaction.
   `PUT` routes are gated.
 - **`POST /auth/*`** is outside any community, and **`POST /communities`** has
   no community yet (its creator is exempt once it exists).
-- **`POST`/`DELETE /communities/:name/moderators`** are creator-only, and the
-  creator is exempt, so a check there could never refuse anyone. It is
-  deliberately not added.
+- **`DELETE /communities/:name/moderators` and inviting moderators** are
+  creator-only, and the creator is exempt, so a check there could never refuse
+  anyone. It is deliberately not added. Accepting an invitation is not gated
+  either: the invitee is already a member.
 
 Unit and e2e tests assert that these exempt paths never call the check, so a
 later change cannot "complete" the coverage by gating them.

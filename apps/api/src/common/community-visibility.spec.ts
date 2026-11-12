@@ -19,8 +19,14 @@ import { CommunityBansService } from '../communities/community-bans.service';
 import { SavedPostsService } from '../posts/saved-posts.service';
 import { CommunityReportsService } from '../reports/community-reports.service';
 import type { CommentRemovalService } from '../comments/comment-removals.service';
+import { CommunityJoinRequestsService } from '../communities/community-join-requests.service';
+import { CommunityModeratorInvitesService } from '../communities/community-moderator-invites.service';
+import { CommunityFlairsService } from '../communities/community-flairs.service';
+import { CommunityDiscoveryService } from '../communities/community-discovery.service';
 import {
   COMMUNITY_VISIBLE_PREDICATE,
+  listedCommunitySql,
+  readableCommunitySql,
   visibleCommunityColumnsSql,
   visibleCommunitySql,
 } from './community-visibility';
@@ -39,9 +45,14 @@ const BY_NAME = new RegExp(
   /WHERE (?:c\.)?name = \? AND /.source + HIDDEN.source,
 );
 const BY_ID = new RegExp(
-  /FROM communities WHERE id = \? AND /.source + HIDDEN.source,
+  /(?:FROM communities|\) author)\s+WHERE (?:communities\.)?id = \? AND (?:communities\.)?deleted_at IS NULL AND (?:communities\.)?suspended_at IS NULL/
+    .source,
 );
-const CONTENT = visibleCommunitySql('posts.community_id');
+// Content resolves its community through visibleCommunitySql or its
+// viewer-aware form readableCommunitySql (migration 038); both carry the
+// whole predicate over the content's community.
+const CONTENT =
+  /WHERE communities\.id = posts\.community_id\s+AND communities\.deleted_at IS NULL AND communities\.suspended_at IS NULL/;
 
 function emptyDatabase() {
   const statements: string[] = [];
@@ -82,6 +93,14 @@ function services(pool: Pool) {
     stats: new CommunityStatsService(pool),
     bans: new CommunityBansService(pool, moderationLog),
     saved: new SavedPostsService(pool),
+    joinRequests: new CommunityJoinRequestsService(
+      pool,
+      ruleAcceptance,
+      moderationLog,
+    ),
+    invites: new CommunityModeratorInvitesService(pool, moderationLog),
+    flairs: new CommunityFlairsService(pool),
+    discovery: new CommunityDiscoveryService(pool),
     reports: new CommunityReportsService(
       pool,
       moderationLog,
@@ -123,9 +142,99 @@ const lookups: Array<
     BY_NAME,
   ],
   [
-    'POST /communities/:name/moderators',
-    (s) => s.communities.addModerator('gone', 'm', 'u'),
+    'POST /communities/:name/moderators/invites',
+    (s) => s.invites.invite('gone', 'm', 'u'),
     BY_NAME,
+  ],
+  [
+    'POST /communities/:name/moderators/invites/accept',
+    (s) => s.invites.accept('gone', 'u'),
+    BY_NAME,
+  ],
+  [
+    'DELETE /communities/:name/moderators/invites',
+    (s) => s.invites.withdraw('gone', 'u'),
+    BY_NAME,
+  ],
+  [
+    'DELETE /communities/:name/moderators/invites?username=',
+    (s) => s.invites.withdraw('gone', 'u', 'm'),
+    BY_NAME,
+  ],
+  [
+    'POST /communities/:name/join-requests',
+    (s) => s.joinRequests.create('gone', 'u', {}),
+    BY_NAME,
+  ],
+  [
+    'GET /communities/:name/join-requests',
+    (s) => s.joinRequests.listPending('gone', 'u', { page: 1, limit: 20 }),
+    BY_NAME,
+  ],
+  [
+    'GET /communities/:name/join-requests/me',
+    (s) => s.joinRequests.findOwn('gone', 'u'),
+    BY_NAME,
+  ],
+  [
+    'POST /communities/:name/join-requests/:username/approve',
+    (s) => s.joinRequests.approve('gone', 'm', 'u'),
+    BY_NAME,
+  ],
+  [
+    'POST /communities/:name/join-requests/:username/deny',
+    (s) => s.joinRequests.deny('gone', 'm', 'u'),
+    BY_NAME,
+  ],
+  [
+    'GET /communities/:name/flairs',
+    (s) => s.flairs.list('gone', 'u', {}),
+    BY_NAME,
+  ],
+  [
+    'POST /communities/:name/flairs',
+    (s) => s.flairs.create('gone', 'u', { kind: 'post', text: 'News' }),
+    BY_NAME,
+  ],
+  [
+    'PATCH /communities/:name/flairs/:id',
+    (s) => s.flairs.update('gone', 'f', 'u', { text: 'News' }),
+    BY_NAME,
+  ],
+  [
+    'DELETE /communities/:name/flairs/:id',
+    (s) => s.flairs.remove('gone', 'f', 'u'),
+    BY_NAME,
+  ],
+  [
+    'GET /communities/:name/members/:username/flair',
+    (s) => s.flairs.getUserFlair('gone', 'm', 'u'),
+    BY_NAME,
+  ],
+  [
+    'PUT /communities/:name/members/:username/flair',
+    (s) => s.flairs.setUserFlair('gone', 'm', null, 'u'),
+    BY_NAME,
+  ],
+  [
+    'POST /communities/:name/mute',
+    (s) => s.discovery.mute('gone', 'u'),
+    BY_NAME,
+  ],
+  [
+    'DELETE /communities/:name/mute',
+    (s) => s.discovery.unmute('gone', 'u'),
+    BY_NAME,
+  ],
+  [
+    'PUT /posts/:id/flair',
+    (s) => s.flairs.setPostFlair('p', 'f', 'u'),
+    CONTENT,
+  ],
+  [
+    'DELETE /posts/:id/flair',
+    (s) => s.flairs.clearPostFlair('p', 'u'),
+    CONTENT,
   ],
   [
     'DELETE /communities/:name/moderators',
@@ -391,7 +500,7 @@ describe('deleted and suspended communities are excluded from every read and wri
 
       expect(statements).toHaveLength(2);
       for (const sql of statements) {
-        expect(sql).toContain(CONTENT);
+        expect(sql).toMatch(CONTENT);
       }
     },
   );
@@ -439,6 +548,11 @@ describe('the shared community visibility predicate', () => {
     expect(visibleCommunitySql('posts.community_id')).toContain(
       visibleCommunityColumnsSql('communities'),
     );
+    expect(readableCommunitySql('posts.community_id')).toContain(
+      visibleCommunityColumnsSql('communities'),
+    );
+    expect(visibleCommunitySql('posts.community_id')).toMatch(CONTENT);
+    expect(readableCommunitySql('posts.community_id')).toMatch(CONTENT);
   });
 
   it('is restated nowhere outside /admin and its definition', () => {
@@ -460,4 +574,70 @@ describe('the shared community visibility predicate', () => {
       .map(relativeOf);
     expect(restating).toEqual([]);
   });
+});
+
+// Migration 038: whether a viewer may read a community that is there.
+describe('the viewer-aware community predicates', () => {
+  const placeholders = (sql: string) => sql.split('?').length - 1;
+
+  it('hides a private community from everyone but its members, binding the viewer once', () => {
+    const sql = readableCommunitySql('posts.community_id');
+    expect(placeholders(sql)).toBe(1);
+    expect(sql).toContain("communities.visibility <> 'private'");
+    expect(sql).toContain('communities.creator_id = viewer.id');
+    expect(sql).toMatch(/FROM community_subscriptions member_subscription/);
+    expect(sql).toMatch(/FROM community_moderators member_moderator/);
+    expect(sql).not.toContain('show_nsfw');
+    expect(sql).not.toContain('community_mutes');
+  });
+
+  it('adds the nsfw opt-in and the mutes on request, still binding the viewer once', () => {
+    const sql = readableCommunitySql('posts.community_id', {
+      nsfw: true,
+      muted: true,
+    });
+    expect(placeholders(sql)).toBe(1);
+    expect(sql).toContain('communities.nsfw = FALSE OR EXISTS');
+    expect(sql).toContain('viewer_preferences.show_nsfw = TRUE');
+    expect(sql).toContain('FROM community_mutes viewer_mute');
+  });
+
+  it('lists private communities, but never nsfw ones without the opt-in', () => {
+    const sql = listedCommunitySql('c', { muted: true });
+    expect(placeholders(sql)).toBe(1);
+    expect(sql).not.toContain('private');
+    expect(sql).toContain('c.nsfw = FALSE OR EXISTS');
+    expect(sql).toContain('viewer_mute.community_id = c.id');
+  });
+
+  it.each([
+    ['GET /posts', (s: Services) => s.posts.findAll({}), true, false],
+    ['GET /feed', (s: Services) => s.posts.findFeed({}, 'u'), true, true],
+    [
+      'GET /communities/:name/posts',
+      (s: Services) => s.posts.findAll({ community_id: 'c' }),
+      false,
+      false,
+    ],
+  ])(
+    '%s filters nsfw (%s) and mutes (%s) as its scope requires',
+    async (_route, call, nsfw, muted) => {
+      const { pool, statements } = emptyDatabase();
+      pool.execute = ((sql: string) => {
+        statements.push(sql);
+        return Promise.resolve([
+          sql.includes('COUNT(*)') ? [{ total: 0 }] : [],
+          [],
+        ]);
+      }) as unknown as Pool['execute'];
+
+      await call(services(pool));
+
+      for (const sql of statements) {
+        expect(sql).toContain("communities.visibility <> 'private'");
+        expect(sql.includes('show_nsfw')).toBe(nsfw);
+        expect(sql.includes('community_mutes')).toBe(muted);
+      }
+    },
+  );
 });

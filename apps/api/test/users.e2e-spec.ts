@@ -1,3 +1,4 @@
+import { POST_COLUMNS } from '../src/posts/posts.service';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { ValidationPipe } from '@nestjs/common';
 import type { INestApplication } from '@nestjs/common';
@@ -135,6 +136,23 @@ describe('User profile endpoints (e2e)', () => {
       email_changes: [],
       user_preferences: [],
       data_exports: [],
+      // Community settings (migration 038): A's rows go, B's stay.
+      community_join_requests: [
+        { user_id: 'user-a', community_id: 'community-b' },
+        { user_id: 'user-b', community_id: 'community-b' },
+      ],
+      community_moderator_invites: [
+        { user_id: 'user-a', community_id: 'community-b' },
+        { user_id: 'user-b', community_id: 'community-b' },
+      ],
+      community_user_flairs: [
+        { user_id: 'user-a', community_id: 'community-b' },
+        { user_id: 'user-b', community_id: 'community-b' },
+      ],
+      community_mutes: [
+        { user_id: 'user-a', community_id: 'community-b' },
+        { user_id: 'user-b', community_id: 'community-b' },
+      ],
       community_subscriptions: [
         { user_id: 'user-a', community_id: 'community-b' },
         { user_id: 'user-b', community_id: 'community-b' },
@@ -284,11 +302,7 @@ describe('User profile endpoints (e2e)', () => {
           [],
         ]);
       }
-      if (
-        sql.startsWith(
-          'SELECT id, title, content, type, author_id, community_id, created_at, pinned_at, pinned_by, edited_at, locked_at, locked_by, media_id FROM posts WHERE EXISTS',
-        )
-      ) {
+      if (sql.startsWith(`SELECT ${POST_COLUMNS} FROM posts WHERE EXISTS`)) {
         return Promise.resolve([tables.posts, []]);
       }
       if (sql.startsWith('SELECT COUNT(*) AS total FROM posts WHERE EXISTS')) {
@@ -875,6 +889,16 @@ describe('User profile endpoints (e2e)', () => {
       expect(tables.password_reset_tokens).toEqual([
         { token_hash: 'hash-b', user_id: 'user-b' },
       ]);
+      // Join requests, moderator invitations, user flairs and mutes.
+      for (const table of [
+        'community_join_requests',
+        'community_moderator_invites',
+        'community_user_flairs',
+        'community_mutes',
+      ]) {
+        expect(owned(table, 'user_id', 'user-a')).toEqual([]);
+        expect(owned(table, 'user_id', 'user-b')).toHaveLength(1);
+      }
       // Other accounts' rows, including a notification A caused, survive.
       expect(
         owned('community_subscriptions', 'user_id', 'user-b'),
@@ -1134,6 +1158,7 @@ describe('User profile endpoints (e2e)', () => {
           'score',
           'saved',
           'media',
+          'flair',
           'title',
           'type',
         ].sort(),

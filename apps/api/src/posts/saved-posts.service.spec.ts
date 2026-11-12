@@ -37,7 +37,8 @@ describe('SavedPostsService', () => {
       results = [[{ id: 'post-1' }], { affectedRows: 1 }];
       await service.save('post-1', 'user-1');
       expect(queries).toEqual([
-        { sql: SAVEABLE_POST_SQL, values: ['post-1'] },
+        // The caller is bound twice: a private community's posts are its members'.
+        { sql: SAVEABLE_POST_SQL, values: ['post-1', 'user-1'] },
         { sql: SAVE_POST_SQL, values: ['user-1', 'post-1'] },
       ]);
     });
@@ -51,7 +52,9 @@ describe('SavedPostsService', () => {
 
     it('requires a visible post: not removed, community neither deleted nor suspended', () => {
       expect(SAVEABLE_POST_SQL).toContain('posts.removed_at IS NULL');
-      expect(SAVEABLE_POST_SQL).toContain('communities.deleted_at IS NULL AND communities.suspended_at IS NULL');
+      expect(SAVEABLE_POST_SQL).toContain(
+        'communities.deleted_at IS NULL AND communities.suspended_at IS NULL',
+      );
       expect(SAVEABLE_POST_SQL).toContain('communities.suspended_at IS NULL');
     });
 
@@ -140,14 +143,14 @@ describe('SavedPostsService', () => {
       });
       expect(queries[0]).toEqual({
         sql: savedPostsSql('new'),
-        values: ['user-1', 20, 0],
+        values: ['user-1', 'user-1', 20, 0],
       });
       expect(queries[0].sql).toContain(
         'ORDER BY s.created_at DESC, s.post_id DESC',
       );
       expect(queries[1]).toEqual({
         sql: SAVED_POSTS_COUNT_SQL,
-        values: ['user-1'],
+        values: ['user-1', 'user-1'],
       });
       // Scores only: every listed post is saved, so no saved-flag lookup.
       expect(queries).toHaveLength(3);
@@ -173,7 +176,7 @@ describe('SavedPostsService', () => {
     ])('pages with LIMIT/OFFSET for %o', async ({ page, limit, offset }) => {
       results = [[], [{ total: 0 }]];
       const result = await service.list('user-1', { page, limit });
-      expect(queries[0].values).toEqual(['user-1', limit, offset]);
+      expect(queries[0].values).toEqual(['user-1', 'user-1', limit, offset]);
       expect(result).toMatchObject({ page, limit });
     });
 
@@ -198,7 +201,9 @@ describe('SavedPostsService', () => {
       );
       expect(SAVED_POSTS_FROM).toContain('WHERE s.user_id = ?');
       expect(SAVED_POSTS_FROM).toContain('p.removed_at IS NULL');
-      expect(SAVED_POSTS_FROM).toContain('communities.deleted_at IS NULL AND communities.suspended_at IS NULL');
+      expect(SAVED_POSTS_FROM).toContain(
+        'communities.deleted_at IS NULL AND communities.suspended_at IS NULL',
+      );
       expect(SAVED_POSTS_FROM).toContain('communities.suspended_at IS NULL');
       // A deleted author is no reason to drop a save.
       expect(SAVED_POSTS_FROM).not.toContain('users');

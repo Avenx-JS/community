@@ -91,3 +91,33 @@ describe('DeleteCommunityDto', () => {
     await expect(validateDelete(body)).rejects.toThrow();
   });
 });
+
+// Migration 038: the community settings.
+describe('UpdateCommunityDto settings', () => {
+  it('accepts each setting on its own', async () => {
+    for (const visibility of ['public', 'restricted', 'private']) {
+      await expect(validateUpdate({ visibility })).resolves.toMatchObject({
+        visibility,
+      });
+    }
+    await expect(validateUpdate({ nsfw: true })).resolves.toMatchObject({
+      nsfw: true,
+    });
+    await expect(
+      validateUpdate({ allowed_post_types: ['text', 'media'] }),
+    ).resolves.toMatchObject({ allowed_post_types: ['text', 'media'] });
+  });
+
+  it.each([
+    { visibility: 'hidden' },
+    { visibility: null },
+    { nsfw: 'yes' },
+    { nsfw: null },
+    { allowed_post_types: [] },
+    { allowed_post_types: ['text', 'text'] },
+    { allowed_post_types: ['video'] },
+    { allowed_post_types: 'text' },
+  ])('refuses %o', async (body) => {
+    await expect(validateUpdate(body)).rejects.toThrow();
+  });
+});

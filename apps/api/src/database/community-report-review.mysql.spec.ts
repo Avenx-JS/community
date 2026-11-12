@@ -36,8 +36,18 @@ const snapshot = readFileSync(
   'utf8',
 ).replace(/^CREATE DATABASE[^;]*;\s*USE community;/, '');
 
-// The snapshot with 036 undone.
+// The snapshot with 036 undone, and 038 with it: both rewrite the action
+// enum, so the runner applies 036 and then 038.
 const preceding = snapshot
+  .replace(
+    /-- Community settings \(038_add_community_settings\)\.\r?\n[\s\S]*?(?=-- [^\n]*\(\d{3}_[a-z_]+\)\.\r?\n|CREATE TABLE schema_migrations)/,
+    '',
+  )
+  .replace(
+    /,\r?\n\s*'moderator_invited',\r?\n\s*'moderator_invite_revoked',\r?\n\s*'moderator_invite_declined',\r?\n\s*'join_request_approved',\r?\n\s*'join_request_denied'/,
+    '',
+  )
+  .replace(/,\r?\n\s*\('038_add_community_settings'\)/, '')
   .replace(/ {4}community_(id|status|reviewed_by|reviewed_at) [^\n]*\n/g, '')
   .replace(/ {4}INDEX idx_user_reports_(modqueue|community) [^\n]*\n/g, '')
   .replace(

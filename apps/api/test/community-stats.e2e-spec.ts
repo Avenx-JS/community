@@ -15,6 +15,7 @@ import {
   MEMBER_COUNT_SQL,
   MODERATOR_COUNT_SQL,
   POST_STATS_SQL,
+  STATS_COMMUNITY_SQL,
 } from '../src/communities/community-stats.service';
 
 interface StatsResponse {
@@ -114,17 +115,18 @@ describe('Community stats API (e2e)', () => {
       Promise.resolve([rows, []] as [unknown, unknown]);
     const execute = (sql: string, values: unknown[]) => {
       statements.push({ sql, values });
-      if (
-        sql.startsWith('SELECT id, creator_id, created_at FROM communities')
-      ) {
+      if (sql === STATS_COMMUNITY_SQL) {
         expect(sql).toContain('deleted_at IS NULL');
+        // Values: the viewer (null without a token), the name.
         return result(
           communities
-            .filter((c) => c.name === values[0] && c.deleted_at === null)
+            .filter((c) => c.name === values[1] && c.deleted_at === null)
             .map(({ id, creator_id, created_at }) => ({
               id,
               creator_id,
               created_at,
+              access_visibility: 'public',
+              access_member: 0,
             })),
         );
       }
