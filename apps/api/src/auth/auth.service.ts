@@ -5,6 +5,7 @@ import {
   Inject,
   Injectable,
   Logger,
+  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { argon2id, hash as argon2Hash, verify as argon2Verify } from 'argon2';
@@ -27,6 +28,40 @@ import { isSqlTrue } from '../common/community-moderation';
 import { readPositiveInteger } from '../common/read-positive-integer';
 import { EmailTransport } from '../email/email-transport';
 import { EmailDeliveryError } from '../email/smtp-email.transport';
+import type { ClientOrigin } from './client-origin';
+
+// SHA-256 of an opaque token: how every credential of this API is stored
+// (sessions, refresh tokens, password reset and email verification codes).
+export function hashOpaqueToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+const NO_ORIGIN: ClientOrigin = { ipPrefix: null, userAgent: null };
+
+// A live session: its access row, and a current refresh token (not used, not
+// revoked, not expired). Bound to [user]. The newest use first.
+export const LIST_SESSIONS_SQL = `SELECT s.session_id, s.token_hash, s.created_at, s.last_used_at, s.ip_prefix, s.user_agent
+       FROM auth_sessions s
+       WHERE s.user_id = ?
+         AND EXISTS (
+           SELECT 1 FROM auth_refresh_tokens r
+           WHERE r.session_id = s.session_id
+             AND r.used_at IS NULL AND r.revoked_at IS NULL
+             AND r.expires_at > UTC_TIMESTAMP()
+         )
+       ORDER BY COALESCE(s.last_used_at, s.created_at) DESC, s.session_id ASC`;
+
+export interface SessionDto {
+  id: string;
+  created_at: string;
+  // The last token rotation: accurate to the access token's 15 minutes.
+  last_used_at: string;
+  // The client network (/24 or /48), never the full address.
+  ip_prefix: string | null;
+  user_agent: string | null;
+  // Whether this is the session the request was made with.
+  current: boolean;
+}
 
 export const MYSQL_POOL = Symbol('MYSQL_POOL');
 
@@ -117,6 +152,7 @@ interface PasswordRow extends RowDataPacket {
 
 interface SessionUserRow extends RowDataPacket {
   id: string;
+  email_verified?: number | string | boolean | null;
   restriction_type?: 'suspension' | 'ban';
   restriction_expires_at?: Date | string | null;
 }
@@ -162,7 +198,9 @@ export interface ActiveRestriction {
 }
 
 export type AccessTokenValidationResult =
-  | { kind: 'valid'; userId: string }
+  // emailVerified: the account's current address is confirmed
+  // (users.email_verified_at). Routes that require it check it in AuthGuard.
+  | { kind: 'valid'; userId: string; emailVerified: boolean }
   | { kind: 'restricted'; userId: string; restriction: ActiveRestriction }
   | { kind: 'invalid' };
 
@@ -195,7 +233,15 @@ export class AuthService {
     private readonly email: EmailTransport,
   ) {}
 
-  async register(input: RegisterInput): Promise<AuthResponse> {
+  // Set by EmailVerificationService, which registration notifies: a new
+  // account is sent its verification code at once. Optional, so the service
+  // also runs without it (unit tests).
+  onRegistered?: (userId: string) => void;
+
+  async register(
+    input: RegisterInput,
+    origin: ClientOrigin = NO_ORIGIN,
+  ): Promise<AuthResponse> {
     const username = input.username.trim();
     const email = input.email.trim().toLowerCase();
     const passwordHash = await this.hashPassword(input.password);
@@ -221,10 +267,15 @@ export class AuthService {
       created_at: new Date(),
     } as UserRow;
 
-    return this.createSession(user);
+    const session = await this.createSession(user, origin);
+    this.onRegistered?.(id);
+    return session;
   }
 
-  async login(input: LoginInput): Promise<AuthResponse> {
+  async login(
+    input: LoginInput,
+    origin: ClientOrigin = NO_ORIGIN,
+  ): Promise<AuthResponse> {
     const identifier = input.identifier.trim().toLowerCase();
     const [users] = await this.pool.execute<UserRow[]>(
       'SELECT id, username, email, password_hash, created_at FROM users WHERE (email = ? OR username = ?) AND deleted_at IS NULL LIMIT 1',
@@ -259,12 +310,80 @@ export class AuthService {
       throw new ForbiddenException(this.restrictionErrorPayload(restriction));
     }
 
-    return this.createSession(user);
+    return this.createSession(user, origin);
   }
 
   async validateAccessToken(token: string): Promise<string | null> {
     const result = await this.validateAccessTokenState(token);
     return result.kind === 'valid' ? result.userId : null;
+  }
+
+  // GET /auth/sessions: the caller's live sessions. Never a token or a full
+  // address: the token hash is compared here and dropped.
+  async listSessions(
+    userId: string,
+    currentAccessToken: string,
+  ): Promise<{ items: SessionDto[] }> {
+    const [rows] = await this.pool.execute<
+      (RowDataPacket & {
+        session_id: string;
+        token_hash: string;
+        created_at: Date | string;
+        last_used_at: Date | string | null;
+        ip_prefix: string | null;
+        user_agent: string | null;
+      })[]
+    >(LIST_SESSIONS_SQL, [userId]);
+    const current = this.hashToken(currentAccessToken);
+    return {
+      items: rows.map((row) => ({
+        id: row.session_id,
+        created_at: new Date(row.created_at).toISOString(),
+        last_used_at: new Date(
+          row.last_used_at ?? row.created_at,
+        ).toISOString(),
+        ip_prefix: row.ip_prefix,
+        user_agent: row.user_agent,
+        current: row.token_hash === current,
+      })),
+    };
+  }
+
+  // DELETE /auth/sessions/:id: ends one session at once. Its access token is
+  // deleted and every refresh token of it revoked in one transaction, so the
+  // next refresh with it is refused. Another account's session is 404, like
+  // an unknown one.
+  async revokeSession(userId: string, sessionId: string): Promise<void> {
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+      await connection.execute(
+        'SELECT token_hash FROM auth_refresh_tokens WHERE session_id = ? AND user_id = ? FOR UPDATE',
+        [sessionId, userId],
+      );
+      const [deleted] = await connection.execute<ResultSetHeader>(
+        'DELETE FROM auth_sessions WHERE session_id = ? AND user_id = ?',
+        [sessionId, userId],
+      );
+      const [revoked] = await connection.execute<ResultSetHeader>(
+        'UPDATE auth_refresh_tokens SET revoked_at = UTC_TIMESTAMP() WHERE session_id = ? AND user_id = ? AND revoked_at IS NULL',
+        [sessionId, userId],
+      );
+      if (deleted.affectedRows === 0 && revoked.affectedRows === 0) {
+        throw new NotFoundException('Session not found');
+      }
+      await connection.commit();
+      transactionStarted = false;
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
   }
 
   async validateAccessTokenState(
@@ -275,9 +394,11 @@ export class AuthService {
     // ambiguous with auth_sessions.expires_at in the join's ON clause.
     const [sessions] = await this.pool.execute<SessionUserRow[]>(
       `SELECT auth_sessions.user_id AS id,
+         users.email_verified_at IS NOT NULL AS email_verified,
          restriction.type AS restriction_type,
          restriction.expires_at AS restriction_expires_at
        FROM auth_sessions
+       JOIN users ON users.id = auth_sessions.user_id
        LEFT JOIN (
          SELECT user_id, type, expires_at
          FROM user_restrictions
@@ -325,7 +446,11 @@ export class AuthService {
       // Activity is best-effort telemetry; token validation has already succeeded.
     }
 
-    return { kind: 'valid', userId };
+    return {
+      kind: 'valid',
+      userId,
+      emailVerified: isSqlTrue(session.email_verified ?? 0),
+    };
   }
 
   async logout(token: string): Promise<void> {
@@ -692,7 +817,10 @@ export class AuthService {
       : { type: restriction.type };
   }
 
-  async refresh(refreshToken: string): Promise<AuthResponse> {
+  async refresh(
+    refreshToken: string,
+    origin: ClientOrigin = NO_ORIGIN,
+  ): Promise<AuthResponse> {
     const connection = await this.pool.getConnection();
     let transactionStarted = false;
     let response: AuthResponse | undefined;
@@ -773,11 +901,15 @@ export class AuthService {
           throw new UnauthorizedException('Invalid or expired refresh token');
         }
 
+        // A rotation is a use: last_used_at, and the latest origin when the
+        // request carried one.
         const [sessionResult] = await connection.execute<ResultSetHeader>(
-          'UPDATE auth_sessions SET token_hash = ?, expires_at = ? WHERE session_id = ?',
+          'UPDATE auth_sessions SET token_hash = ?, expires_at = ?, last_used_at = UTC_TIMESTAMP(), ip_prefix = COALESCE(?, ip_prefix), user_agent = COALESCE(?, user_agent) WHERE session_id = ?',
           [
             this.hashToken(accessToken),
             accessExpiresAt,
+            origin.ipPrefix,
+            origin.userAgent,
             currentToken.session_id,
           ],
         );
@@ -831,7 +963,10 @@ export class AuthService {
     return response;
   }
 
-  private async createSession(user: UserRow): Promise<AuthResponse> {
+  private async createSession(
+    user: UserRow,
+    origin: ClientOrigin,
+  ): Promise<AuthResponse> {
     const accessToken = randomBytes(32).toString('base64url');
     const refreshToken = randomBytes(32).toString('base64url');
     const sessionId = randomUUID();
@@ -843,8 +978,15 @@ export class AuthService {
       await connection.beginTransaction();
       transactionStarted = true;
       await connection.execute<ResultSetHeader>(
-        'INSERT INTO auth_sessions (token_hash, user_id, expires_at, session_id) VALUES (?, ?, ?, ?)',
-        [this.hashToken(accessToken), user.id, accessExpiresAt, sessionId],
+        'INSERT INTO auth_sessions (token_hash, user_id, expires_at, session_id, last_used_at, ip_prefix, user_agent) VALUES (?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?)',
+        [
+          this.hashToken(accessToken),
+          user.id,
+          accessExpiresAt,
+          sessionId,
+          origin.ipPrefix,
+          origin.userAgent,
+        ],
       );
       await connection.execute<ResultSetHeader>(
         'INSERT INTO auth_refresh_tokens (token_hash, session_id, user_id, expires_at) VALUES (?, ?, ?, ?)',
@@ -940,7 +1082,7 @@ export class AuthService {
   }
 
   private hashToken(token: string): string {
-    return createHash('sha256').update(token).digest('hex');
+    return hashOpaqueToken(token);
   }
 
   private isDuplicateEntry(error: unknown): boolean {

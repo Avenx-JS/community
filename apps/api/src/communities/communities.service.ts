@@ -26,6 +26,7 @@ import {
   EDITABLE_COMMUNITY_FIELDS,
 } from './community-moderation-log.service';
 import { CommunityRuleAcceptanceService } from './community-rule-acceptance.service';
+import { APPLY_DEFAULT_COMMUNITY_NOTIFICATIONS_SQL } from '../users/user-preferences.service';
 import { loadMediaByIds, type MediaDto } from '../media/media-dto';
 import { RELEASE_COMMUNITY_MEDIA_SQL } from '../media/media-sql';
 import { CreateCommunityDto } from './dto/create-community.dto';
@@ -308,6 +309,13 @@ export class CommunitiesService {
     await this.pool.execute<ResultSetHeader>(
       'INSERT INTO community_subscriptions (user_id, community_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE created_at = created_at',
       [userId, communityId],
+    );
+    // The account's global default for communities it joins (PUT
+    // /users/me/preferences): writes new_posts off only when that default is
+    // off, and never overrides a setting already made for this community.
+    await this.pool.execute<ResultSetHeader>(
+      APPLY_DEFAULT_COMMUNITY_NOTIFICATIONS_SQL,
+      [userId, communityId, userId],
     );
   }
 

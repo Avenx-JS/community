@@ -163,6 +163,11 @@ describe('AccountDeletionService', () => {
       'DELETE FROM password_reset_tokens WHERE user_id = ?',
       // Unassigns, never deletes: the reports themselves are kept.
       'UPDATE user_reports SET assigned_to = NULL, assigned_at = NULL WHERE assigned_to = ?',
+      // Account settings (migration 037), an export's copy of the data included.
+      'DELETE FROM email_verification_tokens WHERE user_id = ?',
+      'DELETE FROM email_changes WHERE user_id = ?',
+      'DELETE FROM user_preferences WHERE user_id = ?',
+      'DELETE FROM data_exports WHERE user_id = ?',
       // Releases, never deletes: the sweep deletes the files (migration 035).
       ...RELEASE_ACCOUNT_MEDIA_SQL,
     ]);

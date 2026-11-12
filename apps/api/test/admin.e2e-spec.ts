@@ -59,7 +59,11 @@ describe('Admin authorization pipeline (e2e)', () => {
             validateAccessTokenState: (token: string) =>
               Promise.resolve(
                 token === 'valid-token'
-                  ? { kind: 'valid', userId: 'test-user-id' }
+                  ? {
+                      kind: 'valid',
+                      emailVerified: true,
+                      userId: 'test-user-id',
+                    }
                   : { kind: 'invalid' },
               ),
           },

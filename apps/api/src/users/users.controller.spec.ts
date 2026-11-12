@@ -24,6 +24,7 @@ describe('UsersController', () => {
     ...profile,
     id: 'user-id',
     email: 'sample@example.com',
+    email_verified: true,
     role: 'user' as const,
   };
   const usersService = {

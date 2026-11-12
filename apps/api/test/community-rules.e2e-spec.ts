@@ -399,7 +399,11 @@ describe('Community rules endpoints (e2e)', () => {
         validateAccessTokenState: (token: string) =>
           Promise.resolve(
             tokenUsers[token]
-              ? { kind: 'valid', userId: tokenUsers[token] }
+              ? {
+                  kind: 'valid',
+                  emailVerified: true,
+                  userId: tokenUsers[token],
+                }
               : { kind: 'invalid' },
           ),
       })

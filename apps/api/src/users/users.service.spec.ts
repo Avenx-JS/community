@@ -85,6 +85,7 @@ describe('UsersService', () => {
       id: 'user-id',
       username: 'sample',
       email: 'sample@example.com',
+      email_verified: false,
       display_name: 'Sam',
       bio: 'Gardener',
       role: 'moderator',
@@ -93,7 +94,7 @@ describe('UsersService', () => {
     });
     expect(queryCalls).toEqual([{ sql: OWN_PROFILE_SQL, values: ['user-id'] }]);
     expect(OWN_PROFILE_SQL).toBe(
-      'SELECT id, username, email, display_name, bio, role, created_at, avatar_media_id FROM users WHERE id = ? LIMIT 1',
+      'SELECT id, username, email, email_verified_at, display_name, bio, role, created_at, avatar_media_id FROM users WHERE id = ? LIMIT 1',
     );
   });
 

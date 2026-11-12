@@ -50,6 +50,13 @@ export const DELETE_PRIVATE_STATE_SQL = [
   // Not a deletion: the reports stay, unassigned. Anonymising would not fire
   // fk_user_reports_assigned_to, and a deleted account cannot work a report.
   'UPDATE user_reports SET assigned_to = NULL, assigned_at = NULL WHERE assigned_to = ?',
+  // Account settings (migration 037): codes, a pending address change,
+  // preferences and exports. An export holds a copy of the account's data,
+  // which must not outlive it.
+  'DELETE FROM email_verification_tokens WHERE user_id = ?',
+  'DELETE FROM email_changes WHERE user_id = ?',
+  'DELETE FROM user_preferences WHERE user_id = ?',
+  'DELETE FROM data_exports WHERE user_id = ?',
   // The avatar and uploads never posted are released (migration 035); the
   // sweep deletes them. Files in the account's posts stay with the posts.
   ...RELEASE_ACCOUNT_MEDIA_SQL,

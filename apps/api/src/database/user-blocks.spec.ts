@@ -74,6 +74,8 @@ describe('user blocks are read through one definition', () => {
   it('names user_blocks only in its service, account deletion and the policy', () => {
     expect(referencing(/user_blocks/)).toEqual([
       'users/account-deletion.service.ts',
+      // The caller's own block list, in their data export.
+      'users/data-export.service.ts',
       'users/user-block-policy.service.ts',
       'users/user-blocks.service.ts',
     ]);

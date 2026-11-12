@@ -1,9 +1,12 @@
 import {
   Body,
   Controller,
+  Delete,
+  Get,
   HttpCode,
   HttpException,
   HttpStatus,
+  Param,
   Post,
   Req,
   Res,
@@ -25,7 +28,14 @@ import {
   ErrorResponse,
   RestrictedAccountResponse,
 } from '../common/openapi';
-import { AuthTokensResponse, PasswordForgotResponse } from './auth.responses';
+import {
+  AuthTokensResponse,
+  PasswordForgotResponse,
+  SessionListResponse,
+} from './auth.responses';
+import { clientOrigin } from './client-origin';
+import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
+import { ApiRouteParam } from '../common/openapi';
 import { AuthGuard } from './auth.guard';
 import type { AuthenticatedRequest } from './auth.guard';
 import { AllowRestricted } from './allow-restricted.decorator';
@@ -72,7 +82,7 @@ export class AuthController {
         body.email,
       ),
     );
-    return this.authService.register(body);
+    return this.authService.register(body, clientOrigin(request));
   }
 
   @Post('login')
@@ -105,7 +115,7 @@ export class AuthController {
         body.identifier,
       ),
     );
-    return this.authService.login(body);
+    return this.authService.login(body, clientOrigin(request));
   }
 
   @Post('refresh')
@@ -138,7 +148,7 @@ export class AuthController {
         body.refreshToken,
       ),
     );
-    return this.authService.refresh(body.refreshToken);
+    return this.authService.refresh(body.refreshToken, clientOrigin(request));
   }
 
   @Post('logout')
@@ -153,6 +163,51 @@ export class AuthController {
   @ApiNoContentResponse({ description: 'The current session is revoked.' })
   async logout(@Req() request: AuthenticatedRequest): Promise<void> {
     await this.authService.logout(request.accessToken);
+  }
+
+  @Get('sessions')
+  @UseGuards(AuthGuard)
+  @AllowRestricted()
+  @ApiOperation({
+    summary: 'List your sessions',
+    description:
+      'Every signed-in session of the account: when it started, when its ' +
+      'tokens were last rotated (accurate to the 15-minute access token), ' +
+      'the network it was last used from (an IPv4 /24 or IPv6 /48, never ' +
+      'the full address) and its user agent. current marks the session of ' +
+      'this request. Never a token. Also available to suspended and banned ' +
+      'accounts.',
+  })
+  @ApiAuthenticated({ allowRestricted: true })
+  @ApiOkResponse({ type: SessionListResponse })
+  listSessions(@Req() request: AuthenticatedRequest) {
+    return this.authService.listSessions(request.user.id, request.accessToken);
+  }
+
+  @Delete('sessions/:id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @UseGuards(AuthGuard)
+  @AllowRestricted()
+  @ApiOperation({
+    summary: 'End one session',
+    description:
+      'Revokes its access token and its refresh token at once: the next ' +
+      'refresh with it is refused. Ending the current session is a logout. ' +
+      "Another account's session is 404. Also available to suspended and " +
+      'banned accounts.',
+  })
+  @ApiAuthenticated({ allowRestricted: true })
+  @ApiRouteParam('id', 'id', 'Session ID, from GET /auth/sessions.')
+  @ApiNoContentResponse({ description: 'The session is ended.' })
+  @ApiErrorResponses({
+    400: 'Invalid session ID.',
+    404: 'Session not found, already ended, or not yours.',
+  })
+  async revokeSession(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<void> {
+    await this.authService.revokeSession(request.user.id, id);
   }
 
   @Post('logout-all')

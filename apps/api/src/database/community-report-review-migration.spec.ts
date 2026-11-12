@@ -66,7 +66,7 @@ describe('migration 036 (community report review)', () => {
 
   it('records the version and states re-run safety', () => {
     expect(snapshot).toContain(
-      "('035_create_media'), ('036_add_community_report_review');",
+      "('035_create_media'), ('036_add_community_report_review')",
     );
     expect(file).toMatch(/Not safely re-runnable after partial application/);
   });

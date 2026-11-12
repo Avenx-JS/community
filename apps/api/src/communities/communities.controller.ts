@@ -1,4 +1,8 @@
 import {
+  EMAIL_UNVERIFIED_FORBIDDEN_DOC,
+  RequireVerifiedEmail,
+} from '../auth/require-verified-email.decorator';
+import {
   Body,
   Controller,
   Delete,
@@ -73,11 +77,14 @@ export class CommunitiesController {
 
   @Post()
   @UseGuards(AuthGuard)
+  @RequireVerifiedEmail()
   @ApiOperation({
     summary: 'Create a community',
-    description: 'The authenticated user becomes its creator.',
+    description:
+      'The authenticated user becomes its creator. Requires a confirmed ' +
+      'email address.',
   })
-  @ApiAuthenticated()
+  @ApiAuthenticated({ forbidden: EMAIL_UNVERIFIED_FORBIDDEN_DOC })
   @ApiCreatedResponse({ type: CommunityResponse })
   @ApiErrorResponses({
     400: 'Invalid community data.',

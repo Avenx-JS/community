@@ -585,7 +585,9 @@ describe('Admin reports API (e2e)', () => {
             'admin2-token': 'admin2-id',
           }[token];
           return Promise.resolve(
-            userId ? { kind: 'valid', userId } : { kind: 'invalid' },
+            userId
+              ? { kind: 'valid', emailVerified: true, userId }
+              : { kind: 'invalid' },
           );
         },
       })

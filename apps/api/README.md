@@ -1764,8 +1764,13 @@ Limits are configurable with `AUTH_LOGIN_IP_MAX`,
 `AUTH_PASSWORD_FORGOT_IP_WINDOW_SECONDS`, `AUTH_PASSWORD_FORGOT_ACCOUNT_MAX`,
 `AUTH_PASSWORD_FORGOT_ACCOUNT_WINDOW_SECONDS`, `AUTH_PASSWORD_RESET_IP_MAX`,
 `AUTH_PASSWORD_RESET_IP_WINDOW_SECONDS`, `AUTH_PASSWORD_RESET_TOKEN_MAX`, and
-`AUTH_PASSWORD_RESET_TOKEN_WINDOW_SECONDS`. Values must be integers from 1 to
-86400.
+`AUTH_PASSWORD_RESET_TOKEN_WINDOW_SECONDS`; for the
+[account settings](#account-settings) routes `AUTH_EMAIL_VERIFY_REQUEST_IP_*`
+(10 per hour) and `AUTH_EMAIL_VERIFY_REQUEST_ACCOUNT_*` (3), `AUTH_EMAIL_VERIFY_IP_*`
+(20) and `AUTH_EMAIL_VERIFY_TOKEN_*` (5 per code), `AUTH_EMAIL_CHANGE_IP_*` (10)
+and `AUTH_EMAIL_CHANGE_ACCOUNT_*` (3), and `API_DATA_EXPORT_IP_*` (10 per day)
+and `API_DATA_EXPORT_ACCOUNT_*` (3 per day), each as `_MAX` and
+`_WINDOW_SECONDS`. Values must be integers from 1 to 86400.
 The API does not trust proxy forwarding headers by default; `request.ip` uses
 the direct socket address. Deployments behind a reverse proxy must configure
 trusted proxy handling at the infrastructure/application boundary before
@@ -1942,12 +1947,17 @@ no path, query or body field can name another account.
   "id": "6f1c…",
   "username": "sample_user",
   "email": "sample_user@example.com",
+  "email_verified": true,
   "display_name": "Sam",
   "bio": "Grows tomatoes.",
   "role": "user",
-  "created_at": "2026-10-21T20:00:00.000Z"
+  "created_at": "2026-10-21T20:00:00.000Z",
+  "avatar": null
 }
 ```
+
+`email_verified` says whether the address is confirmed (see
+[Email verification](#email-verification)).
 
 It is marked `@AllowRestricted()`: a suspended or banned account can still read
 the account it is asking about, as it can still log out.
@@ -2065,6 +2075,8 @@ whole operation back and the account stays fully intact):
    the account are unassigned (`assigned_to` and `assigned_at` cleared, the
    reports kept), for the same reason: anonymising does not fire
    `fk_user_reports_assigned_to`. See [Assigning reports](#assigning-reports).
+   Its email verification codes, a pending email change, its preferences
+   and its data exports (each a copy of its data) are deleted too.
    Its avatar and its uploads never attached to a post are
    [released](#releasing-and-cleaning-up-media) (`RELEASE_ACCOUNT_MEDIA_SQL`)
    and `avatar_media_id` is cleared; the files in its posts stay with the
@@ -2144,6 +2156,138 @@ anyone holding an access token. See "API abuse controls and request bounds".
 account itself, and the body only confirms the password. A client or proxy
 that drops `DELETE` bodies gets `400` and deletes nothing, so the awkward case
 fails safe.
+
+## Account settings
+
+Migration `037_add_account_settings`: email verification, email change, the
+session list, global preferences and the personal data export.
+
+### Email verification
+
+A new account starts unverified, and so does **every account that existed
+before 037**: no address was ever confirmed, and marking them verified would
+claim a check that never happened. Each confirms once.
+
+| Route | Auth | Does |
+| --- | --- | --- |
+| `POST /auth/email/verify-request` | Bearer token | Sends a new code to the current address (`202`); `409` once confirmed |
+| `POST /auth/email/verify` | None, the code is the proof | `{ "token" }` confirms the address (`{ "status": "verified" }`), or applies a pending change (`"email_changed"`) |
+
+Registration sends the first code itself, without delaying the response.
+**Codes work like password reset codes**: 32 random bytes, sent once, stored
+only as SHA-256 (`email_verification_tokens.token_hash`), single use (a used
+code is `400`), valid for `EMAIL_VERIFICATION_TTL_SECONDS` (default 24 h), and a
+new request voids the earlier codes. A code also stops working when the address
+it was sent to is no longer the account's. Unknown, used, expired and
+superseded codes all answer the same `400`. Emails go out detached: the answer
+never depends on the mail server.
+
+**Which routes need a confirmed address** is a deliberate list, marked
+`@RequireVerifiedEmail()` and checked by `AuthGuard` (`403` with
+`{ "reason": "email_unverified" }`). It fails closed: only an explicit
+`emailVerified: true` from token validation passes.
+
+| Needs it | Why |
+| --- | --- |
+| `POST /posts`, `POST /posts/:postId/comments` | Publishing: the cost of a throwaway account should include a real address |
+| `POST /communities` | Creates a space others join and a creator role |
+| `POST /media` | Uploads cost storage and processing, and only serve posting |
+
+| Never needs it | Why |
+| --- | --- |
+| Reading, searching, the feed | Public or one's own |
+| Voting, subscribing, saving, blocking | Low cost, and leaving or blocking must never be gated |
+| `POST /reports` | Reporting is a safety route; nothing may stand in its way |
+| Editing and deleting one's own content, moderation | The content exists already; moderators keep acting |
+| Account settings, sessions, export, `DELETE /users/me` | An account must manage itself, and verify, before it is verified |
+| Avatars | A profile image publishes nothing to others' communities |
+
+### Changing your email address
+
+`PATCH /users/me/email` with `{ "new_email", "current_password" }`. The
+password re-confirms the owner (`401` otherwise): a stolen access token must not
+be enough to move the account's recovery address. **The address changes only
+when the code sent to the new address is confirmed** with
+`POST /auth/email/verify`. Until then nothing changes, and a new request
+replaces the pending one (`email_changes`, one row per account), voiding its
+code. Valid for `EMAIL_CHANGE_TTL_SECONDS` (default 24 h).
+
+- **The current address is told at once**: "a change to n***@example.com was
+  requested". The new address is masked, so the notice does not hand it to
+  whoever reads the old inbox. It is told again when the change is applied.
+- **No enumeration.** The answer is the same `202` whether or not another
+  account uses the new address. A taken address gets a notice instead of a
+  code, and no change is stored. If another account takes the address before
+  confirmation, confirming is `409`.
+- **Applying the change** sets `email` and `email_verified_at` together, and
+  voids every code mailed to the old address: verification codes and password
+  reset codes in its inbox.
+- Sessions are kept; ending them is `DELETE /auth/sessions/:id` or
+  `POST /auth/logout-all`, which the notice recommends.
+
+### Sessions
+
+| Route | Does |
+| --- | --- |
+| `GET /auth/sessions` | The caller's live sessions |
+| `DELETE /auth/sessions/:id` | Ends one at once (`204`); `404` for another account's or an ended one |
+
+A session is live while it has a current refresh token (not used, revoked or
+expired). Each item has `id`, `created_at`, `last_used_at` (the last token
+rotation, so accurate to the access token's 15 minutes; no write per request),
+`ip_prefix`, `user_agent` and `current` (the session of this request). **No
+token and no full address ever appear**: only the token's hash is compared, and
+the address is stored as its network alone (`203.0.113.0/24`, an IPv6 `/48`;
+`clientOrigin`), so it cannot leak through the list, a backup or an export.
+Sign-in records the origin and every rotation updates it.
+`DELETE` removes the access token and revokes every refresh token of the
+session in one transaction: the next request and the next refresh with it are
+refused. Ending the current session is a logout. Both routes are available to
+suspended and banned accounts, like logout.
+
+### Preferences
+
+`GET /users/me/preferences` and `PUT /users/me/preferences` (every field
+required: PUT replaces the set). An account that never set them has the
+defaults, and `GET` writes nothing.
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `email_notifications` | `true` | Stored for notification emails to come; today only account emails exist, which it never turns off |
+| `new_community_notifications` | `true` | When off, a community you join starts with `new_posts` off; existing per-community settings are never overridden (`APPLY_DEFAULT_COMMUNITY_NOTIFICATIONS_SQL` on subscribe) |
+| `show_nsfw` | `false` | Stored for clients; content has no NSFW marking yet |
+| `timezone` | `UTC` | An IANA zone this runtime knows, in its proper case (`Europe/Berlin`) |
+| `language` | `en` | A BCP 47 tag: language, optional script and region (`de`, `en-GB`, `zh-Hant-TW`) |
+
+### Exporting your data
+
+The counterpart of [deleting your account](#deleting-your-own-account), for
+the right of access and portability.
+
+1. `POST /users/me/export` answers `202` at once with `{ id, status: "pending" }`;
+   the file is built in the background. One export at a time (`409` while one
+   is pending), and 3 per account per day.
+2. `GET /users/me/export/:id` is `202` with the state while pending, then
+   **the JSON file, exactly once** (`Content-Disposition: attachment`,
+   `Cache-Control: no-store`): the payload is read and cleared in one
+   transaction, so two concurrent downloads cannot both get it. Afterwards
+   `410`. A ready export expires after `DATA_EXPORT_TTL_HOURS` (default 24, then
+   `410`); a build that never finished fails after
+   `DATA_EXPORT_PENDING_TIMEOUT_MINUTES` (default 60, then `409`), and a new one
+   can be requested. Another account's export is `404`.
+3. A sweep (on each request, and every `DATA_EXPORT_SWEEP_INTERVAL_SECONDS`)
+   clears expired payloads; the row stays as the record of the request.
+
+The file (`community-data-export/1`) holds the account, its preferences, its
+posts and comments (removed ones included, marked), votes, subscriptions and
+per-community notification settings, communities it created or moderates,
+saved posts, the usernames it blocked, the reports it filed (as
+`GET /reports` shows them), the notifications it received, its media and its
+sessions (with network prefixes). **It never holds** a password hash, a token,
+another person's private data, or what others said about the account (reports
+about it, moderators' removal reasons): every section is one statement bound to
+the account id alone (`EXPORT_SECTIONS`). Both export routes are available to
+suspended and banned accounts: access to one's data does not depend on standing.
 
 ## Data classification, errors, and logging
 

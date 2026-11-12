@@ -284,9 +284,9 @@ describe('Report endpoint (e2e)', () => {
         validateAccessTokenState: (token: string) =>
           Promise.resolve(
             token === 'valid-token'
-              ? { kind: 'valid', userId: REPORTER }
+              ? { kind: 'valid', emailVerified: true, userId: REPORTER }
               : token === 'other-token'
-                ? { kind: 'valid', userId: OTHER_REPORTER }
+                ? { kind: 'valid', emailVerified: true, userId: OTHER_REPORTER }
                 : { kind: 'invalid' },
           ),
       })

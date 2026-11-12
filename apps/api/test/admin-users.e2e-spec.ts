@@ -102,9 +102,9 @@ describe('Admin users API (e2e)', () => {
         validateAccessTokenState: (token: string) =>
           Promise.resolve(
             token === 'admin-token'
-              ? { kind: 'valid', userId: 'admin-id' }
+              ? { kind: 'valid', emailVerified: true, userId: 'admin-id' }
               : token === 'member-token'
-                ? { kind: 'valid', userId: 'member-id' }
+                ? { kind: 'valid', emailVerified: true, userId: 'member-id' }
                 : { kind: 'invalid' },
           ),
       })

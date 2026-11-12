@@ -536,4 +536,62 @@ describe('AuthRateLimitService', () => {
   ])('does not treat %s %s as an upload', (method, path) => {
     expect(isMediaUpload(method, path)).toBe(false);
   });
+
+  // Every account-email route sends an email; the confirmation route takes a
+  // secret. Each counts per IP and per account or code.
+  it.each([
+    [
+      'verify-request',
+      (svc: AuthRateLimitService) =>
+        svc.enforceEmailVerifyRequest('192.0.2.10', 'account-1'),
+      ['email:verify-request:ip', '192.0.2.10'],
+      ['email:verify-request:account', 'account-1'],
+    ],
+    [
+      'verify',
+      (svc: AuthRateLimitService) =>
+        svc.enforceEmailVerify('192.0.2.10', 'the-code'),
+      ['email:verify:ip', '192.0.2.10'],
+      ['email:verify:token', 'the-code'],
+    ],
+    [
+      'email change',
+      (svc: AuthRateLimitService) =>
+        svc.enforceEmailChange('192.0.2.10', 'account-1'),
+      ['email:change:ip', '192.0.2.10'],
+      ['email:change:account', 'account-1'],
+    ],
+    [
+      'data export',
+      (svc: AuthRateLimitService) =>
+        svc.enforceDataExport('192.0.2.10', 'account-1'),
+      ['data:export:ip', '192.0.2.10'],
+      ['data:export:account', 'account-1'],
+    ],
+  ] as const)(
+    'counts %s per IP and per account or code',
+    async (_name, enforce, ipBucket, ownBucket) => {
+      const hmac = (scope: string, value: string) =>
+        createHmac(
+          'sha256',
+          process.env.RATE_LIMIT_HASH_SECRET ??
+            process.env.MYSQL_PASSWORD ??
+            'community-local-rate-limit-secret',
+        )
+          .update(scope)
+          .update('\0')
+          .update(value)
+          .digest('hex');
+
+      await enforce(service);
+
+      const keys = calls
+        .filter((call) => call.sql.startsWith('INSERT INTO auth_rate_limits'))
+        .map((call) => call.values[0]);
+      expect(keys).toEqual([
+        hmac(ipBucket[0], ipBucket[1]),
+        hmac(ownBucket[0], ownBucket[1]),
+      ]);
+    },
+  );
 });

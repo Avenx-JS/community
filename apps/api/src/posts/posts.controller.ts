@@ -1,4 +1,8 @@
 import {
+  EMAIL_UNVERIFIED_FORBIDDEN_DOC,
+  RequireVerifiedEmail,
+} from '../auth/require-verified-email.decorator';
+import {
   Body,
   Controller,
   Delete,
@@ -91,14 +95,17 @@ export class PostsController {
 
   @Post()
   @UseGuards(AuthGuard)
+  @RequireVerifiedEmail()
   @ApiOperation({
     summary: 'Create a post',
     description:
-      'Link and media posts carry an HTTP(S) URL as content. Refused for an ' +
-      'account banned from the community.',
+      'A link post carries an HTTP(S) URL as content; a media post an upload ' +
+      'from POST /media as media_id, and an optional caption. Requires a ' +
+      'confirmed email address. Refused for an account banned from the ' +
+      'community.',
   })
   @ApiAuthenticated({
-    forbidden: `The caller has not accepted the community's current rules. ${COMMUNITY_BANNED_FORBIDDEN_DOC}`,
+    forbidden: `The caller has not accepted the community's current rules. ${COMMUNITY_BANNED_FORBIDDEN_DOC} ${EMAIL_UNVERIFIED_FORBIDDEN_DOC}`,
   })
   @ApiCreatedResponse({ type: PostResponse })
   @ApiErrorResponses({
@@ -478,6 +485,7 @@ export class PostsController {
 
   @Post(':postId/comments')
   @UseGuards(AuthGuard)
+  @RequireVerifiedEmail()
   @ApiTags('comments')
   @ApiOperation({
     summary: 'Comment on a post',
@@ -485,10 +493,10 @@ export class PostsController {
       'Set parent_id to reply to a comment on the same post. Refused when ' +
       'the caller and the author it is directed at have blocked each other: ' +
       "the post's author for a comment, the parent comment's author for a " +
-      'reply.',
+      'reply. Requires a confirmed email address.',
   })
   @ApiAuthenticated({
-    forbidden: `The caller has not accepted the community's current rules. ${COMMUNITY_BANNED_FORBIDDEN_DOC} ${USER_BLOCKED_FORBIDDEN_DOC}`,
+    forbidden: `The caller has not accepted the community's current rules. ${COMMUNITY_BANNED_FORBIDDEN_DOC} ${USER_BLOCKED_FORBIDDEN_DOC} ${EMAIL_UNVERIFIED_FORBIDDEN_DOC}`,
   })
   @ApiRouteParam('postId', 'id', 'Post ID.')
   @ApiCreatedResponse({ type: CommentResponse })

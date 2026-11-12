@@ -218,7 +218,7 @@ describe('Saved posts (e2e)', () => {
         validateAccessTokenState: (token: string) =>
           Promise.resolve(
             token in tokens
-              ? { kind: 'valid', userId: tokens[token] }
+              ? { kind: 'valid', emailVerified: true, userId: tokens[token] }
               : { kind: 'invalid' },
           ),
       })

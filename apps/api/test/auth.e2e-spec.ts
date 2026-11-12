@@ -422,11 +422,9 @@ describe('Auth endpoints (e2e)', () => {
         return Promise.resolve([{ affectedRows: token ? 1 : 0 }, []]);
       }
       if (sql.startsWith('UPDATE auth_sessions SET token_hash')) {
-        const [tokenHash, expiresAt, sessionId] = values as [
-          string,
-          Date,
-          string,
-        ];
+        // The token, its expiry, the origin (migration 037), the session.
+        const [tokenHash, expiresAt] = values as [string, Date];
+        const sessionId = values.at(-1) as string;
         const session = sessions.find(
           (entry) => entry.session_id === sessionId,
         );

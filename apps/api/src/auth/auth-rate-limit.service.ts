@@ -48,6 +48,14 @@ interface AuthRateLimitConfig {
   searchIp: RateLimitOptions;
   mediaUploadIp: RateLimitOptions;
   mediaUploadAccount: RateLimitOptions;
+  emailVerifyRequestIp: RateLimitOptions;
+  emailVerifyRequestAccount: RateLimitOptions;
+  emailVerifyIp: RateLimitOptions;
+  emailVerifyToken: RateLimitOptions;
+  emailChangeIp: RateLimitOptions;
+  emailChangeAccount: RateLimitOptions;
+  dataExportIp: RateLimitOptions;
+  dataExportAccount: RateLimitOptions;
 }
 
 // The routes that take a file: each decodes and re-encodes an image or
@@ -105,6 +113,20 @@ function readConfig(): AuthRateLimitConfig {
     searchIp: readOptions('API_SEARCH_IP', 30, 60),
     mediaUploadIp: readOptions('API_MEDIA_UPLOAD_IP', 30, 3600),
     mediaUploadAccount: readOptions('API_MEDIA_UPLOAD_ACCOUNT', 20, 3600),
+    // Every one sends an email, to an address the caller chose or owns.
+    emailVerifyRequestIp: readOptions('AUTH_EMAIL_VERIFY_REQUEST_IP', 10, 3600),
+    emailVerifyRequestAccount: readOptions(
+      'AUTH_EMAIL_VERIFY_REQUEST_ACCOUNT',
+      3,
+      3600,
+    ),
+    emailVerifyIp: readOptions('AUTH_EMAIL_VERIFY_IP', 20, 3600),
+    emailVerifyToken: readOptions('AUTH_EMAIL_VERIFY_TOKEN', 5, 3600),
+    emailChangeIp: readOptions('AUTH_EMAIL_CHANGE_IP', 10, 3600),
+    emailChangeAccount: readOptions('AUTH_EMAIL_CHANGE_ACCOUNT', 3, 3600),
+    // An export reads everything an account ever wrote.
+    dataExportIp: readOptions('API_DATA_EXPORT_IP', 10, 86400),
+    dataExportAccount: readOptions('API_DATA_EXPORT_ACCOUNT', 3, 86400),
   };
 }
 
@@ -162,6 +184,51 @@ export class AuthRateLimitService {
         email.trim().toLowerCase(),
         this.config.passwordForgotAccount,
       ),
+    ]);
+  }
+
+  async enforceEmailVerifyRequest(
+    ip: string,
+    userId: string,
+  ): Promise<number | null> {
+    return this.enforceSignals([
+      this.signal(
+        'email:verify-request:ip',
+        ip,
+        this.config.emailVerifyRequestIp,
+      ),
+      this.signal(
+        'email:verify-request:account',
+        userId,
+        this.config.emailVerifyRequestAccount,
+      ),
+    ]);
+  }
+
+  // Per code as well as per IP, as for password reset: a code is a secret
+  // that must not be guessable from many addresses.
+  async enforceEmailVerify(ip: string, token: string): Promise<number | null> {
+    return this.enforceSignals([
+      this.signal('email:verify:ip', ip, this.config.emailVerifyIp),
+      this.signal('email:verify:token', token, this.config.emailVerifyToken),
+    ]);
+  }
+
+  async enforceEmailChange(ip: string, userId: string): Promise<number | null> {
+    return this.enforceSignals([
+      this.signal('email:change:ip', ip, this.config.emailChangeIp),
+      this.signal(
+        'email:change:account',
+        userId,
+        this.config.emailChangeAccount,
+      ),
+    ]);
+  }
+
+  async enforceDataExport(ip: string, userId: string): Promise<number | null> {
+    return this.enforceSignals([
+      this.signal('data:export:ip', ip, this.config.dataExportIp),
+      this.signal('data:export:account', userId, this.config.dataExportAccount),
     ]);
   }
 

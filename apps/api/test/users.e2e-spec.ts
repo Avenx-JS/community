@@ -32,15 +32,15 @@ type Row = Record<string, unknown>;
 
 const tokens: Record<
   string,
-  | { kind: 'valid'; userId: string }
+  | { kind: 'valid'; emailVerified: boolean; userId: string }
   | {
       kind: 'restricted';
       userId: string;
       restriction: { type: 'suspension' | 'ban'; expires_at: string | null };
     }
 > = {
-  'token-a': { kind: 'valid', userId: 'user-a' },
-  'token-b': { kind: 'valid', userId: 'user-b' },
+  'token-a': { kind: 'valid', emailVerified: true, userId: 'user-a' },
+  'token-b': { kind: 'valid', emailVerified: true, userId: 'user-b' },
   'token-suspended': {
     kind: 'restricted',
     userId: 'user-suspended',
@@ -130,6 +130,11 @@ describe('User profile endpoints (e2e)', () => {
     // to, and holds a record in every table that references accounts.
     tables = {
       communities: [{ id: 'community-b', creator_id: 'user-b' }],
+      // Account settings (migration 037): empty, deleted with the account.
+      email_verification_tokens: [],
+      email_changes: [],
+      user_preferences: [],
+      data_exports: [],
       community_subscriptions: [
         { user_id: 'user-a', community_id: 'community-b' },
         { user_id: 'user-b', community_id: 'community-b' },
@@ -624,6 +629,7 @@ describe('User profile endpoints (e2e)', () => {
         id: 'user-a',
         username: 'sample_user',
         email: 'sample_user@example.com',
+        email_verified: false,
         display_name: 'Sam',
         bio: 'Hi',
         role: 'user',
@@ -725,6 +731,7 @@ describe('User profile endpoints (e2e)', () => {
         'created_at',
         'display_name',
         'email',
+        'email_verified',
         'id',
         'role',
         'username',

@@ -328,6 +328,10 @@ describe('Community bans (e2e)', () => {
             ]
           : [];
       }
+      // The global notification default on joining (migration 037).
+      if (flat.startsWith('INSERT INTO community_notification_preferences')) {
+        return [{ affectedRows: 0 }, []];
+      }
       throw new Error(`Unexpected SQL: ${flat}`);
     };
     const filtered = (flat: string, community: string) =>
@@ -385,7 +389,9 @@ describe('Community bans (e2e)', () => {
         validateAccessTokenState: (token: string) => {
           const id = `u-${token.replace(/-token$/, '')}`;
           return Promise.resolve(
-            users.has(id) ? { kind: 'valid', userId: id } : { kind: 'invalid' },
+            users.has(id)
+              ? { kind: 'valid', emailVerified: true, userId: id }
+              : { kind: 'invalid' },
           );
         },
       })

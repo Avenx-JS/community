@@ -729,6 +729,66 @@ ALTER TABLE communities
   ADD CONSTRAINT fk_communities_icon_media FOREIGN KEY (icon_media_id) REFERENCES media(id),
   ADD CONSTRAINT fk_communities_banner_media FOREIGN KEY (banner_media_id) REFERENCES media(id);
 
+-- Account settings (037_add_account_settings).
+ALTER TABLE users
+  ADD COLUMN email_verified_at TIMESTAMP NULL DEFAULT NULL;
+
+CREATE TABLE email_verification_tokens (
+    token_hash CHAR(64) PRIMARY KEY,
+    user_id VARCHAR(36) NOT NULL,
+    email VARCHAR(255) NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    used_at TIMESTAMP NULL DEFAULT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_email_verification_tokens_user (user_id, used_at),
+    CONSTRAINT fk_email_verification_tokens_user
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE email_changes (
+    user_id VARCHAR(36) PRIMARY KEY,
+    new_email VARCHAR(255) NOT NULL,
+    token_hash CHAR(64) NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_email_changes_token (token_hash),
+    CONSTRAINT fk_email_changes_user
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+ALTER TABLE auth_sessions
+  ADD COLUMN last_used_at TIMESTAMP NULL DEFAULT NULL,
+  ADD COLUMN ip_prefix VARCHAR(64) NULL,
+  ADD COLUMN user_agent VARCHAR(255) NULL;
+
+CREATE TABLE user_preferences (
+    user_id VARCHAR(36) PRIMARY KEY,
+    email_notifications BOOLEAN NOT NULL DEFAULT TRUE,
+    new_community_notifications BOOLEAN NOT NULL DEFAULT TRUE,
+    show_nsfw BOOLEAN NOT NULL DEFAULT FALSE,
+    timezone VARCHAR(64) NOT NULL DEFAULT 'UTC',
+    language VARCHAR(35) NOT NULL DEFAULT 'en',
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_user_preferences_user
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE data_exports (
+    id VARCHAR(36) PRIMARY KEY,
+    user_id VARCHAR(36) NOT NULL,
+    status ENUM('pending', 'ready', 'failed', 'downloaded', 'expired') NOT NULL DEFAULT 'pending',
+    payload LONGBLOB NULL,
+    size_bytes INT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP NULL DEFAULT NULL,
+    expires_at TIMESTAMP NULL DEFAULT NULL,
+    downloaded_at TIMESTAMP NULL DEFAULT NULL,
+    INDEX idx_data_exports_user_created (user_id, created_at),
+    INDEX idx_data_exports_status_expires (status, expires_at),
+    CONSTRAINT fk_data_exports_user
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
 CREATE TABLE schema_migrations (
     version VARCHAR(64) PRIMARY KEY,
     applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -771,4 +831,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('033_add_communities_created_index'),
     ('034_add_content_ranking'),
     ('035_create_media'),
-    ('036_add_community_report_review');
+    ('036_add_community_report_review'),
+    ('037_add_account_settings');

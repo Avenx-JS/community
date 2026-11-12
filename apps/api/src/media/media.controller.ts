@@ -1,4 +1,8 @@
 import {
+  EMAIL_UNVERIFIED_FORBIDDEN_DOC,
+  RequireVerifiedEmail,
+} from '../auth/require-verified-email.decorator';
+import {
   Controller,
   Delete,
   Get,
@@ -54,6 +58,7 @@ export class MediaController {
 
   @Post()
   @UseGuards(AuthGuard)
+  @RequireVerifiedEmail()
   @ApiFileUpload('An image or video for a post.')
   @ApiOperation({
     summary: 'Upload an image or video for a post',
@@ -63,9 +68,10 @@ export class MediaController {
       'all other metadata removed, size kept. Videos are stored as uploaded. ' +
       'The file stays yours and unattached until POST /posts uses its ' +
       'media_id; unattached uploads are released after ' +
-      'MEDIA_PENDING_TTL_HOURS, and at most MEDIA_PENDING_MAX may wait.',
+      'MEDIA_PENDING_TTL_HOURS, and at most MEDIA_PENDING_MAX may wait. ' +
+      'Requires a confirmed email address.',
   })
-  @ApiAuthenticated()
+  @ApiAuthenticated({ forbidden: EMAIL_UNVERIFIED_FORBIDDEN_DOC })
   @ApiCreatedResponse({ type: MediaResponse })
   @ApiErrorResponses({
     ...UPLOAD_ERRORS,

@@ -37,3 +37,38 @@ export class AuthTokensResponse implements AuthResponse {
   @ApiProperty({ type: AuthUserResponse })
   user!: AuthUserResponse;
 }
+
+export class SessionResponse {
+  @ApiProperty({ description: 'Session ID, for DELETE /auth/sessions/{id}.' })
+  id!: string;
+
+  @ApiProperty({ format: 'date-time', description: 'When you signed in.' })
+  created_at!: string;
+
+  @ApiProperty({
+    format: 'date-time',
+    description:
+      'The last token rotation, accurate to the 15-minute access token.',
+  })
+  last_used_at!: string;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    example: '203.0.113.0/24',
+    description:
+      'The network last used: an IPv4 /24 or IPv6 /48. The full address is never stored.',
+  })
+  ip_prefix!: string | null;
+
+  @ApiProperty({ type: String, nullable: true, maxLength: 255 })
+  user_agent!: string | null;
+
+  @ApiProperty({ description: 'Whether this request was made with it.' })
+  current!: boolean;
+}
+
+export class SessionListResponse {
+  @ApiProperty({ type: [SessionResponse] })
+  items!: SessionResponse[];
+}

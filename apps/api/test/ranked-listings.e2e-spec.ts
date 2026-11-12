@@ -325,7 +325,7 @@ describe('Ranked listings, the feed and comment permalinks (e2e)', () => {
         validateAccessTokenState: (token: string) =>
           Promise.resolve(
             token in users
-              ? { kind: 'valid', userId: users[token] }
+              ? { kind: 'valid', emailVerified: true, userId: users[token] }
               : { kind: 'invalid' },
           ),
       })

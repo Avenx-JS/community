@@ -15,6 +15,7 @@ interface UserProfileRow extends RowDataPacket {
 interface OwnProfileRow extends UserProfileRow {
   id: string;
   email: string;
+  email_verified_at?: Date | string | null;
   role: PlatformRole;
 }
 
@@ -38,11 +39,13 @@ export interface UserProfile {
 export interface OwnProfile extends UserProfile {
   id: string;
   email: string;
+  // Whether the address is confirmed (POST /auth/email/verify).
+  email_verified: boolean;
   role: PlatformRole;
 }
 
 export const OWN_PROFILE_SQL =
-  'SELECT id, username, email, display_name, bio, role, created_at, avatar_media_id FROM users WHERE id = ? LIMIT 1';
+  'SELECT id, username, email, email_verified_at, display_name, bio, role, created_at, avatar_media_id FROM users WHERE id = ? LIMIT 1';
 export const USER_PROFILE_SQL =
   'SELECT username, display_name, bio, created_at, avatar_media_id FROM users WHERE username = ? AND deleted_at IS NULL LIMIT 1';
 
@@ -91,6 +94,7 @@ export class UsersService {
       id: user.id,
       username: user.username,
       email: user.email,
+      email_verified: Boolean(user.email_verified_at),
       display_name: user.display_name,
       bio: user.bio,
       role: user.role,

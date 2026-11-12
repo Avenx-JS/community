@@ -381,6 +381,10 @@ describe('Admin restrictions API (e2e)', () => {
       if (sql.includes('FROM community_bans')) {
         return Promise.resolve([[], []]);
       }
+      // The global notification default on joining (migration 037).
+      if (sql.startsWith('INSERT INTO community_notification_preferences')) {
+        return Promise.resolve([{ affectedRows: 0 }, []]);
+      }
       return Promise.reject(new Error(`Unexpected SQL query: ${sql}`));
     };
 

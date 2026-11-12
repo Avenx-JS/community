@@ -8,6 +8,9 @@ import { UserBlocksController } from './user-blocks.controller';
 import { UserBlocksService } from './user-blocks.service';
 import { UsersController } from './users.controller';
 import { UsersService } from './users.service';
+import { AccountDataController } from './account-data.controller';
+import { DataExportService } from './data-export.service';
+import { UserPreferencesService } from './user-preferences.service';
 
 @Module({
   // AuthModule needs UsersService for AdminGuard, and UsersController needs
@@ -22,8 +25,10 @@ import { UsersService } from './users.service';
     AccountDeletionService,
     UserActivityService,
     UserBlocksService,
+    UserPreferencesService,
+    DataExportService,
   ],
-  controllers: [UsersController, UserBlocksController],
+  controllers: [UsersController, UserBlocksController, AccountDataController],
   exports: [UsersService],
 })
 export class UsersModule {}

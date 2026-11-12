@@ -212,9 +212,9 @@ describe('Admin communities API (e2e)', () => {
         validateAccessTokenState: (token: string) =>
           Promise.resolve(
             token === 'admin-token'
-              ? { kind: 'valid', userId: 'u-admin' }
+              ? { kind: 'valid', emailVerified: true, userId: 'u-admin' }
               : token === 'user-token'
-                ? { kind: 'valid', userId: 'u-alice' }
+                ? { kind: 'valid', emailVerified: true, userId: 'u-alice' }
                 : { kind: 'invalid' },
           ),
       })

@@ -10,6 +10,12 @@ import type { Request } from 'express';
 import type { PlatformRole } from '../users/users.service';
 import { ALLOW_RESTRICTED } from './allow-restricted.decorator';
 import { AuthService } from './auth.service';
+import {
+  EMAIL_UNVERIFIED_MESSAGE,
+  EMAIL_UNVERIFIED_REASON,
+  REQUIRE_VERIFIED_EMAIL,
+  type EmailUnverifiedPayload,
+} from './require-verified-email.decorator';
 
 export interface AuthenticatedRequest extends Request {
   user: { id: string; role?: PlatformRole };
@@ -42,7 +48,9 @@ export class AuthGuard implements CanActivate {
         context.getClass(),
       ]) ?? false;
 
-    const validation = await this.authService.validateAccessTokenState(match[1]);
+    const validation = await this.authService.validateAccessTokenState(
+      match[1],
+    );
     if (validation.kind === 'invalid') {
       throw new UnauthorizedException('Invalid or expired token');
     }
@@ -68,9 +76,25 @@ export class AuthGuard implements CanActivate {
       throw new UnauthorizedException('Invalid or expired token');
     }
 
+    // Fails closed: only an explicit true passes.
+    const requireVerified =
+      this.reflector.getAllAndOverride<boolean>(REQUIRE_VERIFIED_EMAIL, [
+        context.getHandler(),
+        context.getClass(),
+      ]) ?? false;
+    if (
+      requireVerified &&
+      !(validation.kind === 'valid' && validation.emailVerified === true)
+    ) {
+      const payload: EmailUnverifiedPayload = {
+        reason: EMAIL_UNVERIFIED_REASON,
+        message: EMAIL_UNVERIFIED_MESSAGE,
+      };
+      throw new ForbiddenException(payload);
+    }
+
     request.user = { id: userId };
     request.accessToken = match[1];
     return true;
   }
 }
-

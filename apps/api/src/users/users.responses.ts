@@ -43,6 +43,13 @@ export class OwnProfileResponse
   @ApiProperty({ description: 'Returned by GET /users/me and nowhere else.' })
   email!: string;
 
+  @ApiProperty({
+    description:
+      'Whether the address is confirmed. Posting, commenting, creating ' +
+      'communities and uploading need it (POST /auth/email/verify-request).',
+  })
+  email_verified!: boolean;
+
   @ApiProperty({ enum: ['user', 'moderator', 'admin'] })
   role!: PlatformRole;
 }

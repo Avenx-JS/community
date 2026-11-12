@@ -808,7 +808,7 @@ describe('Comment endpoints (e2e)', () => {
         validateAccessTokenState: (token: string) =>
           Promise.resolve(
             token in userIds
-              ? { kind: 'valid', userId: userIds[token] }
+              ? { kind: 'valid', emailVerified: true, userId: userIds[token] }
               : { kind: 'invalid' },
           ),
       })

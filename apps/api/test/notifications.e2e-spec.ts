@@ -48,16 +48,16 @@ interface NotificationPage {
 
 const tokens: Record<
   string,
-  | { kind: 'valid'; userId: string }
+  | { kind: 'valid'; emailVerified: boolean; userId: string }
   | {
       kind: 'restricted';
       userId: string;
       restriction: { type: 'suspension' | 'ban'; expires_at: string | null };
     }
 > = {
-  'token-a': { kind: 'valid', userId: 'user-a' },
-  'token-b': { kind: 'valid', userId: 'user-b' },
-  'token-empty': { kind: 'valid', userId: 'user-empty' },
+  'token-a': { kind: 'valid', emailVerified: true, userId: 'user-a' },
+  'token-b': { kind: 'valid', emailVerified: true, userId: 'user-b' },
+  'token-empty': { kind: 'valid', emailVerified: true, userId: 'user-empty' },
   'token-suspended': {
     kind: 'restricted',
     userId: 'user-suspended',
