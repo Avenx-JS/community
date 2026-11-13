@@ -2078,7 +2078,9 @@ whole operation back and the account stays fully intact):
    Its email verification codes, a pending email change, its preferences
    and its data exports (each a copy of its data) are deleted too, and so are
    its join requests, moderator invitations, user flairs and community mutes
-   (migration 038), and its hidden posts and saved comments (migration 039).
+   (migration 038), its hidden posts and saved comments (migration 039), and
+   its push subscriptions and stream tickets (migration 040); its open
+   notification streams end.
    Its avatar and its uploads never attached to a post are
    [released](#releasing-and-cleaning-up-media) (`RELEASE_ACCOUNT_MEDIA_SQL`)
    and `avatar_media_id` is cleared; the files in its posts stay with the
@@ -2260,6 +2262,7 @@ defaults, and `GET` writes nothing.
 | `show_nsfw` | `false` | When on, posts of [nsfw communities](#nsfw-and-post-types) appear in cross-community listings, search and discovery |
 | `timezone` | `UTC` | An IANA zone this runtime knows, in its proper case (`Europe/Berlin`) |
 | `language` | `en` | A BCP 47 tag: language, optional script and region (`de`, `en-GB`, `zh-Hant-TW`) |
+| `push_notifications` | `true` | Whether notifications reach your browsers by [Web Push](#web-push); optional in `PUT`, absent means `true` (added by migration 040) |
 
 ### Exporting your data
 
@@ -2286,8 +2289,8 @@ per-community notification settings, communities it created or moderates,
 saved posts, the usernames it blocked, the reports it filed (as
 `GET /reports` shows them), the notifications it received, its media, its
 sessions (with network prefixes), its join requests, moderator
-invitations, user flairs and muted communities, and its hidden posts and
-saved comments. **It never holds** a password hash, a token,
+invitations, user flairs and muted communities, its hidden posts and
+saved comments, and its push subscriptions (never their endpoints). **It never holds** a password hash, a token,
 another person's private data, or what others said about the account (reports
 about it, moderators' removal reasons): every section is one statement bound to
 the account id alone (`EXPORT_SECTIONS`). Both export routes are available to
@@ -7064,6 +7067,129 @@ rather than a bypass.
 support in the API, and adding a transport would be a new architectural
 dependency nothing here requires. Polling `unread-count` is the delivery
 mechanism.
+
+### Live notifications
+
+Migration `040_add_live_notifications`. Polling `GET /notifications/unread-count`
+keeps working; two live channels and a bulk delete join it.
+
+| Route | Does |
+| --- | --- |
+| `GET /notifications/stream` | Server-Sent Events of your own notifications |
+| `POST /notifications/stream-tickets` | A single-use ticket for the stream, for `EventSource` |
+| `POST /users/me/push-subscriptions` | Registers a browser for Web Push |
+| `GET /users/me/push-subscriptions` | Your subscriptions, whether push is on, and the VAPID public key |
+| `DELETE /users/me/push-subscriptions/:id` | Removes one (`204`; another account's is `404`) |
+| `DELETE /notifications` | Deletes every notification of yours (`{ "deleted": n }`) |
+
+#### Why Server-Sent Events, not a WebSocket
+
+The channel only ever flows from server to client, which is exactly what SSE
+is: plain HTTP, so the existing guard, rate limits, CORS, logging and every
+proxy that speaks HTTP/1.1 work unchanged, and browsers reconnect on their own
+(`retry: 5000`). A WebSocket would add an upgrade path, a second
+authentication flow and a gateway library for a direction we do not need;
+anything the client says still goes through the REST routes.
+
+#### The stream
+
+Authenticated by `Authorization: Bearer`, or, because `EventSource` cannot set
+headers, by `?ticket=` from `POST /notifications/stream-tickets`: 32 random
+bytes, stored only as SHA-256, valid once for
+`NOTIFICATION_STREAM_TICKET_TTL_SECONDS` (60), bound to the access token that
+minted it. A ticket in a URL can reach access logs; single use and the short
+lifetime make a logged one worthless.
+
+```
+retry: 5000
+
+event: unread-count
+data: {"unread":3}
+
+id: 6f0c…
+event: notification
+data: {"id":"6f0c…","type":"post_comment",…}   (the inbox DTO)
+
+: ping
+
+event: end
+data: {"reason":"session_ended"}
+```
+
+- **Only the caller's notifications.** Every statement is bound to the
+  stream's account; the same block filter as the inbox applies. Notifications
+  that existed on connecting are not sent (read the inbox, then follow the
+  stream).
+- **Committed rows only.** Notifications are written inside their causes'
+  transactions (a comment and its notification commit together), so the
+  stream does not announce on write: each instance reads the recent
+  notifications of its connected accounts every `NOTIFICATION_STREAM_POLL_MS`
+  (2000) in one statement, and sends the new ones, then the new unread count.
+  A change on the same instance (read, read-all, dismiss, delete-all) sends
+  the count at once.
+- **Limits.** `NOTIFICATION_STREAMS_PER_ACCOUNT` (5) per account and instance:
+  a new stream beyond it ends the oldest (`end` `replaced`), so a reloaded tab
+  never locks itself out behind its stale connection.
+  `NOTIFICATION_STREAMS_MAX` (10000) per instance, then `503`.
+- **Ends with its session.** A stream belongs to one access token. It ends
+  (`end` `session_ended`) after logout, `DELETE /auth/sessions/:id`,
+  logout-all, a suspension or ban, an account deletion, and when the token
+  expires: at once on the instance that handled the change (`SessionEvents`),
+  and on every instance within `NOTIFICATION_STREAM_REVALIDATE_SECONDS` (15),
+  one statement for all its streams. A restricted account cannot open one
+  (`403`) or mint a ticket. Clients reconnect with a fresh token.
+- **Behind a reverse proxy.** The response carries
+  `Cache-Control: no-cache, no-transform` and `X-Accel-Buffering: no`, and a
+  comment line every `NOTIFICATION_STREAM_HEARTBEAT_SECONDS` (25) keeps idle
+  streams below proxy timeouts. `docker compose --profile proxy up` starts
+  nginx with `deploy/nginx/community.conf`, which turns buffering and gzip
+  off for the stream and allows it an hour of read time; set
+  `TRUST_PROXY_HOPS=1` for the API behind it.
+
+#### Web Push
+
+Configured by `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` and `VAPID_SUBJECT`
+(all or none; `npm run vapid:keys` makes a pair). Without them push is off:
+`POST` answers `503` and the list says `enabled: false`. Clients subscribe with
+`public_key` from `GET /users/me/push-subscriptions` and send
+`PushSubscription.toJSON()`.
+
+- **No library.** Encryption (RFC 8291, `aes128gcm`) and VAPID (RFC 8292,
+  ES256) are on `node:crypto` in `web-push-crypto.ts`; its spec reproduces the
+  worked example of RFC 8291 Appendix A byte for byte.
+- **Endpoints are allowlisted.** The server sends requests to a client-chosen
+  URL, so endpoints must be https on a known push service
+  (`PUSH_ALLOWED_HOSTS`, default FCM, Mozilla, Windows, Apple, subdomains
+  included), default port, no credentials, and redirects are refused. Only
+  the endpoint's origin is ever returned; the full URL is a capability.
+  One row per endpoint: registering it again, even under another account,
+  takes it over. At most `PUSH_SUBSCRIPTIONS_PER_ACCOUNT` (10).
+- **Dispatch.** Every `PUSH_DISPATCH_INTERVAL_SECONDS` (5) the dispatcher
+  claims up to `PUSH_DISPATCH_BATCH` pending notifications
+  (`notifications.push_dispatched_at IS NULL`) with `FOR UPDATE SKIP LOCKED`,
+  so each instance takes different ones and each is pushed at most once; no
+  retry: the inbox is the record. Existing notifications were marked
+  dispatched by the migration: enabling push sends no backlog.
+- **Preferences.** A notification is pushed only if it is younger than
+  `PUSH_MAX_AGE_SECONDS` (3600), the recipient's
+  [`push_notifications`](#preferences) is on (default on), a `community_post`
+  notification's membership still has `new_posts` on
+  (`/communities/{name}/notification-preferences`, read at dispatch, so a
+  later change counts), and its actor is not blocked either way. The payload
+  is the inbox DTO (moderation notifications carry no actor), encrypted end
+  to end; the push service sees none of it.
+- **Dead subscriptions go.** `404` or `410` from the push service removes the
+  subscription at once (RFC 8030); other failures count, and
+  `PUSH_MAX_FAILURES` (5) in a row remove it; a success resets the count. A
+  subscription past its `expirationTime` is removed at dispatch.
+
+#### `DELETE /notifications` versus read-all
+
+`POST /notifications/read-all` keeps every notification and sets `read_at`;
+`DELETE /notifications` removes every notification of the caller for good,
+read or unread, including those the listing hides because of a block. It takes
+no filters, is idempotent (`{ "deleted": 0 }` on an empty inbox), is not open to
+restricted accounts, and updates open streams' unread count.
 
 ## Project setup
 

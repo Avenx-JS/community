@@ -31,11 +31,14 @@ import { ReadAllNotificationsDto } from './dto/read-all-notifications.dto';
 import { UpdateNotificationDto } from './dto/update-notification.dto';
 import { NotificationInboxService } from './notification-inbox.service';
 import {
+  DeleteAllNotificationsResponse,
   NotificationListResponse,
   NotificationResponse,
   ReadAllNotificationsResponse,
+  StreamTicketResponse,
   UnreadCountResponse,
 } from './notifications.responses';
+import { NotificationStreamService } from './notification-stream.service';
 
 // The recipient is always request.user.id; no route accepts a recipient.
 // The read routes stay reachable for suspended or banned accounts so they can
@@ -45,7 +48,10 @@ import {
 @Controller('notifications')
 @UseGuards(AuthGuard)
 export class NotificationsController {
-  constructor(private readonly inboxService: NotificationInboxService) {}
+  constructor(
+    private readonly inboxService: NotificationInboxService,
+    private readonly streams: NotificationStreamService,
+  ) {}
 
   @Get()
   @AllowRestricted()
@@ -105,12 +111,32 @@ export class NotificationsController {
   // State-changing routes are deliberately not @AllowRestricted(): a
   // restricted account may read why it is restricted, but not write.
 
+  // For EventSource clients, which cannot send the Authorization header to
+  // GET /notifications/stream.
+  @Post('stream-tickets')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Get a ticket for the notification stream',
+    description:
+      'A single-use ticket, valid for NOTIFICATION_STREAM_TICKET_TTL_SECONDS ' +
+      '(default 60), for GET /notifications/stream?ticket=…. Bound to the ' +
+      'session of the token that asked for it: the stream ends with that ' +
+      'session. Stored only as a hash. Not for suspended or banned accounts.',
+  })
+  @ApiAuthenticated()
+  @ApiOkResponse({ type: StreamTicketResponse })
+  streamTicket(@Req() request: AuthenticatedRequest) {
+    return this.streams.mintTicket(request.user.id, request.accessToken);
+  }
+
   @Post('read-all')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Mark all your notifications read',
     description:
-      'Accepts no filters. Idempotent; already-read timestamps are kept.',
+      'Accepts no filters. Idempotent; already-read timestamps are kept. ' +
+      'The notifications stay in the inbox; DELETE /notifications removes ' +
+      'them instead.',
   })
   @ApiAuthenticated()
   @ApiOkResponse({ type: ReadAllNotificationsResponse })
@@ -121,6 +147,28 @@ export class NotificationsController {
     @Req() request: AuthenticatedRequest,
   ) {
     return this.inboxService.markAllRead(request.user.id);
+  }
+
+  @Delete()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Delete all your notifications',
+    description:
+      'Empties your inbox: every notification of yours, read or unread, is ' +
+      'deleted for good, including those hidden from you because of a ' +
+      'block. Unlike POST /notifications/read-all, which keeps them and ' +
+      'only marks them read. Idempotent: an empty inbox answers ' +
+      '{ "deleted": 0 }. Accepts no filters.',
+  })
+  @ApiAuthenticated()
+  @ApiOkResponse({ type: DeleteAllNotificationsResponse })
+  @ApiErrorResponses({ 400: 'A body or query parameter was supplied.' })
+  removeAll(
+    @Body() _body: ReadAllNotificationsDto,
+    @Query() _query: ReadAllNotificationsDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.inboxService.removeAll(request.user.id);
   }
 
   @Patch(':id')

@@ -1,3 +1,4 @@
+import { SessionEvents } from './session-events';
 import {
   BadRequestException,
   ConflictException,
@@ -6,6 +7,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
 import { argon2id, hash as argon2Hash, verify as argon2Verify } from 'argon2';
@@ -231,6 +233,9 @@ export class AuthService {
   constructor(
     @Inject(MYSQL_POOL) private readonly pool: Pool,
     private readonly email: EmailTransport,
+    // Optional so the service also runs where nothing listens (tests).
+    @Optional()
+    private readonly sessionEvents: SessionEvents = new SessionEvents(),
   ) {}
 
   // Set by EmailVerificationService, which registration notifies: a new
@@ -376,6 +381,7 @@ export class AuthService {
       }
       await connection.commit();
       transactionStarted = false;
+      this.announceSessionsChanged(userId);
     } catch (error) {
       if (transactionStarted) {
         await connection.rollback();
@@ -384,6 +390,12 @@ export class AuthService {
     } finally {
       connection.release();
     }
+  }
+
+  // After a commit that ends sessions: live connections bound to a session
+  // (GET /notifications/stream) re-check theirs (SessionEvents).
+  announceSessionsChanged(userId: string): void {
+    this.sessionEvents.announce(userId);
   }
 
   async validateAccessTokenState(
@@ -455,10 +467,11 @@ export class AuthService {
 
   async logout(token: string): Promise<void> {
     const [sessions] = await this.pool.execute<
-      (RowDataPacket & { session_id: string })[]
-    >('SELECT session_id FROM auth_sessions WHERE token_hash = ? LIMIT 1', [
-      this.hashToken(token),
-    ]);
+      (RowDataPacket & { session_id: string; user_id: string })[]
+    >(
+      'SELECT session_id, user_id FROM auth_sessions WHERE token_hash = ? LIMIT 1',
+      [this.hashToken(token)],
+    );
     const session = sessions[0];
     if (!session) {
       return;
@@ -483,6 +496,7 @@ export class AuthService {
       );
       await connection.commit();
       transactionStarted = false;
+      this.announceSessionsChanged(session.user_id);
     } catch (error) {
       if (transactionStarted) {
         await connection.rollback();
@@ -502,6 +516,7 @@ export class AuthService {
       await this.revokeAllSessions(userId, connection);
       await connection.commit();
       transactionStarted = false;
+      this.announceSessionsChanged(userId);
     } catch (error) {
       if (transactionStarted) {
         await connection.rollback();

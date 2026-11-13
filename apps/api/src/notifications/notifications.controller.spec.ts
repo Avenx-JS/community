@@ -15,6 +15,7 @@ import { ALLOW_RESTRICTED } from '../auth/allow-restricted.decorator';
 import { AuthGuard } from '../auth/auth.guard';
 import { NotificationInboxService } from './notification-inbox.service';
 import { NotificationsController } from './notifications.controller';
+import { NotificationStreamService } from './notification-stream.service';
 
 describe('NotificationsController', () => {
   let app: INestApplication<App>;
@@ -32,7 +33,10 @@ describe('NotificationsController', () => {
     };
     const module = await Test.createTestingModule({
       controllers: [NotificationsController],
-      providers: [{ provide: NotificationInboxService, useValue: inbox }],
+      providers: [
+        { provide: NotificationInboxService, useValue: inbox },
+        { provide: NotificationStreamService, useValue: {} },
+      ],
     })
       .overrideGuard(AuthGuard)
       .useValue({
@@ -96,7 +100,15 @@ describe('NotificationsController', () => {
         Object.getOwnPropertyDescriptor(prototype, name)?.value as object,
       );
     const reads = ['findOne', 'list', 'unreadCount'];
-    const writes = ['markAllRead', 'remove', 'update'];
+    // Minting a stream ticket and emptying the inbox are writes too: a
+    // restricted account gets no live channel (migration 040).
+    const writes = [
+      'markAllRead',
+      'remove',
+      'removeAll',
+      'streamTicket',
+      'update',
+    ];
 
     expect(handlers.sort()).toEqual([...reads, ...writes].sort());
     for (const name of reads) {

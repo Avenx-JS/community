@@ -309,6 +309,7 @@ describe('Account settings (e2e)', () => {
                     show_nsfw: row[2],
                     timezone: row[3],
                     language: row[4],
+                    push_notifications: row[5],
                   },
                 ]
               : [],
@@ -626,6 +627,7 @@ describe('Account settings (e2e)', () => {
         show_nsfw: false,
         timezone: 'UTC',
         language: 'en',
+        push_notifications: true,
       });
       const set = {
         email_notifications: false,
@@ -640,13 +642,21 @@ describe('Account settings (e2e)', () => {
       await as('token-a')
         .put('/users/me/preferences', { show_nsfw: true })
         .expect(400);
+      // push_notifications is optional in PUT (migration 040): absent is on.
       expect(
         (await as('token-a').put('/users/me/preferences', set).expect(200))
           .body,
-      ).toEqual(set);
+      ).toEqual({ ...set, push_notifications: true });
+      expect(
+        (
+          await as('token-a')
+            .put('/users/me/preferences', { ...set, push_notifications: false })
+            .expect(200)
+        ).body,
+      ).toEqual({ ...set, push_notifications: false });
       expect(
         (await as('token-a').get('/users/me/preferences').expect(200)).body,
-      ).toEqual(set);
+      ).toEqual({ ...set, push_notifications: false });
     });
   });
 

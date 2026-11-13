@@ -1,4 +1,5 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Subject } from 'rxjs';
 import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { eitherBlockedSql } from '../users/user-block-policy.service';
@@ -9,7 +10,9 @@ import {
   type NotificationType,
 } from './notification-metadata';
 
-interface NotificationRow extends RowDataPacket {
+// Shared with the live channels (stream and Web Push), which render the
+// same DTO as the inbox.
+export interface NotificationRow extends RowDataPacket {
   id: string;
   type: NotificationType;
   subject_type: NotificationSubjectType;
@@ -47,7 +50,7 @@ export interface UnreadCountDto {
 // Rows render from the notification alone: no join to the subject, actor or
 // community, so a deleted post, comment, account or rename never drops or
 // breaks a row. actor_id is deliberately not selected.
-const NOTIFICATION_COLUMNS =
+export const NOTIFICATION_COLUMNS =
   'id, type, subject_type, subject_id, community_id, metadata, read_at, created_at';
 
 // Read-side allowlist over the snapshot keys buildNotificationMetadata writes.
@@ -173,6 +176,11 @@ export const MARK_ALL_READ_SQL =
   'UPDATE notifications SET read_at = UTC_TIMESTAMP() WHERE recipient_id = ? AND read_at IS NULL';
 export const DELETE_NOTIFICATION_SQL =
   'DELETE FROM notifications WHERE id = ? AND recipient_id = ?';
+// DELETE /notifications: every notification of the caller, read or unread,
+// including those the listing hides from blocked actors. Served by
+// idx_notifications_recipient_created.
+export const DELETE_ALL_NOTIFICATIONS_SQL =
+  'DELETE FROM notifications WHERE recipient_id = ?';
 
 // The inbox. Every method takes the recipient from the authenticated request;
 // nothing here accepts a recipient from client input. Reads never modify
@@ -182,6 +190,14 @@ export const DELETE_NOTIFICATION_SQL =
 @Injectable()
 export class NotificationInboxService {
   constructor(@Inject(MYSQL_POOL) private readonly pool: Pool) {}
+
+  // The recipients whose unread count a change here may have moved; the live
+  // stream (NotificationStreamService) sends them the new count.
+  readonly unreadChanged = new Subject<string>();
+
+  private announce(recipientId: string): void {
+    this.unreadChanged.next(recipientId);
+  }
 
   async list(
     recipientId: string,
@@ -239,6 +255,7 @@ export class NotificationInboxService {
     if (result.affectedRows === 0) {
       throw new NotFoundException('Notification not found');
     }
+    this.announce(recipientId);
     return this.findOne(recipientId, id);
   }
 
@@ -250,6 +267,7 @@ export class NotificationInboxService {
       MARK_ALL_READ_SQL,
       [recipientId],
     );
+    this.announce(recipientId);
     return { updated: result.affectedRows };
   }
 
@@ -263,5 +281,17 @@ export class NotificationInboxService {
     if (result.affectedRows === 0) {
       throw new NotFoundException('Notification not found');
     }
+    this.announce(recipientId);
+  }
+
+  // Empties the inbox: unlike read-all, the rows are gone. Idempotent: an
+  // empty inbox answers { deleted: 0 }.
+  async removeAll(recipientId: string): Promise<{ deleted: number }> {
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      DELETE_ALL_NOTIFICATIONS_SQL,
+      [recipientId],
+    );
+    this.announce(recipientId);
+    return { deleted: result.affectedRows };
   }
 }

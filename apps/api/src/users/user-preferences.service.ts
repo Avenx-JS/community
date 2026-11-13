@@ -9,9 +9,9 @@ import {
 } from './dto/user-preferences.dto';
 
 export const USER_PREFERENCES_SQL =
-  'SELECT email_notifications, new_community_notifications, show_nsfw, timezone, language FROM user_preferences WHERE user_id = ? LIMIT 1';
+  'SELECT email_notifications, new_community_notifications, show_nsfw, timezone, language, push_notifications FROM user_preferences WHERE user_id = ? LIMIT 1';
 export const UPSERT_USER_PREFERENCES_SQL =
-  'INSERT INTO user_preferences (user_id, email_notifications, new_community_notifications, show_nsfw, timezone, language) VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE email_notifications = VALUES(email_notifications), new_community_notifications = VALUES(new_community_notifications), show_nsfw = VALUES(show_nsfw), timezone = VALUES(timezone), language = VALUES(language)';
+  'INSERT INTO user_preferences (user_id, email_notifications, new_community_notifications, show_nsfw, timezone, language, push_notifications) VALUES (?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE email_notifications = VALUES(email_notifications), new_community_notifications = VALUES(new_community_notifications), show_nsfw = VALUES(show_nsfw), timezone = VALUES(timezone), language = VALUES(language), push_notifications = VALUES(push_notifications)';
 
 // Applied when an account subscribes to a community (CommunitiesService):
 // with new_community_notifications off, the new membership starts with
@@ -28,6 +28,8 @@ interface PreferencesRow extends RowDataPacket {
   show_nsfw: number | boolean;
   timezone: string;
   language: string;
+  // Migration 040; absent in rows read by older fixtures.
+  push_notifications?: number | boolean;
 }
 
 @Injectable()
@@ -50,6 +52,10 @@ export class UserPreferencesService {
       show_nsfw: isSqlTrue(row.show_nsfw),
       timezone: row.timezone,
       language: row.language,
+      push_notifications:
+        row.push_notifications === undefined
+          ? DEFAULT_USER_PREFERENCES.push_notifications
+          : isSqlTrue(row.push_notifications),
     };
   }
 
@@ -64,6 +70,8 @@ export class UserPreferencesService {
       input.show_nsfw,
       input.timezone,
       input.language,
+      // Optional in PUT, added after clients existed: absent is the default.
+      input.push_notifications ?? DEFAULT_USER_PREFERENCES.push_notifications,
     ]);
     return this.get(userId);
   }

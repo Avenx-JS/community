@@ -17,7 +17,7 @@ describe('migration 039 (content labels and history)', () => {
       `-- Content labels, hidden posts, saved comments and revisions (039_add_content_labels_and_history). ${migration}`,
     );
     expect(snapshot).toContain(
-      "('038_add_community_settings'), ('039_add_content_labels_and_history');",
+      "('038_add_community_settings'), ('039_add_content_labels_and_history'),",
     );
   });
 

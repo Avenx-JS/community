@@ -84,6 +84,9 @@ describe('AccountDeletionService', () => {
         );
         return Promise.resolve();
       },
+      announceSessionsChanged: (userId: string) => {
+        log.push(`announce ${userId}`);
+      },
     } as unknown as AuthService;
 
     service = new AccountDeletionService(
@@ -109,6 +112,8 @@ describe('AccountDeletionService', () => {
       ...DELETE_PRIVATE_STATE_SQL,
       `revoke ${USER_ID} on tx`,
       'commit',
+      // Live streams of the account end once the deletion is committed.
+      `announce ${USER_ID}`,
       'release',
     ]);
     expect(calls[0]).toEqual({ sql: LOCK_ACCOUNT_SQL, values: [USER_ID] });
@@ -176,6 +181,9 @@ describe('AccountDeletionService', () => {
       // The reader's own view (migration 039).
       'DELETE FROM hidden_posts WHERE user_id = ?',
       'DELETE FROM saved_comments WHERE user_id = ?',
+      // Live notifications (migration 040).
+      'DELETE FROM push_subscriptions WHERE user_id = ?',
+      'DELETE FROM notification_stream_tickets WHERE user_id = ?',
       // Releases, never deletes: the sweep deletes the files (migration 035).
       ...RELEASE_ACCOUNT_MEDIA_SQL,
     ]);
@@ -286,6 +294,7 @@ describe('AccountDeletionService', () => {
       {
         passwordMatches: () => Promise.resolve(true),
         revokeAllSessions: () => Promise.reject(new Error('revocation failed')),
+        announceSessionsChanged: () => undefined,
       } as unknown as AuthService,
     );
 

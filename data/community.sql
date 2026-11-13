@@ -934,6 +934,46 @@ CREATE TABLE comment_revisions (
 
 CREATE INDEX idx_votes_user_value ON votes (user_id, target_type, value, created_at, id);
 
+-- Live notifications: push subscriptions, stream tickets and push dispatch (040_add_live_notifications).
+ALTER TABLE notifications
+  ADD COLUMN push_dispatched_at TIMESTAMP NULL DEFAULT NULL,
+  ADD INDEX idx_notifications_push_pending (push_dispatched_at, created_at);
+
+UPDATE notifications SET push_dispatched_at = created_at WHERE push_dispatched_at IS NULL;
+
+CREATE TABLE push_subscriptions (
+    id VARCHAR(36) PRIMARY KEY,
+    user_id VARCHAR(36) NOT NULL,
+    endpoint VARCHAR(2048) NOT NULL,
+    endpoint_hash CHAR(64) NOT NULL,
+    p256dh VARCHAR(128) NOT NULL,
+    auth VARCHAR(32) NOT NULL,
+    expires_at TIMESTAMP NULL DEFAULT NULL,
+    user_agent VARCHAR(255) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_success_at TIMESTAMP NULL DEFAULT NULL,
+    failure_count INT UNSIGNED NOT NULL DEFAULT 0,
+    UNIQUE KEY uq_push_subscriptions_endpoint (endpoint_hash),
+    INDEX idx_push_subscriptions_user (user_id, created_at),
+    CONSTRAINT fk_push_subscriptions_user
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE notification_stream_tickets (
+    ticket_hash CHAR(64) PRIMARY KEY,
+    user_id VARCHAR(36) NOT NULL,
+    token_hash CHAR(64) NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    used_at TIMESTAMP NULL DEFAULT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_notification_stream_tickets_expires (expires_at),
+    CONSTRAINT fk_notification_stream_tickets_user
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+ALTER TABLE user_preferences
+  ADD COLUMN push_notifications BOOLEAN NOT NULL DEFAULT TRUE;
+
 CREATE TABLE schema_migrations (
     version VARCHAR(64) PRIMARY KEY,
     applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -979,4 +1019,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('036_add_community_report_review'),
     ('037_add_account_settings'),
     ('038_add_community_settings'),
-    ('039_add_content_labels_and_history');
+    ('039_add_content_labels_and_history'),
+    ('040_add_live_notifications');

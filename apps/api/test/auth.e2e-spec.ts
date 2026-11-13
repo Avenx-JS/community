@@ -308,13 +308,15 @@ describe('Auth endpoints (e2e)', () => {
           [],
         ]);
       }
-      if (sql.startsWith('SELECT session_id FROM auth_sessions')) {
+      if (sql.startsWith('SELECT session_id, user_id FROM auth_sessions')) {
         const [tokenHash] = values as [string];
         const session = sessions.find(
           (entry) => entry.token_hash === tokenHash,
         );
         return Promise.resolve([
-          session ? [{ session_id: session.session_id }] : [],
+          session
+            ? [{ session_id: session.session_id, user_id: session.user_id }]
+            : [],
           [],
         ]);
       }

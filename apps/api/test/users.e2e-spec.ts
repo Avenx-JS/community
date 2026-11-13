@@ -137,6 +137,12 @@ describe('User profile endpoints (e2e)', () => {
       user_preferences: [],
       data_exports: [],
       // The reader's own view (migration 039): A's rows go, B's stay.
+      // Live notifications (migration 040): A's rows go, B's stay.
+      push_subscriptions: [{ user_id: 'user-a' }, { user_id: 'user-b' }],
+      notification_stream_tickets: [
+        { user_id: 'user-a' },
+        { user_id: 'user-b' },
+      ],
       hidden_posts: [
         { user_id: 'user-a', post_id: 'post-a' },
         { user_id: 'user-b', post_id: 'post-a' },
@@ -564,6 +570,7 @@ describe('User profile endpoints (e2e)', () => {
           revokedUsers.add(userId);
           return Promise.resolve();
         },
+        announceSessionsChanged: () => undefined,
       })
       .compile();
 
@@ -906,6 +913,8 @@ describe('User profile endpoints (e2e)', () => {
         'community_mutes',
         'hidden_posts',
         'saved_comments',
+        'push_subscriptions',
+        'notification_stream_tickets',
       ]) {
         expect(owned(table, 'user_id', 'user-a')).toEqual([]);
         expect(owned(table, 'user_id', 'user-b')).toHaveLength(1);

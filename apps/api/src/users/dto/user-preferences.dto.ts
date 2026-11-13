@@ -1,6 +1,7 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsBoolean,
+  IsOptional,
   IsString,
   Length,
   Matches,
@@ -59,8 +60,9 @@ export class UpdateUserPreferencesDto {
 
   @ApiProperty({
     description:
-      'Whether you want content marked NSFW shown. Stored for clients; the ' +
-      'API has no NSFW marking on content yet.',
+      'Whether posts of nsfw communities appear in your cross-community ' +
+      'listings, search and discovery. Posts labelled nsfw are shown either ' +
+      'way, flagged for clients to blur.',
   })
   @IsBoolean()
   show_nsfw!: boolean;
@@ -80,9 +82,21 @@ export class UpdateUserPreferencesDto {
     message: 'language must be a language tag such as de, en-GB or zh-Hant-TW',
   })
   language!: string;
+
+  @ApiPropertyOptional({
+    default: true,
+    description:
+      'Whether notifications reach your registered browsers by Web Push ' +
+      '(/users/me/push-subscriptions). Per community, new-post pushes ' +
+      'also follow /communities/{name}/notification-preferences. Optional ' +
+      'in PUT: absent means the default, true.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  push_notifications?: boolean;
 }
 
-export type UserPreferences = UpdateUserPreferencesDto;
+export type UserPreferences = Required<UpdateUserPreferencesDto>;
 
 export const DEFAULT_USER_PREFERENCES: UserPreferences = {
   email_notifications: true,
@@ -90,4 +104,5 @@ export const DEFAULT_USER_PREFERENCES: UserPreferences = {
   show_nsfw: false,
   timezone: 'UTC',
   language: 'en',
+  push_notifications: true,
 };

@@ -68,6 +68,10 @@ export const DELETE_PRIVATE_STATE_SQL = [
   // comments, private like saved posts.
   'DELETE FROM hidden_posts WHERE user_id = ?',
   'DELETE FROM saved_comments WHERE user_id = ?',
+  // Live notifications (migration 040): no push may reach a deleted
+  // account's browsers.
+  'DELETE FROM push_subscriptions WHERE user_id = ?',
+  'DELETE FROM notification_stream_tickets WHERE user_id = ?',
   // The avatar and uploads never posted are released (migration 035); the
   // sweep deletes them. Files in the account's posts stay with the posts.
   ...RELEASE_ACCOUNT_MEDIA_SQL,
@@ -142,6 +146,8 @@ export class AccountDeletionService {
 
       await connection.commit();
       transactionStarted = false;
+      // Its live notification streams end now (sessions are gone).
+      this.authService.announceSessionsChanged(userId);
     } catch (error) {
       if (transactionStarted) {
         await connection.rollback();

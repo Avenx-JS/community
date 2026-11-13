@@ -9,6 +9,7 @@ import { UsersModule } from '../users/users.module';
 import { AdminGuard } from './admin.guard';
 import { AccountEmailController } from './account-email.controller';
 import { EmailVerificationService } from './email-verification.service';
+import { SessionEvents } from './session-events';
 
 @Module({
   imports: [DatabaseModule, EmailModule, forwardRef(() => UsersModule)],
@@ -18,8 +19,15 @@ import { EmailVerificationService } from './email-verification.service';
     AdminGuard,
     AuthRateLimitService,
     EmailVerificationService,
+    SessionEvents,
   ],
   controllers: [AuthController, AccountEmailController],
-  exports: [AuthGuard, AdminGuard, AuthService, AuthRateLimitService],
+  exports: [
+    AuthGuard,
+    AdminGuard,
+    AuthService,
+    AuthRateLimitService,
+    SessionEvents,
+  ],
 })
 export class AuthModule {}

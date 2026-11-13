@@ -94,6 +94,9 @@ describe('user blocks are read through one definition', () => {
     ).toEqual([
       'comments/comments.service.ts',
       'notifications/notification-inbox.service.ts',
+      // The live channels deliver exactly what the inbox shows the recipient.
+      'notifications/notification-stream.service.ts',
+      'notifications/web-push/push-dispatcher.service.ts',
       // GET /feed, the caller's own surface (FEED_UNBLOCKED_AUTHOR_SQL).
       'posts/posts.service.ts',
       'users/user-activity.service.ts',

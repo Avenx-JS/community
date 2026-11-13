@@ -135,6 +135,12 @@ export const EXPORT_SECTIONS: Array<[string, string]> = [
     'saved_comments',
     'SELECT comment_id, created_at FROM saved_comments WHERE user_id = ? ORDER BY created_at',
   ],
+  // Live notifications (migration 040): never the endpoint, a capability
+  // to push to the browser.
+  [
+    'push_subscriptions',
+    'SELECT user_agent, created_at, last_success_at, expires_at FROM push_subscriptions WHERE user_id = ? ORDER BY created_at',
+  ],
   [
     'sessions',
     'SELECT created_at, last_used_at, ip_prefix, user_agent FROM auth_sessions WHERE user_id = ? ORDER BY created_at',
