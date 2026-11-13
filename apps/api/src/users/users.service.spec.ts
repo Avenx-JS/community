@@ -142,7 +142,7 @@ describe('UsersService', () => {
     await expect(service.getPlatformRole('user-id')).resolves.toBe('admin');
     expect(queryCalls).toEqual([
       {
-        sql: 'SELECT role FROM users WHERE id = ? LIMIT 1',
+        sql: 'SELECT role FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1',
         values: ['user-id'],
       },
     ]);

@@ -142,6 +142,7 @@ describe('CommentRemovalService', () => {
         removed_at: clock.toISOString(),
         removed_by: actor,
         removal_reason: 'Personal attack',
+        removed_by_admin: false,
       });
       expect(notifications.record).toHaveBeenCalledTimes(1);
       expect(notifications.record).toHaveBeenCalledWith(connection, {
@@ -239,6 +240,24 @@ describe('CommentRemovalService', () => {
       });
       expect(notifications.record).not.toHaveBeenCalled();
     });
+
+    // Migration 041: moderators cannot undo an administrator's removal.
+    it.each(['moderator', 'creator-1'])(
+      "refuses %s with 403 on an administrator's removal, writing nothing",
+      async (actor) => {
+        comment = { ...comment!, removed_by_admin: true } as typeof comment;
+        await expect(service.restore('comment-1', actor)).rejects.toMatchObject(
+          {
+            status: 403,
+            message:
+              'A platform administrator removed this content; only an administrator can restore it',
+          },
+        );
+        expect(writes()).toEqual([]);
+        expect(log.record).not.toHaveBeenCalled();
+        expectRolledBackAndReleased();
+      },
+    );
 
     it('answers 409 for a comment that is not removed', async () => {
       comment = { ...comment!, removed_at: null };

@@ -117,6 +117,13 @@ export class CommentResponse implements CommentDto {
     description: 'Reviewers only: the optional removal reason.',
   })
   removal_reason?: string | null;
+
+  @ApiPropertyOptional({
+    description:
+      'Reviewers only: true when a platform administrator removed it. ' +
+      'Community moderators cannot restore such a removal (403).',
+  })
+  removed_by_admin?: boolean;
 }
 
 // A removed comment in the thread, for everyone but its reviewers: its place
@@ -251,6 +258,11 @@ export class RemovedCommentResponse extends CommentReplyResponse {
 
   @ApiProperty({ type: String, nullable: true })
   removal_reason!: string | null;
+
+  @ApiProperty({
+    description: 'True when a platform administrator removed it.',
+  })
+  removed_by_admin!: boolean;
 }
 
 // A comment on a permalink's chain as a reviewer sees it: the flat comment,
@@ -270,6 +282,11 @@ export class CommentPermalinkCommentResponse extends CommentReplyResponse {
 
   @ApiPropertyOptional({ type: String, nullable: true })
   removal_reason?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'True when a platform administrator removed it.',
+  })
+  removed_by_admin?: boolean;
 }
 
 // A removed ancestor as everyone but its reviewers sees it.

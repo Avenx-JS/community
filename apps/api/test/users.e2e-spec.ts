@@ -17,6 +17,7 @@ import {
   CREATED_COMMUNITY_SQL,
   LOCK_ACCOUNT_SQL,
 } from '../src/users/account-deletion.service';
+import { ACTIVE_ADMINS_SQL } from '../src/users/users.service';
 import {
   USER_COMMENTS_COUNT_SQL,
   USER_COMMUNITIES_COUNT_SQL,
@@ -270,6 +271,10 @@ describe('User profile endpoints (e2e)', () => {
           [],
         ]);
       }
+      // No administrator in these fixtures.
+      if (sql === ACTIVE_ADMINS_SQL) {
+        return Promise.resolve([[], []]);
+      }
       if (sql === CREATED_COMMUNITY_SQL) {
         return Promise.resolve([
           owned('communities', 'creator_id', values[0] as string).map(
@@ -342,7 +347,7 @@ describe('User profile endpoints (e2e)', () => {
       }
       if (
         sql.startsWith(
-          'SELECT id, post_id, author_id, parent_id, content, created_at, edited_at, locked_at, locked_by, removed_at, removed_by, removal_reason FROM comments WHERE post_id = ?',
+          'SELECT id, post_id, author_id, parent_id, content, created_at, edited_at, locked_at, locked_by, removed_at, removed_by, removal_reason, removed_by_admin FROM comments WHERE post_id = ?',
         )
       ) {
         return Promise.resolve([

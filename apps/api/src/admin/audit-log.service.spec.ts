@@ -104,16 +104,6 @@ describe('AuditLogService', () => {
       },
       { restriction_id: 'restriction-1', restriction_type: 'ban' },
     ],
-    [
-      {
-        actorId: 'admin-1',
-        action: 'user_role_changed',
-        targetType: 'user',
-        targetId: 'user-1',
-        metadata: { from_role: 'user', to_role: 'admin' },
-      },
-      { from_role: 'user', to_role: 'admin' },
-    ],
   ] as const)(
     'keeps only allowlisted metadata for action %s',
     (untypedEntry, expected) => {
@@ -139,6 +129,82 @@ describe('AuditLogService', () => {
       );
     },
   );
+
+  // Migration 041: role changes and administrators' content actions carry a
+  // required reason, and nothing else beyond their own keys.
+  it.each([
+    [
+      {
+        actorId: 'admin-1',
+        action: 'user_role_changed',
+        targetType: 'user',
+        targetId: 'user-1',
+        metadata: { from_role: 'user', to_role: 'admin', reason: 'Triage' },
+      },
+      { from_role: 'user', to_role: 'admin', reason: 'Triage' },
+    ],
+    [
+      {
+        actorId: 'admin-1',
+        action: 'post_removed',
+        targetType: 'post',
+        targetId: 'post-1',
+        metadata: {
+          community_name: 'garden',
+          previous_state: 'moderator_removed',
+          reason: 'Doxxing',
+        },
+      },
+      {
+        community_name: 'garden',
+        previous_state: 'moderator_removed',
+        reason: 'Doxxing',
+      },
+    ],
+    [
+      {
+        actorId: 'admin-1',
+        action: 'comment_restored',
+        targetType: 'comment',
+        targetId: 'comment-1',
+        metadata: { previous_state: 'admin_removed', reason: 'Appeal upheld' },
+      },
+      { previous_state: 'admin_removed', reason: 'Appeal upheld' },
+    ],
+  ] as const)(
+    'keeps the reason and drops everything unlisted for %s',
+    (untypedEntry, expected) => {
+      const entry = {
+        ...untypedEntry,
+        metadata: {
+          ...untypedEntry.metadata,
+          email: 'private@example.com',
+          token: 'secret-token',
+          removal_reason: 'the stored reason, not copied',
+          author_id: 'user-9',
+        },
+      } as unknown as AuditEntry;
+
+      expect(buildAuditMetadata(entry)).toEqual(expected);
+    },
+  );
+
+  it.each([
+    ['previous_state', 'visible_soon'],
+    ['reason', '   '],
+    ['reason', 'x'.repeat(2001)],
+    ['community_name', 'not a name'],
+  ])('rejects an invalid %s on a content action', (key, value) => {
+    expect(() =>
+      buildAuditMetadata({
+        actorId: 'admin-1',
+        action: 'post_restored',
+        targetType: 'post',
+        targetId: 'post-1',
+        metadata: { [key]: value },
+      }),
+    ).toThrow(`Invalid audit metadata field: ${key}`);
+  });
 
   it('rejects invalid values for allowlisted metadata fields', () => {
     expect(() =>

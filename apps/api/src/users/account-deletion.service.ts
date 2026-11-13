@@ -8,6 +8,7 @@ import {
 import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import { AuthService, MYSQL_POOL } from '../auth/auth.service';
 import { RELEASE_ACCOUNT_MEDIA_SQL } from '../media/media-sql';
+import { ACTIVE_ADMINS_SQL } from './users.service';
 
 interface LockedAccountRow extends RowDataPacket {
   id: string;
@@ -77,6 +78,9 @@ export const DELETE_PRIVATE_STATE_SQL = [
   ...RELEASE_ACCOUNT_MEDIA_SQL,
 ] as const;
 
+export const LAST_ADMIN_MESSAGE =
+  'You are the last platform administrator. Make another account an administrator before deleting yours.';
+
 export const COMMUNITY_CREATOR_MESSAGE =
   'You created a community. Delete it or transfer its ownership before deleting your account.';
 
@@ -127,6 +131,16 @@ export class AccountDeletionService {
       );
       if (communities.length > 0) {
         throw new ConflictException(COMMUNITY_CREATOR_MESSAGE);
+      }
+
+      // The platform must keep an administrator: the last one cannot leave,
+      // as it cannot be demoted (POST/DELETE /admin/users/:id/roles).
+      const [admins] =
+        await connection.execute<(RowDataPacket & { id: string })[]>(
+          ACTIVE_ADMINS_SQL,
+        );
+      if (admins.length === 1 && admins[0].id === userId) {
+        throw new ConflictException(LAST_ADMIN_MESSAGE);
       }
 
       await connection.execute<ResultSetHeader>(ANONYMISE_ACCOUNT_SQL, [

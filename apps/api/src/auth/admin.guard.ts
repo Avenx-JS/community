@@ -11,6 +11,11 @@ import type { PlatformRole } from '../users/users.service';
 import type { AuthenticatedRequest } from './auth.guard';
 import { REQUIRED_PLATFORM_ROLES } from './requires-role.decorator';
 
+// Reads the caller's platform role from the database on every request
+// (PLATFORM_ROLE_SQL: an account that is not deleted), never from the token:
+// a role assigned or revoked through /admin/users/:id/roles applies to the
+// very next request. The role routes count administrators by the same rule
+// (ACTIVE_ADMINS_SQL), so the guard and the last-administrator check agree.
 @Injectable()
 export class AdminGuard implements CanActivate {
   constructor(

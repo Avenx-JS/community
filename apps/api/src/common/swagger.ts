@@ -85,6 +85,11 @@ export function createOpenApiDocument(app: INestApplication): OpenAPIObject {
         'creator and moderators.',
     )
     .addTag('admin: analytics', 'Aggregate platform metrics.')
+    .addTag(
+      'admin: content',
+      'Posts and comments platform-wide, including removed content and ' +
+        'content in suspended or deleted communities.',
+    )
     .addBearerAuth({
       type: 'http',
       scheme: 'bearer',

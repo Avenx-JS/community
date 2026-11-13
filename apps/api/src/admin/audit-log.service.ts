@@ -23,6 +23,11 @@ export const ADMIN_ACTIONS = [
   // 031_add_report_assignment.
   'report_assigned',
   'report_unassigned',
+  // 041_add_admin_content_and_roles.
+  'post_removed',
+  'post_restored',
+  'comment_removed',
+  'comment_restored',
 ] as const;
 
 export type AdminAction = (typeof ADMIN_ACTIONS)[number];
@@ -32,6 +37,9 @@ export const ADMIN_ACTION_TARGETS = [
   'report',
   'restriction',
   'community',
+  // 041_add_admin_content_and_roles.
+  'post',
+  'comment',
 ] as const;
 
 export type AdminActionTarget = (typeof ADMIN_ACTION_TARGETS)[number];
@@ -93,6 +101,8 @@ export type AuditEntry =
       metadata?: {
         from_role?: PlatformRole;
         to_role?: PlatformRole;
+        // Required by the role routes: every role change is justified.
+        reason?: string;
       };
     }
   // community_name snapshots the name, so an entry stays readable after the
@@ -139,7 +149,38 @@ export type AuditEntry =
       metadata?: {
         assignee_username?: string;
       };
+    }
+  // An administrator's removal or restoration of a post or comment
+  // (/admin/posts, /admin/comments). previous_state is what the action
+  // changed: a removal of visible content or the takeover of a moderator's
+  // removal; a restoration of a moderator's or an administrator's removal.
+  | {
+      actorId: string;
+      action: 'post_removed' | 'post_restored';
+      targetType: 'post';
+      targetId: string;
+      metadata?: ContentActionMetadata;
+    }
+  | {
+      actorId: string;
+      action: 'comment_removed' | 'comment_restored';
+      targetType: 'comment';
+      targetId: string;
+      metadata?: ContentActionMetadata;
     };
+
+export const CONTENT_STATES = [
+  'visible',
+  'moderator_removed',
+  'admin_removed',
+] as const;
+export type ContentState = (typeof CONTENT_STATES)[number];
+
+export interface ContentActionMetadata {
+  community_name?: string;
+  previous_state?: ContentState;
+  reason?: string;
+}
 
 // communities.name is VARCHAR(50) with the route-name character set.
 const COMMUNITY_NAME = /^[A-Za-z0-9_-]{1,50}$/;
@@ -362,8 +403,10 @@ export function buildAuditMetadata(
     case 'user_role_changed': {
       const fromRole = enumValue(metadata, 'from_role', platformRoles);
       const toRole = enumValue(metadata, 'to_role', platformRoles);
+      const reason = reasonValue(metadata);
       if (fromRole !== undefined) result.from_role = fromRole;
       if (toRole !== undefined) result.to_role = toRole;
+      if (reason !== undefined) result.reason = reason;
       break;
     }
     case 'community_suspended': {
@@ -391,6 +434,22 @@ export function buildAuditMetadata(
     case 'report_unassigned': {
       const assignee = usernameSnapshotValue(metadata, 'assignee_username');
       if (assignee !== undefined) result.assignee_username = assignee;
+      break;
+    }
+    case 'post_removed':
+    case 'post_restored':
+    case 'comment_removed':
+    case 'comment_restored': {
+      const communityName = communityNameValue(metadata);
+      const previousState = enumValue(
+        metadata,
+        'previous_state',
+        CONTENT_STATES,
+      );
+      const reason = reasonValue(metadata);
+      if (communityName !== undefined) result.community_name = communityName;
+      if (previousState !== undefined) result.previous_state = previousState;
+      if (reason !== undefined) result.reason = reason;
       break;
     }
   }

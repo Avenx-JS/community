@@ -195,6 +195,7 @@ export interface CommentDto {
   removed_at?: string;
   removed_by?: string | null;
   removal_reason?: string | null;
+  removed_by_admin?: boolean;
 }
 
 // A removed comment as everyone but its reviewers sees it in the thread:
@@ -257,6 +258,7 @@ const PERMALINK_COLUMNS = (table: string) =>
     'removed_at',
     'removed_by',
     'removal_reason',
+    'removed_by_admin',
   ]
     .map((column) => `${table}.${column}`)
     .join(', ');
@@ -363,7 +365,7 @@ export class CommentsService {
     }
 
     const [rows] = await this.pool.execute<(CommentRow & RemovalStateRow)[]>(
-      `SELECT id, post_id, author_id, parent_id, content, created_at, edited_at, locked_at, locked_by, removed_at, removed_by, removal_reason FROM comments WHERE post_id = ? ${commentListOrder(query.sort ?? 'oldest')} LIMIT ?`,
+      `SELECT id, post_id, author_id, parent_id, content, created_at, edited_at, locked_at, locked_by, removed_at, removed_by, removal_reason, removed_by_admin FROM comments WHERE post_id = ? ${commentListOrder(query.sort ?? 'oldest')} LIMIT ?`,
       [postId, MAX_COMMENTS_PER_THREAD + 1],
     );
     if (rows.length > MAX_COMMENTS_PER_THREAD) {

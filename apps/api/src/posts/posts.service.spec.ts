@@ -2364,6 +2364,23 @@ describe('PostsService moderative removal', () => {
       expectRolledBackAndReleased();
     });
 
+    // Migration 041: an administrator's removal is not the community's to
+    // undo, whoever moderates it.
+    it.each(['moderator', 'creator-1'])(
+      "refuses %s with 403 on an administrator's removal, writing nothing",
+      async (actor) => {
+        post = { ...post!, removed_by_admin: 1 } as typeof post;
+        await expect(service.restore('post-1', actor)).rejects.toMatchObject({
+          status: 403,
+          message:
+            'A platform administrator removed this content; only an administrator can restore it',
+        });
+        expect(writes()).toEqual([]);
+        expect(log.record).not.toHaveBeenCalled();
+        expectRolledBackAndReleased();
+      },
+    );
+
     it('rolls back when the log entry cannot be written', async () => {
       log.record.mockRejectedValueOnce(new Error('log failed'));
       await expect(service.restore('post-1', 'moderator')).rejects.toThrow(

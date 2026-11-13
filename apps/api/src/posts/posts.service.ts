@@ -54,6 +54,7 @@ import {
 import { loadVoteScores } from '../votes/vote-scores';
 import { loadSavedFlags } from './saved-flags';
 import {
+  ADMIN_REMOVAL_LOCKED,
   canReviewRemovedContent,
   toRemovalState,
   type RemovalStateDto,
@@ -165,6 +166,12 @@ interface RemovablePostRow extends RowDataPacket {
   can_moderate: number | string | boolean;
 }
 
+interface RemovablePostState {
+  removed_at: Date | string | null;
+  // Absent from older fakes: read through isSqlTrue.
+  removed_by_admin?: number | string | boolean | null;
+}
+
 export interface PostDto {
   id: string;
   title: string;
@@ -200,7 +207,8 @@ export type ReviewablePostDto = PostDto & Partial<RemovalStateDto>;
 
 // The moderator-facing removal columns (migration 017), selected only by
 // reads that may show them to a reviewer.
-export const REMOVAL_COLUMNS = 'removed_at, removed_by, removal_reason';
+export const REMOVAL_COLUMNS =
+  'removed_at, removed_by, removal_reason, removed_by_admin';
 
 export interface PostListDto {
   items: PostDto[];
@@ -657,6 +665,9 @@ export class PostsService {
       if (post.removed_at === null) {
         throw new ConflictException('This post is not removed');
       }
+      if (isSqlTrue(post.removed_by_admin ?? false)) {
+        throw new ForbiddenException(ADMIN_REMOVAL_LOCKED);
+      }
       await connection.execute<ResultSetHeader>(
         'UPDATE posts SET removed_at = NULL, removed_by = NULL, removal_reason = NULL WHERE id = ? AND removed_at IS NOT NULL',
         [id],
@@ -698,11 +709,11 @@ export class PostsService {
     connection: PoolConnection,
     id: string,
     actorId: string,
-  ): Promise<RemovablePostRow & { removed_at: Date | string | null }> {
+  ): Promise<RemovablePostRow & RemovablePostState> {
     const [posts] = await connection.execute<
-      (RemovablePostRow & { removed_at: Date | string | null })[]
+      (RemovablePostRow & RemovablePostState)[]
     >(
-      `SELECT posts.id, posts.author_id, posts.community_id, posts.title, posts.removed_at,
+      `SELECT posts.id, posts.author_id, posts.community_id, posts.title, posts.removed_at, posts.removed_by_admin,
          ${canModerateCommunitySql('posts.community_id')} AS can_moderate
        FROM posts
        WHERE posts.id = ? AND ${visibleCommunitySql('posts.community_id')}

@@ -342,10 +342,15 @@ and `votes.target_type`); adding a future role requires a schema migration.
   platform-wide report triage without role changes or permanent bans remains
   an open product-policy decision.
 
-No API endpoint can assign or change a platform role. An operator provisions
-the first administrator directly in the database by executing the prepared
-statement `UPDATE users SET role = 'admin' WHERE username = ?` with the target
-username bound as its parameter. Do not expose role on public profiles or auth
+An administrator assigns and revokes roles through
+[`/admin/users/:id/roles`](#platform-role-administration). Only the first
+administrator is provisioned by an operator, directly in the database, by
+executing the prepared statement `UPDATE users SET role = 'admin' WHERE username = ?`
+with the target username bound as its parameter. An account holds exactly one
+role at a time: `@RequiresRole(...roles)` lists the roles a route accepts,
+any of them, not roles an account holds together, so the role routes need no
+migration. A deleted account holds no role: `AdminGuard` reads
+`SELECT role FROM users WHERE id = ? AND deleted_at IS NULL` on every request. Do not expose role on public profiles or auth
 responses; it is read from the database for server-side authorization only.
 
 ### Administration API conventions
@@ -396,12 +401,16 @@ Only the following metadata keys may be recorded:
 | `user_suspended`        | `user`        | `restriction_id`, `expires_at`, `report_id` |
 | `user_banned`           | `user`        | `restriction_id`, `report_id`               |
 | `restriction_lifted`    | `restriction` | `restriction_id`, `restriction_type`        |
-| `user_role_changed`     | `user`        | `from_role`, `to_role`                      |
+| `user_role_changed`     | `user`        | `from_role`, `to_role`, `reason`            |
 | `community_suspended`   | `community`   | `community_name`, `reason`                  |
 | `community_restored`    | `community`   | `community_name`, `restore_reason`          |
 | `community_updated`     | `community`   | `community_name`, `fields`                  |
 | `report_assigned`       | `report`      | `assignee_username`                         |
 | `report_unassigned`     | `report`      | `assignee_username`                         |
+| `post_removed`          | `post`        | `community_name`, `previous_state`, `reason` |
+| `post_restored`         | `post`        | `community_name`, `previous_state`, `reason` |
+| `comment_removed`       | `comment`     | `community_name`, `previous_state`, `reason` |
+| `comment_restored`      | `comment`     | `community_name`, `previous_state`, `reason` |
 
 The three `community_*` actions and the `community` target were added by
 migration `025_add_community_suspension`, so the community-administration
@@ -440,8 +449,17 @@ The service builds metadata from this allowlist and drops extra runtime keys
 non-object metadata value, throws). Passwords and hashes, tokens, session
 identifiers, email addresses, and free text such as `lift_reason` or
 `resolution_note` are never copied to audit metadata; the only free text
-allowed is `reason` on `community_suspended` and `restore_reason` on
-`community_restored`, which no other action accepts.
+allowed is `reason` on `community_suspended`, `user_role_changed` and the
+four content actions, and `restore_reason` on `community_restored`: in each
+case the administrator's own justification, required by the route. A content
+action never copies the content or the moderator's `removal_reason`.
+
+The four content actions and the `post` and `comment` targets were appended by
+migration `041_add_admin_content_and_roles` and are written by
+[admin content moderation](#admin-content-moderation). `previous_state` is
+`visible`, `moderator_removed` or `admin_removed`: what the action changed.
+`user_role_changed` existed since migration 004 and is written by
+[platform role administration](#platform-role-administration).
 Audit entries themselves are sensitive and may only be exposed
 through future admin-authorized read routes. Do not log the contents of an
 audit entry to application logs. Database grants or a trigger can additionally
@@ -1028,6 +1046,117 @@ actor is a platform administrator, not one of its moderators.
 [Community suspension](#community-suspension). This directory is where
 administrators still see a suspended community: `GET /admin/communities/:id`
 and `?state=suspended` return it, while every public route answers `404`.
+
+### Admin content moderation
+
+Migration `041_add_admin_content_and_roles`. Until now no route let anyone
+touch a single post or comment platform-wide, and a suspended community left
+its content out of everyone's reach: every public route, its own moderators'
+included, answers `404` there. These routes are addressed by id, see
+everything, and work in active, suspended and soft-deleted communities alike.
+
+| Route | Does |
+| --- | --- |
+| `GET /admin/posts` | Every post, removed ones included, newest first |
+| `GET /admin/posts/:id` | One post: content, votes, comment and report counts, removal |
+| `POST /admin/posts/:id/remove` | Removes it as an administrator |
+| `POST /admin/posts/:id/restore` | Restores any removal |
+| `GET /admin/comments` | Every comment, with a 200-character `excerpt` |
+| `GET /admin/comments/:id` | One comment, full content, reply and report counts |
+| `POST /admin/comments/:id/remove` | Removes it as an administrator |
+| `POST /admin/comments/:id/restore` | Restores any removal |
+
+**Filters.** `search` (title, or comment content; case-insensitive substring),
+`community_id`, `author_username`, `post_id` (comments), `state` (`any`,
+`visible`, `removed`, `moderator_removed`, `admin_removed`), `community_state`
+(`any`, `active`, `suspended`, `deleted`, as in `GET /admin/communities`),
+`page`, `limit` and `sort` (`new`, `oldest`), with the usual admin collection
+shape. `idx_posts_created` and the new `idx_comments_created` serve the order.
+
+**Telling the two removals apart.** Every item has `removal`, `null` while
+visible, otherwise `{ removed_at, removed_by_id, removed_by_username, reason,
+source }`, where `source` is `moderator` or `admin`. Stored as
+`removed_by_admin` on the row; public reviewer reads show the same flag.
+
+**Remove.** Body `{ "reason": "…" }`, required (plain text, 1-2,000 characters,
+trimmed): the decision overrides the community's own moderators, and the audit
+log keeps it. The route
+- removes visible content, and takes over a moderator's removal (`removed_by`,
+  `removal_reason` and `removed_at` become the administrator's), so the
+  community's moderators can no longer restore it; `409` if an administrator
+  already removed it;
+- notifies the author (`content_removed`, no actor, no reason) when the
+  content was visible; after a moderator's removal the author already knows;
+- closes the content's open community reports as `removed`, as a moderator's
+  removal does, without an entry in the community's moderation log;
+- writes one `post_removed` or `comment_removed` audit entry with
+  `community_name`, `previous_state` and `reason`, in the same transaction.
+
+**Restore.** Same body. Restores any removal, an administrator's or a
+moderator's: the platform decides over the community. `409` unless removed,
+and for a comment whose post is removed. One `post_restored` or
+`comment_restored` entry. No notification, as for moderators.
+
+### Platform role administration
+
+| Route | Does |
+| --- | --- |
+| `GET /admin/users/:id/roles` | `{ user_id, username, role, roles }` |
+| `POST /admin/users/:id/roles` | `{ "role": "moderator" \| "admin", "reason": "…" }` sets the role |
+| `DELETE /admin/users/:id/roles/:role` | `{ "reason": "…" }` in the body; returns the account to `user` |
+
+`users.role` holds one role per account, so no migration was needed: `roles`
+lists the elevated role held (empty for `user`), and assigning `admin` to a
+platform moderator replaces `moderator`. `user` is the baseline and is neither
+assigned nor revoked (`400`).
+
+**Against privilege escalation.**
+- Explicit `@RequiresRole('admin')` on the controller: platform moderators get
+  `403`, whatever later widening other `/admin` routes receive.
+- Nobody changes their own role (`403`), so no administrator grants
+  themselves anything or demotes themselves out of the last seat.
+- Each change locks every administrator row in id order
+  (`ACTIVE_ADMINS_SQL`) before the target, and re-checks under the lock that
+  the caller is still an administrator: two administrators demoting each
+  other at once serialise, and the second finds it is no longer one (`403`).
+- The last administrator cannot be removed (`409`), by revocation, by a
+  downgrade to `moderator`, or by [deleting the account](#deleting-your-own-account).
+- A suspended or banned account cannot become an administrator (`409`):
+  administrators cannot be restricted, so promotion would end the
+  restriction's review. Lift it first. Becoming a platform moderator is
+  allowed.
+- A deleted account cannot hold a role (`409`); an unknown one is `404`, a
+  role the account does not hold is `404` on `DELETE`, and assigning the role
+  it already holds is `409`.
+- `AdminGuard` reads the role from the database on every request, so a change
+  applies to the very next request; no token carries a role.
+
+Every change writes one `user_role_changed` audit entry with `from_role`,
+`to_role` and `reason`, in the same transaction.
+
+### Admin content and community analytics
+
+Both follow the [user analytics](#admin-user-analytics) range rules
+(`from`, `to`, `granularity`), and return only counts: no row names an
+account, a post or a community.
+
+`GET /admin/analytics/content`: `totals` (`posts`, `comments`, `votes`,
+`posts_removed`, `comments_removed`), `posts_by_type`, `votes_by_value`
+(`up`, `down`), `removals_by_source` (`moderator`, `admin`) and daily or weekly
+`series` of posts, comments and votes. `meta.time_basis` names each figure's
+column. Votes are counted by `votes.created_at`, the first vote on a target:
+changing a vote keeps it, withdrawing one deletes it. Removals count content
+removed in the range and still removed. Served by `idx_posts_created`,
+`idx_comments_created` and the new `idx_votes_created`.
+
+`GET /admin/analytics/communities`: `totals` (`total_communities`, not
+deleted; `new_communities`; `active_communities`, with a post or a comment on
+their posts created in the range; `suspended_communities`;
+`deleted_communities`), `members_distribution` over the buckets `0`, `1-9`,
+`10-99`, `100-999`, `1000+` for communities not deleted, and a
+`new_communities` series. `meta.scopes` marks point-in-time and range figures.
+A distribution rather than a ranking: listing the smallest communities would
+point at their few members.
 
 ### Admin report queue
 
@@ -2137,6 +2266,13 @@ communities first with `DELETE /communities/:name` (a soft delete, see
 their account; the deleted community keeps `deleted_at`, and `deleted_by`
 keeps referencing the anonymised account row. Ownership transfer is separate
 work.
+
+**The last administrator cannot leave.** If the caller is the only platform
+administrator whose account is not deleted, the request is `409` ("You are
+the last platform administrator. Make another account an administrator before
+deleting yours."). The check locks every administrator row
+(`ACTIVE_ADMINS_SQL`), as the [role routes](#platform-role-administration) do,
+so a deletion and a demotion can never leave the platform without one.
 
 **The original username becomes available again.** The placeholder replaces
 it in the row, so the old name is no longer in the unique index and a new
@@ -5111,11 +5247,19 @@ nobody: a new `notifications.type` value needs a migration, so a
 ("restore the post first"), rather than succeeding into a thread only reviewers
 can see.
 
+**An administrator's removal is not the community's to undo.** Content a
+platform administrator removed ([admin content moderation](#admin-content-moderation))
+carries `removed_by_admin: true` in its removal state; a community moderator
+or creator restoring it gets `403`. The `CHECK` constraints of migration 041
+(`removed_by_admin = FALSE OR removed_at IS NOT NULL`) refuse the moderator's
+restore statement in the database as well. Moderator removals carry
+`removed_by_admin: false`.
+
 #### Visibility of removed content
 
 | Read | Ordinary caller (anonymous, member, the author) | Community creator or moderator, platform admin |
 | --- | --- | --- |
-| `GET /posts/:id` | `404` | The post plus `removed`, `removed_at`, `removed_by`, `removal_reason` |
+| `GET /posts/:id` | `404` | The post plus `removed`, `removed_at`, `removed_by`, `removal_reason`, `removed_by_admin` |
 | `GET /posts`, `GET /communities/:name/posts`, `GET /users/:username/posts` | Omitted | Omitted |
 | `GET /posts/:postId/comments` of a removed post | `404` | The thread, in full |
 | A removed comment in the thread | A tombstone | The comment plus its removal state |

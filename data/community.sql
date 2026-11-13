@@ -417,9 +417,13 @@ CREATE TABLE admin_actions (
         'community_restored',
         'community_updated',
         'report_assigned',
-        'report_unassigned'
+        'report_unassigned',
+        'post_removed',
+        'post_restored',
+        'comment_removed',
+        'comment_restored'
     ) NOT NULL,
-    target_type ENUM('user', 'report', 'restriction', 'community') NOT NULL,
+    target_type ENUM('user', 'report', 'restriction', 'community', 'post', 'comment') NOT NULL,
     target_id VARCHAR(36) NOT NULL,
     metadata JSON NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -974,6 +978,19 @@ CREATE TABLE notification_stream_tickets (
 ALTER TABLE user_preferences
   ADD COLUMN push_notifications BOOLEAN NOT NULL DEFAULT TRUE;
 
+-- Admin content removal, role administration and analytics indexes (041_add_admin_content_and_roles).
+ALTER TABLE posts
+  ADD COLUMN removed_by_admin BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD CONSTRAINT chk_posts_admin_removal CHECK (removed_by_admin = FALSE OR removed_at IS NOT NULL);
+
+ALTER TABLE comments
+  ADD COLUMN removed_by_admin BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD CONSTRAINT chk_comments_admin_removal CHECK (removed_by_admin = FALSE OR removed_at IS NOT NULL),
+  ADD INDEX idx_comments_created (created_at, id);
+
+ALTER TABLE votes
+  ADD INDEX idx_votes_created (created_at);
+
 CREATE TABLE schema_migrations (
     version VARCHAR(64) PRIMARY KEY,
     applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -1020,4 +1037,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('037_add_account_settings'),
     ('038_add_community_settings'),
     ('039_add_content_labels_and_history'),
-    ('040_add_live_notifications');
+    ('040_add_live_notifications'),
+    ('041_add_admin_content_and_roles');

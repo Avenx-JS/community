@@ -8,10 +8,14 @@ import { AdminAnalyticsService } from './admin-analytics.service';
 import { AdminAuditLogController } from './admin-audit-log.controller';
 import { AdminAuditLogService } from './admin-audit-log.service';
 import { AdminCommunitiesController } from './admin-communities.controller';
+import { AdminContentController } from './admin-content.controller';
+import { AdminContentService } from './admin-content.service';
 import { AdminCommunitiesService } from './admin-communities.service';
 import { AdminReportsController } from './admin-reports.controller';
 import { AdminReportsService } from './admin-reports.service';
 import { AdminRestrictionsController } from './admin-restrictions.controller';
+import { AdminRolesController } from './admin-roles.controller';
+import { AdminRolesService } from './admin-roles.service';
 import { AdminRestrictionsService } from './admin-restrictions.service';
 import { AdminUsersController } from './admin-users.controller';
 import { AdminUsersService } from './admin-users.service';
@@ -26,11 +30,15 @@ import { AuditLogService } from './audit-log.service';
     AdminRestrictionsController,
     AdminAuditLogController,
     AdminAnalyticsController,
+    AdminContentController,
+    AdminRolesController,
   ],
   providers: [
     AdminAnalyticsService,
     AdminAuditLogService,
     AdminCommunitiesService,
+    AdminContentService,
+    AdminRolesService,
     AdminReportsService,
     AdminUsersService,
     AdminRestrictionsService,

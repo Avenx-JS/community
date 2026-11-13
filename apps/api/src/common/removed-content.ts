@@ -45,13 +45,23 @@ export interface RemovalStateDto {
   // NULL once the removing moderator's account is deleted.
   removed_by: string | null;
   removal_reason: string | null;
+  // A platform administrator's removal (migration 041): community
+  // moderators cannot restore it.
+  removed_by_admin: boolean;
 }
 
 export interface RemovalStateRow {
   removed_at?: Date | string | null;
   removed_by?: string | null;
   removal_reason?: string | null;
+  removed_by_admin?: number | string | boolean | null;
 }
+
+// The 403 a community moderator gets for restoring an administrator's
+// removal. The CHECK constraints of migration 041 refuse it in the database
+// too.
+export const ADMIN_REMOVAL_LOCKED =
+  'A platform administrator removed this content; only an administrator can restore it';
 
 export function toRemovalState(row: RemovalStateRow): RemovalStateDto {
   return {
@@ -59,5 +69,6 @@ export function toRemovalState(row: RemovalStateRow): RemovalStateDto {
     removed_at: new Date(row.removed_at as Date | string).toISOString(),
     removed_by: row.removed_by ?? null,
     removal_reason: row.removal_reason ?? null,
+    removed_by_admin: isSqlTrue(row.removed_by_admin ?? false),
   };
 }

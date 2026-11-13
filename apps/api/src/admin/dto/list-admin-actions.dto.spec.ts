@@ -47,6 +47,9 @@ describe('ListAdminActionsDto', () => {
     { action: 'report_assigned' },
     { action: 'report_unassigned' },
     { action: 'report_assigned', target_type: 'report', target_id: 'r-1' },
+    // Migration 041.
+    { action: 'post_removed', target_type: 'post', target_id: 'p-1' },
+    { action: 'comment_restored', target_type: 'comment' },
   ])('accepts the community filter %o', async (query) => {
     await expect(validateQuery(query)).resolves.toMatchObject(query);
   });
@@ -55,7 +58,7 @@ describe('ListAdminActionsDto', () => {
     { action: 'community_deleted' },
     { action: 'community_banned' },
     { target_type: 'communities' },
-    { target_type: 'post' },
+    { target_type: 'vote' },
   ])('still rejects the unknown filter %o', async (query) => {
     await expect(validateQuery(query)).rejects.toThrow();
   });
@@ -78,7 +81,7 @@ describe('ListAdminActionsDto', () => {
     { actor_username: 'x'.repeat(51) },
     { actor_username: 'bad-name' },
     { action: 'user_deleted' },
-    { target_type: 'post' },
+    { target_type: 'vote' },
     { target_type: 'user', target_id: 'bad id' },
     { target_type: 'user', target_id: 'x'.repeat(37) },
     { from: 'yesterday' },

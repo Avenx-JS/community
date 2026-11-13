@@ -30,6 +30,8 @@ const ACTIONS_ADDED_BY_025 = [
   'community_updated',
 ];
 const ACTIONS_AFTER_025 = [...ORIGINAL_ACTIONS, ...ACTIONS_ADDED_BY_025];
+// Likewise for the targets: 041 appended post and comment.
+const TARGETS_AFTER_025 = [...ORIGINAL_TARGETS, 'community'];
 
 describe('migration 025 (community suspension)', () => {
   const migration = read(
@@ -55,7 +57,7 @@ describe('migration 025 (community suspension)', () => {
         'CREATE INDEX idx_communities_suspended_at ON communities (suspended_at); ' +
         'ALTER TABLE admin_actions ' +
         `MODIFY COLUMN action ENUM( ${enumList(ACTIONS_AFTER_025)} ) NOT NULL, ` +
-        `MODIFY COLUMN target_type ENUM(${enumList(ADMIN_ACTION_TARGETS)}) NOT NULL;`,
+        `MODIFY COLUMN target_type ENUM(${enumList(TARGETS_AFTER_025)}) NOT NULL;`,
     );
   });
 
@@ -66,7 +68,9 @@ describe('migration 025 (community suspension)', () => {
     expect(
       ADMIN_ACTIONS.slice(ORIGINAL_ACTIONS.length, ACTIONS_AFTER_025.length),
     ).toEqual(ACTIONS_ADDED_BY_025);
-    expect(ADMIN_ACTION_TARGETS).toEqual([...ORIGINAL_TARGETS, 'community']);
+    expect(ADMIN_ACTION_TARGETS.slice(0, TARGETS_AFTER_025.length)).toEqual(
+      TARGETS_AFTER_025,
+    );
     const original = read(
       '../../../../data/migrations/004_create_admin_actions.sql',
     );

@@ -14,10 +14,12 @@ import {
   CREATED_COMMUNITY_SQL,
   DELETED_PASSWORD_HASH,
   DELETE_PRIVATE_STATE_SQL,
+  LAST_ADMIN_MESSAGE,
   LOCK_ACCOUNT_SQL,
   deletedEmail,
   deletedUsername,
 } from './account-deletion.service';
+import { ACTIVE_ADMINS_SQL } from './users.service';
 
 const USER_ID = '6f1c2b9e-1d2a-4c3b-9e8f-0a1b2c3d4e5f';
 
@@ -27,6 +29,7 @@ describe('AccountDeletionService', () => {
   let calls: Array<{ sql: string; values: unknown[] }>;
   let account: Record<string, unknown> | undefined;
   let communities: Array<{ id: string }>;
+  let admins: Array<{ id: string }>;
   let passwordValid: boolean;
   let failOn: string | undefined;
 
@@ -39,6 +42,7 @@ describe('AccountDeletionService', () => {
       deleted_at: null,
     };
     communities = [];
+    admins = [{ id: 'another-admin' }];
     passwordValid = true;
     failOn = undefined;
 
@@ -58,6 +62,9 @@ describe('AccountDeletionService', () => {
         }
         if (sql === CREATED_COMMUNITY_SQL) {
           return Promise.resolve([communities, []]);
+        }
+        if (sql === ACTIVE_ADMINS_SQL) {
+          return Promise.resolve([admins, []]);
         }
         return Promise.resolve([{ affectedRows: 1 }, []]);
       },
@@ -108,6 +115,7 @@ describe('AccountDeletionService', () => {
       LOCK_ACCOUNT_SQL,
       'verify correct password against stored-hash',
       CREATED_COMMUNITY_SQL,
+      ACTIVE_ADMINS_SQL,
       ANONYMISE_ACCOUNT_SQL,
       ...DELETE_PRIVATE_STATE_SQL,
       `revoke ${USER_ID} on tx`,
@@ -206,6 +214,27 @@ describe('AccountDeletionService', () => {
     ]) {
       expect(statements).not.toMatch(new RegExp(`DELETE FROM ${kept}\\b`));
     }
+  });
+
+  // The platform keeps an administrator: the last one cannot leave, as it
+  // cannot be demoted through the role routes.
+  it('refuses the last administrator with 409, writing nothing', async () => {
+    admins = [{ id: USER_ID }];
+
+    await expect(
+      service.deleteOwnAccount(USER_ID, 'correct password'),
+    ).rejects.toThrow(LAST_ADMIN_MESSAGE);
+    expect(writes()).toEqual([]);
+    expect(log.slice(-3)).toEqual([ACTIVE_ADMINS_SQL, 'rollback', 'release']);
+  });
+
+  it('lets an administrator go while another remains', async () => {
+    admins = [{ id: 'another-admin' }, { id: USER_ID }];
+
+    await expect(
+      service.deleteOwnAccount(USER_ID, 'correct password'),
+    ).resolves.toBeUndefined();
+    expect(log).toContain('commit');
   });
 
   it.each([

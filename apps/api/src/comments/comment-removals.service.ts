@@ -20,6 +20,7 @@ import {
 import { visibleCommunitySql } from '../common/community-visibility';
 import type { RemoveContentDto } from '../common/remove-content.dto';
 import {
+  ADMIN_REMOVAL_LOCKED,
   toRemovalState,
   type RemovalStateDto,
   type RemovalStateRow,
@@ -35,6 +36,8 @@ interface RemovableCommentRow extends RowDataPacket {
   content: string;
   community_id: string;
   removed_at: Date | string | null;
+  // Absent from older fakes: read through isSqlTrue.
+  removed_by_admin?: number | string | boolean | null;
   post_removed_at: Date | string | null;
   can_moderate: number | string | boolean;
 }
@@ -119,7 +122,7 @@ export class CommentRemovalService {
     const [state] = await connection.execute<
       (RowDataPacket & RemovalStateRow)[]
     >(
-      'SELECT removed_at, removed_by, removal_reason FROM comments WHERE id = ? LIMIT 1',
+      'SELECT removed_at, removed_by, removal_reason, removed_by_admin FROM comments WHERE id = ? LIMIT 1',
       [id],
     );
     return { ...flat, ...toRemovalState(state[0]) };
@@ -134,6 +137,9 @@ export class CommentRemovalService {
       const comment = await this.lockForRemoval(connection, id, actorId);
       if (comment.removed_at === null) {
         throw new ConflictException('This comment is not removed');
+      }
+      if (isSqlTrue(comment.removed_by_admin ?? false)) {
+        throw new ForbiddenException(ADMIN_REMOVAL_LOCKED);
       }
       if (comment.post_removed_at !== null) {
         throw new ConflictException(
@@ -162,7 +168,7 @@ export class CommentRemovalService {
   ): Promise<RemovableCommentRow> {
     const [rows] = await connection.execute<RemovableCommentRow[]>(
       `SELECT comments.id, comments.post_id, comments.author_id, comments.content,
-         posts.community_id, comments.removed_at, posts.removed_at AS post_removed_at,
+         posts.community_id, comments.removed_at, comments.removed_by_admin, posts.removed_at AS post_removed_at,
          ${canModerateCommunitySql('posts.community_id')} AS can_moderate
        FROM comments
        INNER JOIN posts ON posts.id = comments.post_id

@@ -25,6 +25,19 @@ interface UserPlatformRoleRow extends RowDataPacket {
 
 export type PlatformRole = 'user' | 'moderator' | 'admin';
 
+// What a platform role is, defined once: the role of an account that is not
+// deleted. AdminGuard reads it per request; the role routes and account
+// deletion count administrators by the same rule (ACTIVE_ADMINS_SQL), so a
+// deleted account never counts as, or acts as, an administrator.
+export const PLATFORM_ROLE_SQL =
+  'SELECT role FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1';
+
+// Every active administrator, locked in id order: a role change or an
+// account deletion that could remove an administrator holds these locks, so
+// two of them can never each leave the other as the last one.
+export const ACTIVE_ADMINS_SQL =
+  "SELECT id FROM users WHERE role = 'admin' AND deleted_at IS NULL ORDER BY id FOR UPDATE";
+
 export interface UserProfile {
   username: string;
   display_name: string | null;
@@ -130,7 +143,7 @@ export class UsersService {
 
   async getPlatformRole(userId: string): Promise<PlatformRole | null> {
     const [users] = await this.pool.execute<UserPlatformRoleRow[]>(
-      'SELECT role FROM users WHERE id = ? LIMIT 1',
+      PLATFORM_ROLE_SQL,
       [userId],
     );
     return users[0]?.role ?? null;

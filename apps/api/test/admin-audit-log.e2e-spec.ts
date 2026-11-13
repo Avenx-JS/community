@@ -224,7 +224,10 @@ describe('Admin audit log API (e2e)', () => {
       if (sql.includes('SET last_seen_at = UTC_TIMESTAMP()')) {
         return result({ affectedRows: 1 });
       }
-      if (sql === 'SELECT role FROM users WHERE id = ? LIMIT 1') {
+      if (
+        sql ===
+        'SELECT role FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1'
+      ) {
         const role = roles.get(String(values[0]));
         return result(role ? [{ role }] : []);
       }
@@ -453,7 +456,7 @@ describe('Admin audit log API (e2e)', () => {
   it.each([
     'target_id=target-id',
     'action=user_deleted',
-    'target_type=post',
+    'target_type=vote',
     'actor_username=ab',
     'from=yesterday',
     'to=2026-13-01',

@@ -152,6 +152,137 @@ export const USER_METRIC_SCOPES: Record<string, MetricScope> = {
   'series.new_users': 'range',
 };
 
+export const POST_TYPES = ['text', 'link', 'media'] as const;
+export type PostType = (typeof POST_TYPES)[number];
+
+// Member-count buckets of GET /admin/analytics/communities, in order. A
+// distribution, never a list: no community, and so no small community whose
+// members could be guessed, is named.
+export const MEMBER_BUCKETS = [
+  '0',
+  '1-9',
+  '10-99',
+  '100-999',
+  '1000+',
+] as const;
+export type MemberBucket = (typeof MEMBER_BUCKETS)[number];
+
+export interface ContentAnalytics {
+  from: string;
+  to: string;
+  granularity: AnalyticsGranularity;
+  generated_at: string;
+  totals: {
+    posts: number;
+    comments: number;
+    votes: number;
+    posts_removed: number;
+    comments_removed: number;
+  };
+  posts_by_type: Record<PostType, number>;
+  votes_by_value: { up: number; down: number };
+  removals_by_source: { moderator: number; admin: number };
+  series: {
+    posts: SeriesPoint[];
+    comments: SeriesPoint[];
+    votes: SeriesPoint[];
+  };
+  meta: { time_basis: Record<string, string> };
+}
+
+// votes.created_at is the first vote on a target: changing a vote keeps it
+// (ON DUPLICATE KEY UPDATE value), and a withdrawn vote is gone. So votes
+// counts votes cast in the range that still stand. Removals count content
+// removed in the range and still removed: a restoration clears removed_at.
+export const CONTENT_METRIC_TIME_BASIS: Record<string, string> = {
+  posts: 'posts.created_at',
+  comments: 'comments.created_at',
+  votes: 'votes.created_at',
+  'series.posts': 'posts.created_at',
+  'series.comments': 'comments.created_at',
+  'series.votes': 'votes.created_at',
+  posts_by_type: 'posts.created_at',
+  votes_by_value: 'votes.created_at',
+  posts_removed: 'posts.removed_at',
+  comments_removed: 'comments.removed_at',
+  removals_by_source: 'posts.removed_at, comments.removed_at',
+};
+
+export interface CommunityAnalytics {
+  from: string;
+  to: string;
+  granularity: AnalyticsGranularity;
+  generated_at: string;
+  totals: {
+    total_communities: number;
+    new_communities: number;
+    active_communities: number;
+    suspended_communities: number;
+    deleted_communities: number;
+  };
+  members_distribution: Record<MemberBucket, number>;
+  series: { new_communities: SeriesPoint[] };
+  meta: { scopes: Record<string, MetricScope> };
+}
+
+export const COMMUNITY_METRIC_SCOPES: Record<string, MetricScope> = {
+  total_communities: 'point_in_time',
+  new_communities: 'range',
+  active_communities: 'range',
+  suspended_communities: 'point_in_time',
+  deleted_communities: 'point_in_time',
+  members_distribution: 'point_in_time',
+  'series.new_communities': 'range',
+};
+
+interface KeyedDailyCountRow extends DailyCountRow {
+  key?: string;
+}
+
+// The content analytics' statements, exported for the specs.
+export const dailyCountSql = (table: string, key?: string) =>
+  `SELECT FLOOR(UNIX_TIMESTAMP(created_at) / 86400) AS day_number${key ? `, ${key} AS \`key\`` : ''},
+           COUNT(*) AS total
+         FROM ${table}
+         WHERE ${IN_RANGE('created_at')}
+         GROUP BY day_number${key ? ', `key`' : ''}`;
+
+export const removalsBySourceSql = (table: 'posts' | 'comments') =>
+  `SELECT CASE WHEN removed_by_admin THEN 'admin' ELSE 'moderator' END AS \`key\`,
+           COUNT(*) AS total
+         FROM ${table}
+         WHERE ${IN_RANGE('removed_at')}
+         GROUP BY \`key\``;
+
+export const COMMUNITY_STATES_SQL = `SELECT CASE WHEN deleted_at IS NOT NULL THEN 'deleted'
+           WHEN suspended_at IS NOT NULL THEN 'suspended' ELSE 'active' END AS \`key\`,
+           COUNT(*) AS total
+         FROM communities GROUP BY \`key\``;
+
+// Distinct communities with a post, or a comment on their posts, created in
+// the range. Values: the bounds twice.
+export const ACTIVE_COMMUNITIES_SQL = `SELECT COUNT(*) AS total FROM (
+           SELECT p.community_id FROM posts p WHERE ${IN_RANGE('p.created_at')}
+           UNION
+           SELECT p.community_id FROM comments cm
+             INNER JOIN posts p ON p.id = cm.post_id
+           WHERE ${IN_RANGE('cm.created_at')}
+         ) active`;
+
+// Communities not deleted, by the size of their membership.
+export const MEMBER_DISTRIBUTION_SQL = `SELECT CASE WHEN members = 0 THEN '0' WHEN members < 10 THEN '1-9'
+             WHEN members < 100 THEN '10-99' WHEN members < 1000 THEN '100-999'
+             ELSE '1000+' END AS \`key\`,
+           COUNT(*) AS total
+         FROM (
+           SELECT c.id, COUNT(s.user_id) AS members
+           FROM communities c
+           LEFT JOIN community_subscriptions s ON s.community_id = c.id
+           WHERE c.deleted_at IS NULL
+           GROUP BY c.id
+         ) sized
+         GROUP BY \`key\``;
+
 function zeroFilledCounts<K extends string>(
   keys: readonly K[],
   rows: GroupCountRow[],
@@ -422,6 +553,145 @@ export class AdminAnalyticsService {
       restrictions_applied: zeroFilledCounts(RESTRICTION_TYPES, appliedRows),
       series: { reports_submitted: series },
       meta: { time_basis: MODERATION_METRIC_TIME_BASIS },
+    };
+  }
+
+  // A fixed set of five statements regardless of the range length: counts
+  // and grouped counts only, never a row about one account or one item.
+  async contentMetrics(
+    range: AnalyticsRange,
+    granularity: AnalyticsGranularity,
+    now: Date = new Date(),
+  ): Promise<ContentAnalytics> {
+    const bounds = [toUtcSqlLiteral(range.from), toUtcSqlLiteral(range.to)];
+    const [
+      [postRows],
+      [commentRows],
+      [voteRows],
+      [postRemovals],
+      [commentRemovals],
+    ] = await Promise.all([
+      this.pool.execute<KeyedDailyCountRow[]>(
+        dailyCountSql('posts', 'type'),
+        bounds,
+      ),
+      this.pool.execute<KeyedDailyCountRow[]>(
+        dailyCountSql('comments'),
+        bounds,
+      ),
+      this.pool.execute<KeyedDailyCountRow[]>(
+        dailyCountSql('votes', "CASE WHEN value > 0 THEN 'up' ELSE 'down' END"),
+        bounds,
+      ),
+      this.pool.execute<GroupCountRow[]>(removalsBySourceSql('posts'), bounds),
+      this.pool.execute<GroupCountRow[]>(
+        removalsBySourceSql('comments'),
+        bounds,
+      ),
+    ]);
+
+    const summarise = (rows: KeyedDailyCountRow[]) => {
+      const counts = new Map<number, number>();
+      const byKey = new Map<string, number>();
+      for (const row of rows) {
+        const day = Number(row.day_number);
+        counts.set(day, (counts.get(day) ?? 0) + Number(row.total));
+        if (row.key !== undefined) {
+          byKey.set(row.key, (byKey.get(row.key) ?? 0) + Number(row.total));
+        }
+      }
+      const points = buildZeroFilledSeries(range, granularity, counts);
+      return {
+        points,
+        total: points.reduce((sum, point) => sum + point.count, 0),
+        byKey: [...byKey].map(
+          ([key, total]) => ({ key, total }) as GroupCountRow,
+        ),
+      };
+    };
+    const posts = summarise(postRows);
+    const comments = summarise(commentRows);
+    const votes = summarise(voteRows);
+    const sources = ['moderator', 'admin'] as const;
+    const removedPosts = zeroFilledCounts(sources, postRemovals);
+    const removedComments = zeroFilledCounts(sources, commentRemovals);
+
+    return {
+      from: range.from.toISOString(),
+      to: range.to.toISOString(),
+      granularity,
+      generated_at: now.toISOString(),
+      totals: {
+        posts: posts.total,
+        comments: comments.total,
+        votes: votes.total,
+        posts_removed: removedPosts.moderator + removedPosts.admin,
+        comments_removed: removedComments.moderator + removedComments.admin,
+      },
+      posts_by_type: zeroFilledCounts(POST_TYPES, posts.byKey),
+      votes_by_value: zeroFilledCounts(['up', 'down'] as const, votes.byKey),
+      removals_by_source: {
+        moderator: removedPosts.moderator + removedComments.moderator,
+        admin: removedPosts.admin + removedComments.admin,
+      },
+      series: {
+        posts: posts.points,
+        comments: comments.points,
+        votes: votes.points,
+      },
+      meta: { time_basis: CONTENT_METRIC_TIME_BASIS },
+    };
+  }
+
+  // Four statements. Active means at least one post, or one comment on its
+  // posts, created in the range, whatever the community's state now.
+  async communityMetrics(
+    range: AnalyticsRange,
+    granularity: AnalyticsGranularity,
+    now: Date = new Date(),
+  ): Promise<CommunityAnalytics> {
+    const bounds = [toUtcSqlLiteral(range.from), toUtcSqlLiteral(range.to)];
+    const [[stateRows], [dailyRows], [activeRows], [memberRows]] =
+      await Promise.all([
+        this.pool.execute<GroupCountRow[]>(COMMUNITY_STATES_SQL, []),
+        this.pool.execute<DailyCountRow[]>(
+          dailyCountSql('communities'),
+          bounds,
+        ),
+        this.pool.execute<(RowDataPacket & { total: number | string })[]>(
+          ACTIVE_COMMUNITIES_SQL,
+          [...bounds, ...bounds],
+        ),
+        this.pool.execute<GroupCountRow[]>(MEMBER_DISTRIBUTION_SQL, []),
+      ]);
+
+    const states = zeroFilledCounts(
+      ['active', 'suspended', 'deleted'] as const,
+      stateRows,
+    );
+    const series = buildZeroFilledSeries(
+      range,
+      granularity,
+      new Map(
+        dailyRows.map((row) => [Number(row.day_number), Number(row.total)]),
+      ),
+    );
+    return {
+      from: range.from.toISOString(),
+      to: range.to.toISOString(),
+      granularity,
+      generated_at: now.toISOString(),
+      totals: {
+        // Not deleted: what exists for members today.
+        total_communities: states.active + states.suspended,
+        new_communities: series.reduce((sum, point) => sum + point.count, 0),
+        active_communities: Number(activeRows[0]?.total ?? 0),
+        suspended_communities: states.suspended,
+        deleted_communities: states.deleted,
+      },
+      members_distribution: zeroFilledCounts(MEMBER_BUCKETS, memberRows),
+      series: { new_communities: series },
+      meta: { scopes: COMMUNITY_METRIC_SCOPES },
     };
   }
 

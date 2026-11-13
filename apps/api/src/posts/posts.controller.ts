@@ -230,10 +230,13 @@ export class PostsController {
   @ApiOperation({
     summary: 'Restore a removed post (moderators)',
     description:
-      'Clears the removal. Same authorisation as removing. No notification.',
+      'Clears the removal. Same authorisation as removing. No notification. ' +
+      'A removal by a platform administrator (removed_by_admin) is refused ' +
+      'with 403: only POST /admin/posts/:id/restore undoes it.',
   })
   @ApiAuthenticated({
-    forbidden: 'The caller does not moderate this community.',
+    forbidden:
+      'The caller does not moderate this community, or a platform administrator removed the post.',
   })
   @ApiRouteParam('id', 'id', 'Post ID.')
   @ApiOkResponse({ type: PostResponse })

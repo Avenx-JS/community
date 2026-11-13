@@ -19,7 +19,7 @@ describe('migration 040 (live notifications)', () => {
       `-- Live notifications: push subscriptions, stream tickets and push dispatch (040_add_live_notifications). ${migration}`,
     );
     expect(snapshot).toContain(
-      "('039_add_content_labels_and_history'), ('040_add_live_notifications');",
+      "('039_add_content_labels_and_history'), ('040_add_live_notifications'),",
     );
   });
 

@@ -159,6 +159,13 @@ export class PostResponse implements PostDto {
     description: 'Reviewers only: the optional removal reason.',
   })
   removal_reason?: string | null;
+
+  @ApiPropertyOptional({
+    description:
+      'Reviewers only: true when a platform administrator removed it. ' +
+      'Community moderators cannot restore such a removal (403).',
+  })
+  removed_by_admin?: boolean;
 }
 
 export class PostListResponse implements PostListDto {

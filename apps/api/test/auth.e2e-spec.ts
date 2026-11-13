@@ -38,6 +38,7 @@ import {
   DELETE_PRIVATE_STATE_SQL,
   LOCK_ACCOUNT_SQL,
 } from '../src/users/account-deletion.service';
+import { ACTIVE_ADMINS_SQL } from '../src/users/users.service';
 
 interface TestUser {
   id: string;
@@ -562,7 +563,7 @@ describe('Auth endpoints (e2e)', () => {
           [],
         ]);
       }
-      if (sql === CREATED_COMMUNITY_SQL) {
+      if (sql === CREATED_COMMUNITY_SQL || sql === ACTIVE_ADMINS_SQL) {
         return Promise.resolve([[], []]);
       }
       if (sql === ANONYMISE_ACCOUNT_SQL) {

@@ -72,10 +72,13 @@ export class CommentRemovalsController {
     summary: 'Restore a removed comment (moderators)',
     description:
       'Clears the removal. Same authorisation as removing. No notification. ' +
-      'Refused with 409 while the comment’s post is itself removed.',
+      'Refused with 409 while the comment’s post is itself removed, and ' +
+      'with 403 when a platform administrator removed the comment ' +
+      '(removed_by_admin): only POST /admin/comments/:id/restore undoes it.',
   })
   @ApiAuthenticated({
-    forbidden: 'The caller does not moderate this community.',
+    forbidden:
+      'The caller does not moderate this community, or a platform administrator removed the comment.',
   })
   @ApiRouteParam('id', 'id', 'Comment ID.')
   @ApiOkResponse({ type: CommentReplyResponse })

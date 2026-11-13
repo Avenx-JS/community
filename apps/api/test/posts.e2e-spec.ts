@@ -2278,14 +2278,21 @@ describe('Post endpoints (e2e)', () => {
         stored('post-1')!.removed_at = null;
         const ordinary = (await as().get('/posts/post-1').expect(200))
           .body as Record<string, unknown>;
-        const { removed, removed_at, removed_by, removal_reason, ...rest } =
-          reviewer;
-        expect([removed, removed_at, removed_by, removal_reason]).toEqual([
-          true,
-          '2026-11-01T00:00:00.000Z',
-          null,
-          'Spam',
-        ]);
+        const {
+          removed,
+          removed_at,
+          removed_by,
+          removal_reason,
+          removed_by_admin,
+          ...rest
+        } = reviewer;
+        expect([
+          removed,
+          removed_at,
+          removed_by,
+          removal_reason,
+          removed_by_admin,
+        ]).toEqual([true, '2026-11-01T00:00:00.000Z', null, 'Spam', false]);
         expect(rest).toEqual(ordinary);
       });
     });

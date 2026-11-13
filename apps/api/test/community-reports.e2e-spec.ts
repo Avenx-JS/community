@@ -612,7 +612,7 @@ describe('Community report review (e2e)', () => {
       if (sql.startsWith('SELECT parent_id, COUNT(*)')) return [[], []];
       if (
         sql.startsWith(
-          'SELECT removed_at, removed_by, removal_reason FROM comments',
+          'SELECT removed_at, removed_by, removal_reason, removed_by_admin FROM comments',
         )
       ) {
         return [[comments.get(values[0] as string)], []];
