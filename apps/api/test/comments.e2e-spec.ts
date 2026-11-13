@@ -75,6 +75,8 @@ interface CommentPage {
 describe('Comment endpoints (e2e)', () => {
   let app: INestApplication<App>;
   let comments: TestComment[];
+  // Versions an edit replaced (migration 039).
+  let revisionWrites: unknown[][];
   let votes: FakeVote[];
   let queryCalls: Array<{ sql: string; values: unknown[] }>;
   let notifications: TestNotification[];
@@ -123,6 +125,7 @@ describe('Comment endpoints (e2e)', () => {
   ]);
 
   beforeEach(async () => {
+    revisionWrites = [];
     comments = [
       {
         id: 'root-1',
@@ -750,6 +753,11 @@ describe('Comment endpoints (e2e)', () => {
         // Closing the content's community reports (migration 036): none.
         if (sql.startsWith('UPDATE user_reports')) {
           return [{ affectedRows: 0 }, []];
+        }
+        // An edit keeps the replaced version (migration 039).
+        if (sql.startsWith('INSERT INTO comment_revisions')) {
+          revisionWrites.push(values);
+          return [{ affectedRows: 1 }, []];
         }
         throw new Error(`Unexpected SQL query: ${sql}`);
       },
@@ -1947,6 +1955,9 @@ describe('Comment endpoints (e2e)', () => {
         edited_at: editClock,
         replies: [{ id: 'reply-1', replies: [{ id: 'nested-reply' }] }],
       });
+      // The replaced version is kept (migration 039).
+      expect(revisionWrites).toHaveLength(1);
+      expect(revisionWrites[0][1]).toBe('root-1');
     });
 
     it('answers identical content with 200 and leaves edited_at null', async () => {

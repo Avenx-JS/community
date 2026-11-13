@@ -12,7 +12,11 @@ import { CommunityModerationLogService } from '../communities/community-moderati
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
 import { COMMUNITY_NEW_POST_RECIPIENTS_SQL } from '../communities/community-notification-recipients';
 import { NotificationsService } from '../notifications/notifications.service';
-import { PostsService, POSTING_COMMUNITY_SQL } from './posts.service';
+import {
+  INSERT_POST_REVISION_SQL,
+  PostsService,
+  POSTING_COMMUNITY_SQL,
+} from './posts.service';
 import { RELEASE_POST_MEDIA_SQL } from '../media/media-sql';
 
 // Every community's rules count as accepted unless a test says otherwise.
@@ -315,6 +319,8 @@ describe('PostsService.create notifications', () => {
       saved: false,
       media: null,
       flair: null,
+      nsfw: false,
+      spoiler: false,
     });
     expect(
       queries.find((query) => query.sql.startsWith('INSERT INTO posts'))
@@ -1445,9 +1451,12 @@ describe('PostsService.update', () => {
       ...overrides,
     });
 
+  let revisions: unknown[][];
+
   beforeEach(async () => {
     posts = new Map();
     queries = [];
+    revisions = [];
     hidden = false;
     failUpdate = false;
     addPost('text-post', 'text', 'Body');
@@ -1466,6 +1475,11 @@ describe('PostsService.update', () => {
         if (sql.startsWith('SELECT id, author_id, type, title, content')) {
           const post = posts.get(values[0] as string);
           return Promise.resolve([post && !hidden ? [{ ...post }] : [], []]);
+        }
+        // The replaced version (migration 039).
+        if (sql === INSERT_POST_REVISION_SQL) {
+          revisions.push(values);
+          return Promise.resolve([{ affectedRows: 1 }, []]);
         }
         if (sql.startsWith('UPDATE posts SET')) {
           if (failUpdate) {
@@ -1576,6 +1590,33 @@ describe('PostsService.update', () => {
       score: 4,
     });
     expectCommittedAndReleased();
+  });
+
+  // Migration 039: GET /posts/:id/revisions.
+  it('keeps the replaced version, with when it was written, before the update', async () => {
+    await service.update('text-post', { title: 'New title' }, 'author');
+    expect(revisions).toEqual([
+      [
+        expect.any(String),
+        'text-post',
+        'Title',
+        'Body',
+        new Date('2026-10-22T08:00:00.000Z'),
+      ],
+    ]);
+    const order = queries.map(({ sql }) => sql);
+    expect(order.indexOf(INSERT_POST_REVISION_SQL)).toBeLessThan(
+      order.findIndex((sql) => sql.startsWith('UPDATE posts')),
+    );
+
+    // A later edit stores the edited version, dated by its edit.
+    await service.update('text-post', { content: 'Body 2' }, 'author');
+    expect(revisions[1].slice(2)).toEqual(['New title', 'Body', clock]);
+  });
+
+  it('stores no version when nothing changed', async () => {
+    await service.update('text-post', { title: 'Title' }, 'author');
+    expect(revisions).toEqual([]);
   });
 
   it('updates only the content, or both, with a dynamic SET list', async () => {

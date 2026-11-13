@@ -2078,7 +2078,7 @@ whole operation back and the account stays fully intact):
    Its email verification codes, a pending email change, its preferences
    and its data exports (each a copy of its data) are deleted too, and so are
    its join requests, moderator invitations, user flairs and community mutes
-   (migration 038).
+   (migration 038), and its hidden posts and saved comments (migration 039).
    Its avatar and its uploads never attached to a post are
    [released](#releasing-and-cleaning-up-media) (`RELEASE_ACCOUNT_MEDIA_SQL`)
    and `avatar_media_id` is cleared; the files in its posts stay with the
@@ -2285,8 +2285,9 @@ posts and comments (removed ones included, marked), votes, subscriptions and
 per-community notification settings, communities it created or moderates,
 saved posts, the usernames it blocked, the reports it filed (as
 `GET /reports` shows them), the notifications it received, its media, its
-sessions (with network prefixes), and its join requests, moderator
-invitations, user flairs and muted communities. **It never holds** a password hash, a token,
+sessions (with network prefixes), its join requests, moderator
+invitations, user flairs and muted communities, and its hidden posts and
+saved comments. **It never holds** a password hash, a token,
 another person's private data, or what others said about the account (reports
 about it, moderators' removal reasons): every section is one statement bound to
 the account id alone (`EXPORT_SECTIONS`). Both export routes are available to
@@ -5182,7 +5183,8 @@ repost, which discards everything that cascades from the row: a post's
 comments (`comments.post_id ON DELETE CASCADE`), its votes, its id and its
 `created_at`, and the reply chain beneath a comment. An edit is an `UPDATE` of
 the same row, so all of these survive (`content-editing.mysql.spec.ts` asserts
-it against a real database).
+it against a real database). Since migration 039 the replaced version is kept
+(see [Revisions](#revisions)).
 
 | Route | Body | Success |
 | --- | --- | --- |
@@ -6235,6 +6237,98 @@ caller-dependent; caches must vary on the `Authorization` header.
 
 **Rate limiting.** The global buckets apply. Saving is a cheap, private,
 self-scoped write, so there is no dedicated bucket.
+
+## Labels, hidden posts, saved comments and your votes
+
+Migration `039_add_content_labels_and_history`. Every route below needs a
+bearer token except the revision routes, and every list is the caller's own:
+no route takes a user parameter.
+
+### NSFW and spoiler labels
+
+| Route | Who |
+| --- | --- |
+| `PUT` and `DELETE /posts/:id/nsfw` | the author, the community's creator and moderators |
+| `PUT` and `DELETE /posts/:id/spoiler` | the same |
+
+`posts.nsfw_set_by` and `spoiler_set_by` record who set a label (`author` or
+`moderator`, `NULL` when unset); every post DTO carries `nsfw` and `spoiler`
+booleans. **A label a moderator set only a moderator removes** (`403` for the
+author), and it stays the moderator's when the author sets it again; an
+author's label becomes a moderator's when one sets it. Both routes are
+idempotent (`204`). A removed post is `404` to its author and still
+labelable by moderators. Labels are for clients to blur or warn: unlike an
+[nsfw community](#nsfw-and-post-types) they do not filter listings.
+Existing posts carry no label.
+
+### Hiding posts
+
+`POST` and `DELETE /posts/:id/hide` (idempotent, `204`) and
+`GET /users/me/hidden-posts` (`page`, `limit`, `sort` `new`|`oldest` by when
+hidden). A hidden post leaves the caller's `GET /posts`, `GET /feed` and
+`GET /communities/:name/posts` (`NOT_HIDDEN_BY_VIEWER_SQL`, added to the one
+listing path for a signed-in viewer only) and no one else's; its permalink,
+comments and votes stay reachable. Hiding needs a post the caller could read
+(`404` otherwise), unhiding only an existing one. The list omits posts since
+removed or no longer readable and keeps their rows, as the saved list does.
+
+### Saved comments
+
+`POST` and `DELETE /comments/:id/save` and `GET /users/me/saved-comments`
+behave exactly as [saved posts](#saved-posts): saving needs a comment a reader
+could see (not removed, its post not removed, its community visible and
+readable by the caller); unsaving any existing comment; the list omits a
+removed comment, one under a removed post and one in a deleted, suspended or
+(no longer a member) private community, keeping the save, so a restore brings
+it back. Deleting the comment deletes its saves (`ON DELETE CASCADE`). Items
+are `{ comment, saved_at }` with the flat comment of the author listings.
+
+### Your votes
+
+`GET /users/me/upvoted` and `GET /users/me/downvoted` (`type` `posts` by
+default or `comments`, `page`, `limit`): the caller's votes of one direction,
+most recent first (`idx_votes_user_value`). Items are `{ post, voted_at }` or
+`{ comment, voted_at }`. Private: bound to the token's account. Removed
+content, content under a removed post and content in a deleted, suspended or
+(for a non-member) private community are omitted; the votes themselves stay.
+
+### Revisions
+
+`GET /posts/:id/revisions` and `GET /comments/:id/revisions` (token optional;
+`page`, `limit`):
+
+```json
+{
+  "current": { "title": "Seed swap!", "content": "Tomatoes, beans", "version_at": "…", "edited": true },
+  "items": [
+    { "title": "Seed swap!", "content": "Tomatoes", "version_at": "…", "replaced_at": "…" }
+  ],
+  "page": 1, "limit": 20, "total": 1,
+  "complete": true
+}
+```
+
+`current` is the version shown now and never one of `items`. Each earlier
+version has `version_at` (when it was written: the creation or the edit that
+made it) and `replaced_at` (when the next edit replaced it). `title` is
+`null` for comments. Every `PATCH` that changes something stores the replaced
+version in `post_revisions` or `comment_revisions` in the same transaction;
+an edit that changes nothing stores nothing.
+
+**History starts with migration 039.** Edits before it overwrote their text in
+place, so nothing earlier exists. `complete` is `false` when the content was
+edited but the oldest stored version is not the original.
+
+**Readable exactly as the content.** `404` for unknown or deleted content (its
+history is deleted with it), for a deleted, suspended or (to a non-member)
+private community, and for removed content and content under a removed post,
+except for those who may [review](#removing-and-restoring-content) it: the
+community's creator and moderators and platform administrators.
+
+### Account deletion and export
+
+Deleting an account removes its hidden posts and saved comments; its revisions
+stay with its content, which is kept. The data export includes both lists.
 
 ## Blocking users
 

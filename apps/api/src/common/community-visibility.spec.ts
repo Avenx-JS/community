@@ -1,3 +1,7 @@
+import { ContentRevisionsService } from '../posts/content-revisions.service';
+import { SavedCommentsService } from '../posts/saved-comments.service';
+import { HiddenPostsService } from '../posts/hidden-posts.service';
+import { PostLabelsService } from '../posts/post-labels.service';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { describe, expect, it, jest } from '@jest/globals';
@@ -101,6 +105,10 @@ function services(pool: Pool) {
     invites: new CommunityModeratorInvitesService(pool, moderationLog),
     flairs: new CommunityFlairsService(pool),
     discovery: new CommunityDiscoveryService(pool),
+    labels: new PostLabelsService(pool),
+    hidden: new HiddenPostsService(pool),
+    savedComments: new SavedCommentsService(pool),
+    revisions: new ContentRevisionsService(pool),
     reports: new CommunityReportsService(
       pool,
       moderationLog,
@@ -234,6 +242,25 @@ const lookups: Array<
   [
     'DELETE /posts/:id/flair',
     (s) => s.flairs.clearPostFlair('p', 'u'),
+    CONTENT,
+  ],
+  // Migration 039.
+  ['PUT /posts/:id/nsfw', (s) => s.labels.set('p', 'nsfw', 'u'), CONTENT],
+  [
+    'DELETE /posts/:id/spoiler',
+    (s) => s.labels.clear('p', 'spoiler', 'u'),
+    CONTENT,
+  ],
+  ['POST /posts/:id/hide', (s) => s.hidden.hide('p', 'u'), CONTENT],
+  ['POST /comments/:id/save', (s) => s.savedComments.save('c', 'u'), CONTENT],
+  [
+    'GET /posts/:id/revisions',
+    (s) => s.revisions.forPost('p', 'u', {}),
+    CONTENT,
+  ],
+  [
+    'GET /comments/:id/revisions',
+    (s) => s.revisions.forComment('c', 'u', {}),
     CONTENT,
   ],
   [

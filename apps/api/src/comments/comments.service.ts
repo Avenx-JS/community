@@ -60,11 +60,18 @@ interface EditableCommentRow extends RowDataPacket {
   author_id: string;
   community_id: string;
   content: string;
+  created_at: Date | string;
+  edited_at: Date | string | null;
   removed_at: Date | string | null;
   post_removed_at: Date | string | null;
 }
 
 type Executor = Pick<Pool | PoolConnection, 'execute'>;
+
+// Values: revision id, comment, replaced content, when that version was
+// written.
+export const INSERT_COMMENT_REVISION_SQL =
+  'INSERT INTO comment_revisions (id, comment_id, content, version_at, replaced_at) VALUES (?, ?, ?, ?, UTC_TIMESTAMP())';
 
 const toIsoOrNull = (value: Date | string | null | undefined): string | null =>
   value === null || value === undefined ? null : new Date(value).toISOString();
@@ -657,6 +664,7 @@ export class CommentsService {
 
       const [comments] = await connection.execute<EditableCommentRow[]>(
         `SELECT comments.id, comments.author_id, comments.content,
+           comments.created_at, comments.edited_at,
            comments.removed_at, posts.removed_at AS post_removed_at,
            posts.community_id
          FROM comments
@@ -687,6 +695,14 @@ export class CommentsService {
       }
 
       if (input.content !== comment.content) {
+        // The version being replaced (migration 039): GET
+        // /comments/:id/revisions.
+        await connection.execute<ResultSetHeader>(INSERT_COMMENT_REVISION_SQL, [
+          randomUUID(),
+          id,
+          comment.content,
+          comment.edited_at ?? comment.created_at,
+        ]);
         await connection.execute<ResultSetHeader>(
           'UPDATE comments SET content = ?, edited_at = UTC_TIMESTAMP() WHERE id = ?',
           [input.content, id],

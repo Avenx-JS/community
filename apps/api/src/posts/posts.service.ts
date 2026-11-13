@@ -94,6 +94,9 @@ export interface PostRow extends RowDataPacket {
   media_id?: string | null;
   // Set with PUT /posts/:id/flair (migration 038); absent in older fixtures.
   flair_id?: string | null;
+  // Labels (migration 039): who set them, NULL when unset.
+  nsfw_set_by?: 'author' | 'moderator' | null;
+  spoiler_set_by?: 'author' | 'moderator' | null;
 }
 
 // Every column of a post DTO, in DTO order.
@@ -116,8 +119,13 @@ interface PostingCommunityRow extends RowDataPacket {
   member: number | string | boolean;
 }
 
+// Values: revision id, post, replaced title, replaced content, when that
+// version was written.
+export const INSERT_POST_REVISION_SQL =
+  'INSERT INTO post_revisions (id, post_id, title, content, version_at, replaced_at) VALUES (?, ?, ?, ?, ?, UTC_TIMESTAMP())';
+
 export const POST_COLUMNS =
-  'id, title, content, type, author_id, community_id, created_at, pinned_at, pinned_by, edited_at, locked_at, locked_by, media_id, flair_id';
+  'id, title, content, type, author_id, community_id, created_at, pinned_at, pinned_by, edited_at, locked_at, locked_by, media_id, flair_id, nsfw_set_by, spoiler_set_by';
 
 interface EditablePostRow extends RowDataPacket {
   id: string;
@@ -125,6 +133,8 @@ interface EditablePostRow extends RowDataPacket {
   type: 'text' | 'link' | 'media';
   title: string;
   content: string | null;
+  created_at: Date | string;
+  edited_at: Date | string | null;
   locked_at: Date | string | null;
   removed_at: Date | string | null;
   community_id: string;
@@ -180,6 +190,9 @@ export interface PostDto {
   media: MediaDto | null;
   // The post flair (PUT /posts/:id/flair); null when none.
   flair: AssignedFlairDto | null;
+  // Labels (PUT /posts/:id/nsfw and /spoiler): clients blur or warn.
+  nsfw: boolean;
+  spoiler: boolean;
 }
 
 // A post as a reviewer sees it: removal state only on removed posts.
@@ -253,6 +266,12 @@ export function postListingCommunitySql(scope: PostListScope): string {
   });
 }
 
+// The posts the viewer hid (POST /posts/:id/hide) leave every listing of
+// theirs: GET /posts, /feed and /communities/:name/posts. The permalink stays
+// reachable. One placeholder, the viewer; only added for a signed-in viewer.
+export const NOT_HIDDEN_BY_VIEWER_SQL =
+  'NOT EXISTS (SELECT 1 FROM hidden_posts WHERE hidden_posts.user_id = ? AND hidden_posts.post_id = posts.id)';
+
 export function postListingWhere(
   scope: PostListScope,
   sort: PostListSort,
@@ -274,6 +293,10 @@ export function postListingWhere(
   if (scope.subscriber_id) {
     conditions.push(FEED_UNBLOCKED_AUTHOR_SQL);
     values.push(scope.subscriber_id);
+  }
+  if (viewerId) {
+    conditions.push(NOT_HIDDEN_BY_VIEWER_SQL);
+    values.push(viewerId);
   }
   if (sort === 'top' && time && time !== 'all') {
     conditions.push(createdWithinSql(TOP_WINDOW_SQL[time]));
@@ -799,7 +822,7 @@ export class PostsService {
       transactionStarted = true;
 
       const [posts] = await connection.execute<EditablePostRow[]>(
-        `SELECT id, author_id, type, title, content, locked_at, removed_at, community_id, media_id
+        `SELECT id, author_id, type, title, content, created_at, edited_at, locked_at, removed_at, community_id, media_id
          FROM posts
          WHERE id = ? AND ${visibleCommunitySql('posts.community_id')}
          LIMIT 1 FOR UPDATE`,
@@ -842,6 +865,15 @@ export class PostsService {
         changes.push(['content', input.content]);
       }
       if (changes.length > 0) {
+        // The version being replaced, with when it was written (migration
+        // 039): GET /posts/:id/revisions.
+        await connection.execute<ResultSetHeader>(INSERT_POST_REVISION_SQL, [
+          randomUUID(),
+          id,
+          post.title,
+          post.content,
+          post.edited_at ?? post.created_at,
+        ]);
         await connection.execute<ResultSetHeader>(
           `UPDATE posts SET ${changes.map(([column]) => `${column} = ?`).join(', ')}, edited_at = UTC_TIMESTAMP() WHERE id = ?`,
           [...changes.map(([, value]) => value), id],
@@ -1194,5 +1226,7 @@ export function toPostDto(
     saved,
     media,
     flair,
+    nsfw: Boolean(post.nsfw_set_by),
+    spoiler: Boolean(post.spoiler_set_by),
   };
 }

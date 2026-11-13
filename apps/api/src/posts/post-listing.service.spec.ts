@@ -16,6 +16,7 @@ import {
   PostsService,
   VISIBLE_POST_SQL,
   POSTING_COMMUNITY_SQL,
+  NOT_HIDDEN_BY_VIEWER_SQL,
 } from './posts.service';
 
 // The one listing path behind GET /posts, GET /communities/:name/posts and
@@ -181,11 +182,30 @@ describe('GET /feed', () => {
       readableCommunitySql('posts.community_id', { nsfw: true, muted: true }),
       VISIBLE_POST_SQL,
       FEED_UNBLOCKED_AUTHOR_SQL,
+      // The posts the caller hid (migration 039).
+      NOT_HIDDEN_BY_VIEWER_SQL,
     ].join(' AND ')}`;
     expect(listing().sql).toContain(`FROM posts${where} ${ORDER.hot}`);
-    expect(listing().values).toEqual(['user-1', 'user-1', 'user-1', 10, 20]);
+    expect(listing().values).toEqual([
+      'user-1',
+      'user-1',
+      'user-1',
+      'user-1',
+      10,
+      20,
+    ]);
     expect(count().sql).toBe(`SELECT COUNT(*) AS total FROM posts${where}`);
-    expect(count().values).toEqual(['user-1', 'user-1', 'user-1']);
+    expect(count().values).toEqual(['user-1', 'user-1', 'user-1', 'user-1']);
+  });
+
+  // Hiding is the caller's own view: anonymous listings have no such filter.
+  it.each([
+    ['GET /posts', { viewer: 'user-1', hidden: true }],
+    ['GET /posts anonymously', { viewer: undefined, hidden: false }],
+  ] as const)('%s filters hidden posts only for a viewer', async (_r, c) => {
+    const { service, listing } = harness();
+    await service.findAll({}, c.viewer);
+    expect(listing().sql.includes(NOT_HIDDEN_BY_VIEWER_SQL)).toBe(c.hidden);
   });
 
   it('excludes a community the caller is banned from now', () => {

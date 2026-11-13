@@ -11,6 +11,7 @@ import { CommunityRuleAcceptanceService } from '../communities/community-rule-ac
 import { NotificationsService } from '../notifications/notifications.service';
 import {
   CommentsService,
+  INSERT_COMMENT_REVISION_SQL,
   MAX_LOCK_ANCESTOR_DEPTH,
   PARENT_WITH_ANCESTRY_SQL,
   THREAD_POST_SQL,
@@ -1068,9 +1069,28 @@ describe('CommentsService.update', () => {
       ...overrides,
     });
 
+  let revisions: unknown[][];
+
+  // Migration 039: GET /comments/:id/revisions.
+  it('keeps the replaced version, dated by when it was written', async () => {
+    await service.update('comment-1', { content: 'Second' }, 'author');
+    await service.update('comment-1', { content: 'Third' }, 'author');
+    await service.update('comment-1', { content: 'Third' }, 'author');
+    expect(revisions).toEqual([
+      [
+        expect.any(String),
+        'comment-1',
+        'Original',
+        new Date('2026-10-22T08:00:00.000Z'),
+      ],
+      [expect.any(String), 'comment-1', 'Second', clock],
+    ]);
+  });
+
   beforeEach(async () => {
     comments = new Map();
     queries = [];
+    revisions = [];
     failUpdate = false;
     addComment('comment-1');
     connection = {
@@ -1083,6 +1103,11 @@ describe('CommentsService.update', () => {
         const comment = comments.get(values[0] as string);
         if (sql.startsWith('SELECT comments.id, comments.author_id')) {
           return Promise.resolve([comment ? [{ ...comment }] : [], []]);
+        }
+        // The replaced version (migration 039).
+        if (sql === INSERT_COMMENT_REVISION_SQL) {
+          revisions.push(values);
+          return Promise.resolve([{ affectedRows: 1 }, []]);
         }
         if (sql.startsWith('UPDATE comments SET')) {
           if (failUpdate) {

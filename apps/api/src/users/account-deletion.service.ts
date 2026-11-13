@@ -64,6 +64,10 @@ export const DELETE_PRIVATE_STATE_SQL = [
   'DELETE FROM community_moderator_invites WHERE user_id = ?',
   'DELETE FROM community_user_flairs WHERE user_id = ?',
   'DELETE FROM community_mutes WHERE user_id = ?',
+  // The reader's own view (migration 039): hidden posts and saved
+  // comments, private like saved posts.
+  'DELETE FROM hidden_posts WHERE user_id = ?',
+  'DELETE FROM saved_comments WHERE user_id = ?',
   // The avatar and uploads never posted are released (migration 035); the
   // sweep deletes them. Files in the account's posts stay with the posts.
   ...RELEASE_ACCOUNT_MEDIA_SQL,

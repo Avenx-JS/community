@@ -136,6 +136,15 @@ describe('User profile endpoints (e2e)', () => {
       email_changes: [],
       user_preferences: [],
       data_exports: [],
+      // The reader's own view (migration 039): A's rows go, B's stay.
+      hidden_posts: [
+        { user_id: 'user-a', post_id: 'post-a' },
+        { user_id: 'user-b', post_id: 'post-a' },
+      ],
+      saved_comments: [
+        { user_id: 'user-a', comment_id: 'comment-b' },
+        { user_id: 'user-b', comment_id: 'comment-b' },
+      ],
       // Community settings (migration 038): A's rows go, B's stay.
       community_join_requests: [
         { user_id: 'user-a', community_id: 'community-b' },
@@ -895,6 +904,8 @@ describe('User profile endpoints (e2e)', () => {
         'community_moderator_invites',
         'community_user_flairs',
         'community_mutes',
+        'hidden_posts',
+        'saved_comments',
       ]) {
         expect(owned(table, 'user_id', 'user-a')).toEqual([]);
         expect(owned(table, 'user_id', 'user-b')).toHaveLength(1);
@@ -1159,6 +1170,8 @@ describe('User profile endpoints (e2e)', () => {
           'saved',
           'media',
           'flair',
+          'nsfw',
+          'spoiler',
           'title',
           'type',
         ].sort(),

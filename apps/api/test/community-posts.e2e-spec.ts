@@ -216,6 +216,8 @@ describe('GET /communities/:name/posts (e2e)', () => {
         'saved',
         'media',
         'flair',
+        'nsfw',
+        'spoiler',
         'title',
         'type',
       ].sort(),

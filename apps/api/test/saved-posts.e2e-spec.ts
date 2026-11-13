@@ -385,6 +385,8 @@ describe('Saved posts (e2e)', () => {
           saved: true,
           media: null,
           flair: null,
+          nsfw: false,
+          spoiler: false,
         },
         saved_at: '2026-11-01T08:02:00.000Z',
       });

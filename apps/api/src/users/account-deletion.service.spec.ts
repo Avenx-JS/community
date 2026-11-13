@@ -173,6 +173,9 @@ describe('AccountDeletionService', () => {
       'DELETE FROM community_moderator_invites WHERE user_id = ?',
       'DELETE FROM community_user_flairs WHERE user_id = ?',
       'DELETE FROM community_mutes WHERE user_id = ?',
+      // The reader's own view (migration 039).
+      'DELETE FROM hidden_posts WHERE user_id = ?',
+      'DELETE FROM saved_comments WHERE user_id = ?',
       // Releases, never deletes: the sweep deletes the files (migration 035).
       ...RELEASE_ACCOUNT_MEDIA_SQL,
     ]);

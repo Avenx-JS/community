@@ -118,6 +118,17 @@ export class PostResponse implements PostDto {
   })
   flair!: AssignedFlairResponse | null;
 
+  @ApiProperty({
+    description:
+      'Labelled not safe for work (PUT /posts/{id}/nsfw); clients blur it.',
+  })
+  nsfw!: boolean;
+
+  @ApiProperty({
+    description: 'Labelled a spoiler (PUT /posts/{id}/spoiler).',
+  })
+  spoiler!: boolean;
+
   @ApiPropertyOptional({
     enum: [true],
     description:

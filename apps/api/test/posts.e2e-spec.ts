@@ -68,6 +68,8 @@ interface TestModerationEntry {
 describe('Post endpoints (e2e)', () => {
   let app: INestApplication<App>;
   let posts: TestPost[];
+  // Versions an edit replaced (migration 039).
+  let revisionWrites: unknown[][];
   let votes: FakeVote[];
   let saves: FakeSave[];
   let queryCalls: Array<{ sql: string; values: unknown[] }>;
@@ -108,6 +110,7 @@ describe('Post endpoints (e2e)', () => {
   ]);
 
   beforeEach(async () => {
+    revisionWrites = [];
     posts = [
       {
         id: 'post-1',
@@ -618,6 +621,11 @@ describe('Post endpoints (e2e)', () => {
         if (sql.startsWith('UPDATE user_reports')) {
           return [{ affectedRows: 0 }, []];
         }
+        // An edit keeps the replaced version (migration 039).
+        if (sql.startsWith('INSERT INTO post_revisions')) {
+          revisionWrites.push(values);
+          return [{ affectedRows: 1 }, []];
+        }
         throw new Error(`Unexpected SQL query: ${sql}`);
       },
       // A transaction snapshots the stored rows and restores them on
@@ -791,6 +799,8 @@ describe('Post endpoints (e2e)', () => {
           'saved',
           'media',
           'flair',
+          'nsfw',
+          'spoiler',
           'title',
           'type',
         ].sort(),
@@ -1402,6 +1412,8 @@ describe('Post endpoints (e2e)', () => {
           saved: false,
           media: null,
           flair: null,
+          nsfw: false,
+          spoiler: false,
         });
         expect(JSON.stringify(response.body)).not.toMatch(
           /email|password_hash/,
@@ -1724,11 +1736,16 @@ describe('Post endpoints (e2e)', () => {
         saved: false,
         media: null,
         flair: null,
+        nsfw: false,
+        spoiler: false,
       });
       expect(stored('post-1')).toMatchObject({
         title: 'Corrected',
         content: 'First body',
       });
+      // The replaced version is kept (migration 039), in the same write.
+      expect(revisionWrites).toHaveLength(1);
+      expect(revisionWrites[0].slice(1, 3)).toEqual(['post-1', 'First']);
     });
 
     it('lets the author edit the content alone', async () => {

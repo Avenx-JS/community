@@ -141,6 +141,8 @@ describe('UserActivityService', () => {
           saved: false,
           media: null,
           flair: null,
+          nsfw: false,
+          spoiler: false,
         },
       ]);
     });

@@ -119,7 +119,14 @@ describe('CommunityPostsController', () => {
     await controller.findAll('general', {}, {
       user: { id: 'member' },
     } as never);
-    expect(queries[1].values).toEqual(['community-1', 'member', 20, 0]);
+    // The member reads it, and their hidden posts are left out.
+    expect(queries[1].values).toEqual([
+      'community-1',
+      'member',
+      'member',
+      20,
+      0,
+    ]);
   });
 
   it('returns the shared envelope, including sort', async () => {

@@ -22,7 +22,7 @@ describe('migration 038 (community settings)', () => {
       `-- Community settings (038_add_community_settings). ${appended}`,
     );
     expect(snapshot).toContain(
-      "('037_add_account_settings'), ('038_add_community_settings');",
+      "('037_add_account_settings'), ('038_add_community_settings'),",
     );
   });
 

@@ -878,6 +878,62 @@ CREATE TABLE community_mutes (
         FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE
 );
 
+-- Content labels, hidden posts, saved comments and revisions (039_add_content_labels_and_history).
+ALTER TABLE posts
+  ADD COLUMN nsfw_set_by ENUM('author', 'moderator') NULL DEFAULT NULL,
+  ADD COLUMN spoiler_set_by ENUM('author', 'moderator') NULL DEFAULT NULL;
+
+CREATE TABLE hidden_posts (
+    user_id VARCHAR(36) NOT NULL,
+    post_id VARCHAR(36) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, post_id),
+    INDEX idx_hidden_posts_user_created (user_id, created_at, post_id),
+    INDEX idx_hidden_posts_post (post_id),
+    CONSTRAINT fk_hidden_posts_user
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_hidden_posts_post
+        FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE saved_comments (
+    user_id VARCHAR(36) NOT NULL,
+    comment_id VARCHAR(36) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, comment_id),
+    INDEX idx_saved_comments_user_created (user_id, created_at, comment_id),
+    INDEX idx_saved_comments_comment (comment_id),
+    CONSTRAINT fk_saved_comments_user
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_saved_comments_comment
+        FOREIGN KEY (comment_id) REFERENCES comments(id) ON DELETE CASCADE
+);
+
+CREATE TABLE post_revisions (
+    id VARCHAR(36) PRIMARY KEY,
+    post_id VARCHAR(36) NOT NULL,
+    title VARCHAR(300) NOT NULL,
+    content TEXT NULL,
+    version_at TIMESTAMP NOT NULL,
+    replaced_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_post_revisions_post (post_id, replaced_at, id),
+    CONSTRAINT fk_post_revisions_post
+        FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE comment_revisions (
+    id VARCHAR(36) PRIMARY KEY,
+    comment_id VARCHAR(36) NOT NULL,
+    content TEXT NOT NULL,
+    version_at TIMESTAMP NOT NULL,
+    replaced_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_comment_revisions_comment (comment_id, replaced_at, id),
+    CONSTRAINT fk_comment_revisions_comment
+        FOREIGN KEY (comment_id) REFERENCES comments(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_votes_user_value ON votes (user_id, target_type, value, created_at, id);
+
 CREATE TABLE schema_migrations (
     version VARCHAR(64) PRIMARY KEY,
     applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -922,4 +978,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('035_create_media'),
     ('036_add_community_report_review'),
     ('037_add_account_settings'),
-    ('038_add_community_settings');
+    ('038_add_community_settings'),
+    ('039_add_content_labels_and_history');

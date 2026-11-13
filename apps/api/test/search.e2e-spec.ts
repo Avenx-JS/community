@@ -508,6 +508,8 @@ describe('Search (e2e)', () => {
           'saved',
           'media',
           'flair',
+          'nsfw',
+          'spoiler',
         ].sort(),
       );
     });

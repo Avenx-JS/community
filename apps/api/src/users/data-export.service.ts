@@ -126,6 +126,15 @@ export const EXPORT_SECTIONS: Array<[string, string]> = [
     'muted_communities',
     'SELECT c.name AS community, m.created_at FROM community_mutes m JOIN communities c ON c.id = m.community_id WHERE m.user_id = ? ORDER BY m.created_at',
   ],
+  // The reader's own view (migration 039).
+  [
+    'hidden_posts',
+    'SELECT post_id, created_at FROM hidden_posts WHERE user_id = ? ORDER BY created_at',
+  ],
+  [
+    'saved_comments',
+    'SELECT comment_id, created_at FROM saved_comments WHERE user_id = ? ORDER BY created_at',
+  ],
   [
     'sessions',
     'SELECT created_at, last_used_at, ip_prefix, user_agent FROM auth_sessions WHERE user_id = ? ORDER BY created_at',
