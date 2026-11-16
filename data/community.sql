@@ -185,7 +185,8 @@ CREATE TABLE community_moderation_actions (
         'moderator_invite_revoked',
         'moderator_invite_declined',
         'join_request_approved',
-        'join_request_denied'
+        'join_request_denied',
+        'ownership_transferred'
     ) NOT NULL,
     target_type ENUM('post', 'comment', 'user', 'rule_document', 'community') NOT NULL,
     target_id VARCHAR(36) NOT NULL,
@@ -445,7 +446,8 @@ CREATE TABLE notifications (
         'report_resolved',
         'restriction_applied',
         'restriction_lifted',
-        'content_removed'
+        'content_removed',
+        'community_ownership_transferred'
     ) NOT NULL,
     actor_id VARCHAR(36) NULL,
     subject_type ENUM('post', 'comment', 'report', 'restriction', 'community') NOT NULL,
@@ -991,6 +993,10 @@ ALTER TABLE comments
 ALTER TABLE votes
   ADD INDEX idx_votes_created (created_at);
 
+-- Community ownership transfer (042_add_community_ownership_transfer).
+-- Its two enum members are in CREATE TABLE community_moderation_actions and
+-- CREATE TABLE notifications above; it adds nothing else.
+
 CREATE TABLE schema_migrations (
     version VARCHAR(64) PRIMARY KEY,
     applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -1038,4 +1044,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('038_add_community_settings'),
     ('039_add_content_labels_and_history'),
     ('040_add_live_notifications'),
-    ('041_add_admin_content_and_roles');
+    ('041_add_admin_content_and_roles'),
+    ('042_add_community_ownership_transfer');

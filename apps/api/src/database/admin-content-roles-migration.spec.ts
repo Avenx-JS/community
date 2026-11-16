@@ -26,7 +26,7 @@ describe('migration 041 (admin content and roles)', () => {
       `-- Admin content removal, role administration and analytics indexes (041_add_admin_content_and_roles). ${appended}`,
     );
     expect(snapshot).toContain(
-      "('040_add_live_notifications'), ('041_add_admin_content_and_roles');",
+      "('040_add_live_notifications'), ('041_add_admin_content_and_roles'),",
     );
     const adminActions =
       /CREATE TABLE admin_actions \((.*?)\);/.exec(snapshot)?.[1] ?? '';

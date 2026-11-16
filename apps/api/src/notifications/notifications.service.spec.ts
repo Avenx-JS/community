@@ -109,6 +109,15 @@ const entries = {
     communityId: 'community-1',
     metadata: { post_title: 'First tomatoes' },
   },
+  community_ownership_transferred: {
+    recipientId: 'new-owner',
+    type: 'community_ownership_transferred',
+    actorId: 'founder',
+    subjectType: 'community',
+    subjectId: 'community-1',
+    communityId: 'community-1',
+    metadata: { actor_username: 'founder', community_name: 'garden' },
+  },
 } satisfies Record<NotificationEntry['type'], NotificationEntry>;
 
 const memberPost = (recipientId: string): typeof entries.community_post => ({

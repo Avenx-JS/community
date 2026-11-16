@@ -7,6 +7,8 @@ export const NOTIFICATION_TYPES = [
   'restriction_applied',
   'restriction_lifted',
   'content_removed',
+  // Migration 042: a community's creator made the recipient its owner.
+  'community_ownership_transferred',
 ] as const;
 
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
@@ -116,6 +118,17 @@ export type NotificationEntry =
         post_title?: string;
         excerpt?: string;
       };
+    }
+  // Not a moderation type: the former owner is named, since the new owner
+  // has to know whom they took the community over from.
+  | {
+      recipientId: string;
+      type: 'community_ownership_transferred';
+      actorId: string;
+      subjectType: 'community';
+      subjectId: string;
+      communityId: string;
+      metadata: CommunitySnapshot;
     };
 
 export type NotificationMetadata = Partial<Record<string, string>>;
@@ -162,6 +175,11 @@ const entryShapes: Record<
   content_removed: {
     subjectTypes: ['post', 'comment'],
     hasActor: false,
+    hasCommunity: true,
+  },
+  community_ownership_transferred: {
+    subjectTypes: ['community'],
+    hasActor: true,
     hasCommunity: true,
   },
 };
@@ -358,6 +376,12 @@ export function buildNotificationMetadata(
         ['community_name', nameValue(metadata, 'community_name')],
         ['post_title', snapshotValue(metadata, 'post_title')],
         ['excerpt', snapshotValue(metadata, 'excerpt')],
+      );
+      break;
+    case 'community_ownership_transferred':
+      fields.push(
+        ['actor_username', nameValue(metadata, 'actor_username')],
+        ['community_name', nameValue(metadata, 'community_name')],
       );
       break;
     default:

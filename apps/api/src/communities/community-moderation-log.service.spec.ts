@@ -327,6 +327,18 @@ describe('CommunityModerationLogService', () => {
         },
         { username: 'sam_42' },
       ],
+      // Migration 042: the new owner, by username; the actor column names
+      // the former owner.
+      [
+        {
+          ...base,
+          action: 'ownership_transferred',
+          targetType: 'user',
+          targetId: 'user-2',
+          metadata: { username: 'sam_42' },
+        },
+        { username: 'sam_42' },
+      ],
     ];
 
     it('covers every declared action', () => {

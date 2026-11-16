@@ -15,6 +15,10 @@ import type {
   RowDataPacket,
 } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { ACTIVE_COMMUNITY_BAN_SQL } from '../common/active-community-ban';
+import { ACTIVE_USER_RESTRICTION_PREDICATE } from '../common/active-user-restriction';
+import { NotificationsService } from '../notifications/notifications.service';
+import { INSERT_MODERATOR_SQL } from './community-moderator-invites.service';
 import { CommunityBanPolicyService } from './community-ban-policy.service';
 import {
   canModerateCommunitySql,
@@ -215,6 +219,22 @@ export const JOIN_REQUEST_REQUIRED_REASON = 'join_request_required';
 export const REMOVE_MODERATOR_SQL =
   'DELETE FROM community_moderators WHERE community_id = ? AND user_id = ?';
 
+// POST /communities/:name/transfer. Values in order of use: the new owner's
+// username; then their id (restriction); community and id (ban, moderator
+// row); new owner, community, former owner (the swap).
+// Deleted accounts are found too, so that they answer 404 deliberately.
+export const TRANSFER_TARGET_SQL =
+  'SELECT id, username, deleted_at FROM users WHERE username = ? LIMIT 1';
+export const TRANSFER_TARGET_RESTRICTION_SQL = `SELECT id FROM user_restrictions WHERE user_id = ? AND ${ACTIVE_USER_RESTRICTION_PREDICATE} LIMIT 1`;
+// Locked: the moderator row must still be there when ownership moves.
+export const TRANSFER_TARGET_MODERATOR_SQL =
+  'SELECT user_id FROM community_moderators WHERE community_id = ? AND user_id = ? LIMIT 1 FOR UPDATE';
+// creator_id in the WHERE re-checks the owner on the locked row.
+export const TRANSFER_CREATOR_SQL =
+  'UPDATE communities SET creator_id = ? WHERE id = ? AND creator_id = ?';
+export const OWNER_USERNAME_SQL =
+  'SELECT username FROM users WHERE id = ? LIMIT 1';
+
 // Both community predicates: soft deletion (022) and suspension (025).
 // Values: viewer or null, name.
 export const LISTED_COMMUNITY_ID_SQL = `SELECT id, ${accessColumnsSql('communities')} FROM communities ${VIEWER_JOIN_SQL} WHERE name = ? AND ${COMMUNITY_VISIBLE_PREDICATE} LIMIT 1`;
@@ -222,14 +242,17 @@ export const LISTED_COMMUNITY_ID_SQL = `SELECT id, ${accessColumnsSql('communiti
 @Injectable()
 export class CommunitiesService {
   private readonly bans: CommunityBanPolicyService;
+  private readonly notifications: NotificationsService;
 
   constructor(
     @Inject(MYSQL_POOL) private readonly pool: Pool,
     private readonly ruleAcceptance: CommunityRuleAcceptanceService,
     private readonly moderationLog: CommunityModerationLogService,
     @Optional() bans?: CommunityBanPolicyService,
+    @Optional() notifications?: NotificationsService,
   ) {
     this.bans = bans ?? new CommunityBanPolicyService(pool);
+    this.notifications = notifications ?? new NotificationsService(pool);
   }
 
   // The directory. Private communities are listed (their name and
@@ -761,6 +784,137 @@ export class CommunitiesService {
         action: 'community_deleted',
         targetType: 'community',
         targetId: community.id,
+      });
+
+      await connection.commit();
+    } catch (error) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  // Hands the community to one of its moderators. Creator only (404, then
+  // 403, through getCommunityForRoleChange), after a confirmation of the
+  // name (400, before anything is read). The new owner must be a moderator
+  // now: moderation is a role someone accepted (the invitation flow), and
+  // ownership is never handed to an account that did not. In one
+  // transaction on the locked community row:
+  // - creator_id becomes the new owner (re-checked against the caller);
+  // - the new owner's own moderator row is removed: the creator holds every
+  //   moderator power already, and the roster never lists the creator;
+  // - the former owner becomes a moderator (assigned_by the new owner), so
+  //   they keep their access rather than silently losing it; the new owner
+  //   may remove them like any moderator;
+  // - one ownership_transferred log entry, targeting the new owner;
+  // - a community_ownership_transferred notification to the new owner.
+  // Afterwards the former owner no longer blocks their own account deletion
+  // on this community (CREATED_COMMUNITY_SQL reads creator_id).
+  async transferOwnership(
+    name: string,
+    input: { username: string; confirm_name: string },
+    actorId: string,
+  ): Promise<void> {
+    if (input.confirm_name !== name) {
+      throw new BadRequestException(
+        'The confirmation name does not match the community',
+      );
+    }
+
+    const connection = await this.pool.getConnection();
+    let transactionStarted = false;
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+
+      const community = await this.getCommunityForRoleChange(name, actorId, {
+        executor: connection,
+        forUpdate: true,
+        forbidden: 'Only the community creator can transfer the community',
+      });
+      const [targets] = await connection.execute<
+        (RowDataPacket & {
+          id: string;
+          username: string;
+          deleted_at: Date | string | null;
+        })[]
+      >(TRANSFER_TARGET_SQL, [input.username]);
+      const target = targets[0];
+      if (!target || target.deleted_at !== null) {
+        throw new NotFoundException('User not found');
+      }
+      if (target.id === actorId) {
+        throw new BadRequestException('You already own this community');
+      }
+      const [restrictions] = await connection.execute<RowDataPacket[]>(
+        TRANSFER_TARGET_RESTRICTION_SQL,
+        [target.id],
+      );
+      if (restrictions.length > 0) {
+        throw new ConflictException(
+          'A suspended or banned account cannot take over a community',
+        );
+      }
+      const [bans] = await connection.execute<RowDataPacket[]>(
+        ACTIVE_COMMUNITY_BAN_SQL,
+        [community.id, target.id],
+      );
+      if (bans.length > 0) {
+        throw new ConflictException(
+          'An account banned from the community cannot take it over',
+        );
+      }
+      const [moderators] = await connection.execute<RowDataPacket[]>(
+        TRANSFER_TARGET_MODERATOR_SQL,
+        [community.id, target.id],
+      );
+      if (moderators.length === 0) {
+        throw new ConflictException(
+          'Ownership can only go to a current moderator; invite them first',
+        );
+      }
+
+      const [moved] = await connection.execute<ResultSetHeader>(
+        TRANSFER_CREATOR_SQL,
+        [target.id, community.id, actorId],
+      );
+      if (moved.affectedRows !== 1) {
+        throw new ConflictException('The community changed concurrently');
+      }
+      await connection.execute<ResultSetHeader>(REMOVE_MODERATOR_SQL, [
+        community.id,
+        target.id,
+      ]);
+      await connection.execute<ResultSetHeader>(INSERT_MODERATOR_SQL, [
+        community.id,
+        actorId,
+        target.id,
+      ]);
+      await this.moderationLog.record(connection, {
+        actorId,
+        communityId: community.id,
+        action: 'ownership_transferred',
+        targetType: 'user',
+        targetId: target.id,
+        metadata: { username: target.username },
+      });
+      const [owners] = await connection.execute<
+        (RowDataPacket & { username: string })[]
+      >(OWNER_USERNAME_SQL, [actorId]);
+      await this.notifications.record(connection, {
+        recipientId: target.id,
+        type: 'community_ownership_transferred',
+        actorId,
+        subjectType: 'community',
+        subjectId: community.id,
+        communityId: community.id,
+        metadata: {
+          ...(owners[0] ? { actor_username: owners[0].username } : {}),
+          community_name: name,
+        },
       });
 
       await connection.commit();

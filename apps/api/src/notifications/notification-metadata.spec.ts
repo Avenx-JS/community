@@ -302,8 +302,28 @@ describe('notification enums', () => {
       );
     };
 
-    expect(enumValues('type')).toEqual([...NOTIFICATION_TYPES]);
+    // Migration 042 appended community_ownership_transferred, last.
+    expect(enumValues('type')).toEqual(NOTIFICATION_TYPES.slice(0, -1));
+    expect(NOTIFICATION_TYPES.slice(-1)).toEqual([
+      'community_ownership_transferred',
+    ]);
     expect(enumValues('subject_type')).toEqual([...NOTIFICATION_SUBJECT_TYPES]);
+  });
+
+  it('match migration 042 and the snapshot, appended only', () => {
+    const read = (path: string) =>
+      readFileSync(resolve(__dirname, path), 'utf8').replace(/\s+/g, ' ');
+    const list = NOTIFICATION_TYPES.map((type) => `'${type}'`).join(', ');
+    expect(
+      read(
+        '../../../../data/migrations/042_add_community_ownership_transfer.sql',
+      ),
+    ).toContain(
+      `ALTER TABLE notifications MODIFY COLUMN type ENUM( ${list} ) NOT NULL;`,
+    );
+    expect(read('../../../../data/community.sql')).toContain(
+      `type ENUM( ${list} ) NOT NULL`,
+    );
   });
 });
 

@@ -56,6 +56,7 @@ import { ListCommunitiesDto } from './dto/list-communities.dto';
 import { ListCommunityMembersDto } from './dto/list-community-members.dto';
 import { ListCommunityModeratorsDto } from './dto/list-community-moderators.dto';
 import { ManageModeratorDto } from './dto/manage-moderator.dto';
+import { TransferCommunityDto } from './dto/transfer-community.dto';
 import { UpdateCommunityDto } from './dto/update-community.dto';
 import { UpdateNotificationPreferencesDto } from './dto/update-notification-preferences.dto';
 import { NoQueryParamsGuard } from '../common/no-query-params.guard';
@@ -235,6 +236,47 @@ export class CommunitiesController {
     @Req() request: AuthenticatedRequest,
   ): Promise<void> {
     return this.communitiesService.remove(name, body.name, request.user.id);
+  }
+
+  // POST, not PATCH creator_id: a transfer is an act with its own checks,
+  // log entry and notification, not a field edit.
+  @Post(':name/transfer')
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary: 'Transfer ownership of a community',
+    description:
+      'Makes one of the community’s current moderators its creator. Only ' +
+      'the creator may transfer, and must repeat the community name in ' +
+      'confirm_name. The new owner must be a moderator now: ownership never ' +
+      'goes to someone who did not accept the moderator invitation. The ' +
+      'former owner stays on as a moderator (the new owner may remove them); ' +
+      'the new owner’s own moderator entry is dropped, since the creator ' +
+      'holds every moderator power. Records an ownership_transferred ' +
+      'moderation-log entry and notifies the new owner ' +
+      '(community_ownership_transferred). Afterwards this community no ' +
+      'longer blocks the former owner’s account deletion.',
+  })
+  @ApiAuthenticated({
+    forbidden: 'Only the community creator may transfer the community.',
+  })
+  @ApiRouteParam('name', 'communityName', 'Exact community name.')
+  @ApiNoContentResponse({ description: 'Ownership is transferred.' })
+  @ApiErrorResponses({
+    400: 'Invalid community name or username, a missing or mismatched confirm_name, an unknown property, or the caller as the new owner.',
+    404: 'Community not found, deleted or suspended; or the new owner is unknown or deleted.',
+    409: 'The new owner is not a moderator of the community, is suspended or banned from the platform, or is banned from the community.',
+  })
+  transfer(
+    @Param('name', new SafeRouteParamPipe('communityName')) name: string,
+    @Body() body: TransferCommunityDto,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<void> {
+    return this.communitiesService.transferOwnership(
+      name,
+      body,
+      request.user.id,
+    );
   }
 
   // Public: the figures a community advertises about itself. No time range:

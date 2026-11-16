@@ -2264,8 +2264,10 @@ or leave it with an owner who can never act. A creator can now delete their
 communities first with `DELETE /communities/:name` (a soft delete, see
 [Editing and deleting a community](#editing-and-deleting-a-community)) and then
 their account; the deleted community keeps `deleted_at`, and `deleted_by`
-keeps referencing the anonymised account row. Ownership transfer is separate
-work.
+keeps referencing the anonymised account row. Or the creator hands the
+community to one of its moderators with
+[`POST /communities/:name/transfer`](#transferring-ownership); the community
+then no longer blocks the deletion, and it stays as it is for its members.
 
 **The last administrator cannot leave.** If the caller is the only platform
 administrator whose account is not deleted, the request is `409` ("You are
@@ -3519,6 +3521,7 @@ the change:
 | `moderator_added` | an invitation accepted (actor: the new moderator) | `username` |
 | `moderator_removed` | `DELETE .../moderators`, only when one was removed | `username` |
 | `join_request_approved`, `join_request_denied` | decisions | `username` |
+| `ownership_transferred` | [`POST .../transfer`](#transferring-ownership) (actor: the former owner) | `username` of the new owner |
 
 An account deletion removes the account's join requests, invitations, user
 flairs and mutes; the data export includes them (who decided a request is
@@ -3885,7 +3888,9 @@ return `404`, and non-creator attempts return `403`. The actor identity comes
 only from the validated bearer token; request data cannot set a role or actor
 ID. The creator cannot delegate moderator management, and moderators cannot
 invite other moderators. Publishing
-community rules is likewise creator-only (see [Rules API](#rules-api)).
+community rules is likewise creator-only (see [Rules API](#rules-api)). The
+creator may hand the role on to a moderator
+([Transferring ownership](#transferring-ownership)).
 
 **Authors delete; moderators remove.** `DELETE /posts/:id` and
 `DELETE /comments/:id` are the author's own hard delete. A moderator or the
@@ -3916,6 +3921,62 @@ removals and restorations are recorded in the
 or other moderator-only operation is exposed by this API yet; future such routes
 must enforce the same server-side, community-scoped checks and record what they
 do in the moderation log.
+
+#### Transferring ownership
+
+Ownership is the single column `communities.creator_id`, and
+`POST /communities/:name/transfer` rewrites it (migration
+`042_add_community_ownership_transfer` only adds two enum members):
+
+```json
+{ "username": "new_owner", "confirm_name": "garden" }
+```
+
+`204` on success. Every owner-only check still goes through
+`getCommunityForRoleChange`, so the new owner holds every creator power at
+once and the former owner none.
+
+**Only to a current moderator.** Moderation is a role someone accepted
+through the [invitation](#moderator-invitations); ownership is never handed to
+an account that did not, so a stranger or a plain member is `409`: invite
+them first.
+
+**Refusals**, in this order:
+
+| Status | When |
+| --- | --- |
+| `400` | `confirm_name` is not exactly the route's name (checked before anything is read), a malformed `username`, an unknown property |
+| `404` | the community is unknown, deleted or suspended (before `403`) |
+| `403` | the caller is not the creator, a moderator included |
+| `404` | the new owner is unknown or deleted |
+| `400` | the new owner is the caller |
+| `409` | the new owner is suspended or banned from the platform, banned from the community, or not a moderator of it |
+
+**One transaction** on the community row, locked with `FOR UPDATE` (the lock
+every creator route takes, so a concurrent moderator removal or deletion
+waits):
+- `creator_id` becomes the new owner; the `UPDATE` re-checks the caller in
+  its `WHERE`, and the new owner's moderator row is locked as well;
+- **the new owner's `community_moderators` row is removed.** The creator
+  already holds every moderator power, and the moderator list never shows the
+  creator, so the row would be a second, invisible appointment;
+- **the former owner becomes a moderator** (`assigned_by` the new owner), so
+  they do not silently lose access, private communities included. The new
+  owner may remove them like any moderator;
+- one `ownership_transferred` entry in the
+  [moderation log](#community-moderation-log) (actor: the former owner;
+  target: the new owner, with their `username`);
+- a `community_ownership_transferred` notification to the new owner, naming
+  the former owner and the community.
+
+**Account deletion afterwards.** `DELETE /users/me` refuses a creator of a
+live community (`409`). That check reads `creator_id`, so after the transfer
+the former owner can delete their account. Deletion is an anonymisation, never
+a hard delete: `communities.creator_id` is `ON DELETE CASCADE`, but no code
+path deletes a `users` row, so neither the transferred community nor the
+former owner's moderator row (`assigned_by` is `ON DELETE CASCADE` too) is
+ever deleted with an account. A platform-administrator fallback for
+communities whose owner is gone is separate work.
 
 #### Moderator and member lists
 
@@ -6739,6 +6800,7 @@ the triggering `subject_type`/`subject_id`, an optional `community_id`, a
 | `restriction_applied` | the recipient is suspended or banned (`AdminRestrictionsService`)                                     | the restriction             |
 | `restriction_lifted`  | the recipient's restriction is lifted (`AdminRestrictionsService`)                                    | the restriction             |
 | `content_removed`     | a moderator removes the recipient's post or comment (`PostsService.removeContent`, `CommentRemovalService.remove`) | the removed post or comment |
+| `community_ownership_transferred` | the creator makes the recipient the community's owner (`CommunitiesService.transferOwnership`, migration 042) | the community |
 
 Adding a type requires a migration, as for the other enums.
 
@@ -6777,6 +6839,7 @@ does for the audit log. Allowed keys depend on the type:
 | `restriction_applied` | `restriction_type` (`suspension`, `ban`)  | `expires_at`, for a temporary suspension                |
 | `restriction_lifted`  | `restriction_type`                        | none                                                    |
 | `content_removed`     | none                                      | `community_name`, `post_title`, `excerpt`; never a name |
+| `community_ownership_transferred` | none                       | `actor_username` (the former owner), `community_name` |
 
 "Required" is enforced by the `NotificationEntry` type; at runtime the
 allowlist validates whichever allowed keys are present.

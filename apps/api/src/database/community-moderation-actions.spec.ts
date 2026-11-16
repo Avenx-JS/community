@@ -25,7 +25,12 @@ const ACTIONS_038 = [
   'join_request_approved',
   'join_request_denied',
 ];
-const ACTIONS_THROUGH_036 = COMMUNITY_MODERATION_ACTIONS.filter(
+// Added by migration 042 (community ownership transfer), after 038's.
+const ACTIONS_042 = ['ownership_transferred'];
+const ACTIONS_THROUGH_038 = COMMUNITY_MODERATION_ACTIONS.filter(
+  (action) => !ACTIONS_042.includes(action),
+);
+const ACTIONS_THROUGH_036 = ACTIONS_THROUGH_038.filter(
   (action) => !ACTIONS_038.includes(action),
 );
 const ACTIONS_THROUGH_023 = ACTIONS_THROUGH_036.filter(
@@ -167,7 +172,23 @@ describe('migration 038 (community settings) on the moderation log', () => {
   );
 
   it('appends the invitation and join-request actions to the action enum, last', () => {
-    expect(COMMUNITY_MODERATION_ACTIONS.slice(-5)).toEqual(ACTIONS_038);
+    expect(ACTIONS_THROUGH_038.slice(-5)).toEqual(ACTIONS_038);
+    expect(migration).toContain(
+      'ALTER TABLE community_moderation_actions ' +
+        `MODIFY COLUMN action ENUM( ${enumList(ACTIONS_THROUGH_038)} ) NOT NULL;`,
+    );
+  });
+});
+
+describe('migration 042 (community ownership transfer) on the moderation log', () => {
+  const migration = normalise(
+    read(
+      '../../../../data/migrations/042_add_community_ownership_transfer.sql',
+    ).replace(/^--.*$/gm, ''),
+  );
+
+  it('appends ownership_transferred to the action enum, last', () => {
+    expect(COMMUNITY_MODERATION_ACTIONS.slice(-1)).toEqual(ACTIONS_042);
     expect(migration).toContain(
       'ALTER TABLE community_moderation_actions ' +
         `MODIFY COLUMN action ENUM( ${enumList(COMMUNITY_MODERATION_ACTIONS)} ) NOT NULL;`,
