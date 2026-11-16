@@ -2,4 +2,5 @@ node_modules/
 dist/
 .env
 # Uploaded media in development (MEDIA_STORAGE=local)
-storage/
+/storage/
+apps/api/storage/
