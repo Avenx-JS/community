@@ -11,3 +11,4 @@ import { DataExportQueueService } from './data-export-queue.service';
   exports: [EmailQueueService, DataExportQueueService],
 })
 export class QueuesModule {}
+

@@ -715,3 +715,4 @@ The Avenx.js Community Platform is designed to be easily self-hosted. Adding com
 ### 5. Mandatory vs. Optional Redis
 - **For Production Deployments:** **Mandatory.** Running a 189-endpoint platform in production without a dedicated caching and queuing layer results in poor database utilization and vulnerability to traffic spikes.
 - **For Local Development & Self-Hosters:** **Optional.** The application architecture must support `REDIS_ENABLED=false` using the provided in-memory fallbacks, preserving the platform's ease of deployment and low barrier to entry.
+
