@@ -6,6 +6,7 @@ import {
   Logger,
   NotFoundException,
   OnModuleInit,
+  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
@@ -19,6 +20,7 @@ import { isSqlTrue } from '../common/community-moderation';
 import { readPositiveInteger } from '../common/read-positive-integer';
 import { EmailTransport } from '../email/email-transport';
 import { EmailDeliveryError } from '../email/smtp-email.transport';
+import { EmailQueueService } from '../queues/email-queue.service';
 import {
   AuthService,
   hashOpaqueToken,
@@ -102,6 +104,7 @@ export class EmailVerificationService implements OnModuleInit {
     @Inject(MYSQL_POOL) private readonly pool: Pool,
     private readonly email: EmailTransport,
     private readonly auth: AuthService,
+    @Optional() private readonly emailQueue?: EmailQueueService,
   ) {}
 
   // A new account is sent its code at once, without delaying the response.
@@ -400,6 +403,16 @@ export class EmailVerificationService implements OnModuleInit {
     subject: string;
     text: string;
   }): void {
+    if (this.emailQueue) {
+      void this.emailQueue.enqueue(message).catch((error: unknown) => {
+        const code =
+          error instanceof EmailDeliveryError ? error.code : undefined;
+        this.logger.warn(
+          `Account email could not be sent${code ? ` (${code})` : ''}`,
+        );
+      });
+      return;
+    }
     void this.email.send(message).catch((error: unknown) => {
       const code = error instanceof EmailDeliveryError ? error.code : undefined;
       this.logger.warn(

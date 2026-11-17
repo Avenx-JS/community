@@ -1,6 +1,7 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import type { Pool, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { CacheService } from '../redis/redis.types';
 import { ACTIVE_USER_RESTRICTION_PREDICATE } from '../common/active-user-restriction';
 import { readPositiveInteger } from '../common/read-positive-integer';
 import {
@@ -327,11 +328,30 @@ export class AdminAnalyticsService {
     300,
   );
 
-  constructor(@Inject(MYSQL_POOL) private readonly pool: Pool) {}
+  constructor(
+    @Inject(MYSQL_POOL) private readonly pool: Pool,
+    @Optional() private readonly cache?: CacheService,
+  ) {}
+
+  async userMetrics(
+    range: AnalyticsRange,
+    granularity: AnalyticsGranularity,
+    now: Date = new Date(),
+  ): Promise<UserAnalytics> {
+    const cacheKey = `admin:analytics:user:${range.from.toISOString()}:${range.to.toISOString()}:${granularity}`;
+    if (this.cache) {
+      return this.cache.getOrSet(
+        cacheKey,
+        () => this.computeUserMetrics(range, granularity, now),
+        { ttlSeconds: 60 },
+      );
+    }
+    return this.computeUserMetrics(range, granularity, now);
+  }
 
   // A fixed set of five statements regardless of the range length; the
   // series is grouped by UTC day in SQL and bucketed in application code.
-  async userMetrics(
+  private async computeUserMetrics(
     range: AnalyticsRange,
     granularity: AnalyticsGranularity,
     now: Date = new Date(),
@@ -422,10 +442,26 @@ export class AdminAnalyticsService {
     };
   }
 
+  async moderationMetrics(
+    range: AnalyticsRange,
+    granularity: AnalyticsGranularity,
+    now: Date = new Date(),
+  ): Promise<ModerationAnalytics> {
+    const cacheKey = `admin:analytics:moderation:${range.from.toISOString()}:${range.to.toISOString()}:${granularity}`;
+    if (this.cache) {
+      return this.cache.getOrSet(
+        cacheKey,
+        () => this.computeModerationMetrics(range, granularity, now),
+        { ttlSeconds: 60 },
+      );
+    }
+    return this.computeModerationMetrics(range, granularity, now);
+  }
+
   // A fixed set of six statements regardless of the range length. Submitted
   // and decided reports are different populations from different columns;
   // keep them in separate statements and never merge them into one query.
-  async moderationMetrics(
+  private async computeModerationMetrics(
     range: AnalyticsRange,
     granularity: AnalyticsGranularity,
     now: Date = new Date(),
@@ -556,9 +592,25 @@ export class AdminAnalyticsService {
     };
   }
 
+  async contentMetrics(
+    range: AnalyticsRange,
+    granularity: AnalyticsGranularity,
+    now: Date = new Date(),
+  ): Promise<ContentAnalytics> {
+    const cacheKey = `admin:analytics:content:${range.from.toISOString()}:${range.to.toISOString()}:${granularity}`;
+    if (this.cache) {
+      return this.cache.getOrSet(
+        cacheKey,
+        () => this.computeContentMetrics(range, granularity, now),
+        { ttlSeconds: 60 },
+      );
+    }
+    return this.computeContentMetrics(range, granularity, now);
+  }
+
   // A fixed set of five statements regardless of the range length: counts
   // and grouped counts only, never a row about one account or one item.
-  async contentMetrics(
+  private async computeContentMetrics(
     range: AnalyticsRange,
     granularity: AnalyticsGranularity,
     now: Date = new Date(),
@@ -643,9 +695,25 @@ export class AdminAnalyticsService {
     };
   }
 
+  async communityMetrics(
+    range: AnalyticsRange,
+    granularity: AnalyticsGranularity,
+    now: Date = new Date(),
+  ): Promise<CommunityAnalytics> {
+    const cacheKey = `admin:analytics:comm:${range.from.toISOString()}:${range.to.toISOString()}:${granularity}`;
+    if (this.cache) {
+      return this.cache.getOrSet(
+        cacheKey,
+        () => this.computeCommunityMetrics(range, granularity, now),
+        { ttlSeconds: 60 },
+      );
+    }
+    return this.computeCommunityMetrics(range, granularity, now);
+  }
+
   // Four statements. Active means at least one post, or one comment on its
   // posts, created in the range, whatever the community's state now.
-  async communityMetrics(
+  private async computeCommunityMetrics(
     range: AnalyticsRange,
     granularity: AnalyticsGranularity,
     now: Date = new Date(),

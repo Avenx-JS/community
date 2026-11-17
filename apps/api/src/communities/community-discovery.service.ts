@@ -1,6 +1,7 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import type { Pool, ResultSetHeader } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { CacheService } from '../redis/redis.types';
 import {
   communityMemberSql,
   listedCommunitySql,
@@ -131,15 +132,35 @@ export class CommunityDiscoveryService {
     1000,
   );
 
-  constructor(@Inject(MYSQL_POOL) private readonly pool: Pool) {}
+  constructor(
+    @Inject(MYSQL_POOL) private readonly pool: Pool,
+    @Optional() private readonly cache?: CacheService,
+  ) {}
 
   async trending(
     query: DiscoveryQueryDto,
     viewerId?: string,
   ): Promise<DiscoveredCommunityListDto> {
+    const limit = query.limit ?? 10;
+    const cacheKey = `comm:trending:${viewerId ?? 'guest'}:${limit}`;
+
+    if (this.cache) {
+      return this.cache.getOrSet(
+        cacheKey,
+        async () => {
+          const [rows] = await this.pool.execute<DiscoveredRow[]>(
+            TRENDING_COMMUNITIES_SQL,
+            [viewerId ?? null, limit],
+          );
+          return { items: rows.map(toDiscovered) };
+        },
+        { ttlSeconds: 300 },
+      );
+    }
+
     const [rows] = await this.pool.execute<DiscoveredRow[]>(
       TRENDING_COMMUNITIES_SQL,
-      [viewerId ?? null, query.limit ?? 10],
+      [viewerId ?? null, limit],
     );
     return { items: rows.map(toDiscovered) };
   }
@@ -176,6 +197,9 @@ export class CommunityDiscoveryService {
       userId,
       community.id,
     ]);
+    if (this.cache) {
+      await this.cache.delByPattern(`comm:trending:${userId}:*`);
+    }
   }
 
   async unmute(name: string, userId: string): Promise<void> {
@@ -184,5 +208,8 @@ export class CommunityDiscoveryService {
       userId,
       community.id,
     ]);
+    if (this.cache) {
+      await this.cache.delByPattern(`comm:trending:${userId}:*`);
+    }
   }
 }

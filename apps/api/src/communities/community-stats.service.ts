@@ -1,6 +1,12 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  NotFoundException,
+  Optional,
+} from '@nestjs/common';
 import type { Pool, RowDataPacket } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { CacheService } from '../redis/redis.types';
 import {
   MEMBERS_JOIN,
   MEMBERS_WHERE,
@@ -83,10 +89,12 @@ export interface CommunityStatsDto {
 
 @Injectable()
 export class CommunityStatsService {
-  constructor(@Inject(MYSQL_POOL) private readonly pool: Pool) {}
+  constructor(
+    @Inject(MYSQL_POOL) private readonly pool: Pool,
+    @Optional() private readonly cache?: CacheService,
+  ) {}
 
-  // Counts only, no per-row data. Not cached: each statement is index-served
-  // and the global read rate limits bound abuse.
+  // Counts only, no per-row data. Cached in Redis when available (300s TTL).
   // A private community's figures are for its members (403 otherwise).
   async get(name: string, viewerId?: string): Promise<CommunityStatsDto> {
     const [communities] = await this.pool.execute<
@@ -103,6 +111,14 @@ export class CommunityStatsService {
     }
     assertReadableRow(community);
 
+    const cacheKey = `comm:stats:${community.id}`;
+    if (this.cache) {
+      const cached = await this.cache.get<CommunityStatsDto>(cacheKey);
+      if (cached) {
+        return cached;
+      }
+    }
+
     const [[members], [moderators], [posts], [comments]] = await Promise.all([
       this.pool.execute<CountRow[]>(MEMBER_COUNT_SQL, [community.id]),
       this.pool.execute<CountRow[]>(MODERATOR_COUNT_SQL, [
@@ -114,7 +130,7 @@ export class CommunityStatsService {
     ]);
     const lastPostAt = posts[0]?.last_post_at ?? null;
 
-    return {
+    const result: CommunityStatsDto = {
       member_count: Number(members[0]?.total ?? 0),
       moderator_count: Number(moderators[0]?.total ?? 0),
       post_count: Number(posts[0]?.total ?? 0),
@@ -125,5 +141,11 @@ export class CommunityStatsService {
       posts_last_7_days: Number(posts[0]?.recent ?? 0),
       comments_last_7_days: Number(comments[0]?.recent ?? 0),
     };
+
+    if (this.cache) {
+      void this.cache.set(cacheKey, result, { ttlSeconds: 300 });
+    }
+
+    return result;
   }
 }
