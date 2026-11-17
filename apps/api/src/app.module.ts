@@ -13,9 +13,13 @@ import { SearchModule } from './search/search.module';
 import { MediaModule } from './media/media.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { EmailModule } from './email/email.module';
+import { RedisModule } from './redis/redis.module';
+import { QueuesModule } from './queues/queues.module';
 
 @Module({
   imports: [
+    RedisModule,
+    QueuesModule,
     AuthModule,
     UsersModule,
     CommunitiesModule,

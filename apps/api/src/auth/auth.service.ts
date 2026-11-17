@@ -30,6 +30,9 @@ import { isSqlTrue } from '../common/community-moderation';
 import { readPositiveInteger } from '../common/read-positive-integer';
 import { EmailTransport } from '../email/email-transport';
 import { EmailDeliveryError } from '../email/smtp-email.transport';
+import { CacheService } from '../redis/redis.types';
+import { EmailQueueService } from '../queues/email-queue.service';
+import { RedisPubSubService } from '../redis/redis-pubsub.service';
 import type { ClientOrigin } from './client-origin';
 
 // SHA-256 of an opaque token: how every credential of this API is stored
@@ -236,6 +239,12 @@ export class AuthService {
     // Optional so the service also runs where nothing listens (tests).
     @Optional()
     private readonly sessionEvents: SessionEvents = new SessionEvents(),
+    @Optional()
+    private readonly cache?: CacheService,
+    @Optional()
+    private readonly emailQueue?: EmailQueueService,
+    @Optional()
+    private readonly pubsub?: RedisPubSubService,
   ) {}
 
   // Set by EmailVerificationService, which registration notifies: a new
@@ -396,12 +405,28 @@ export class AuthService {
   // (GET /notifications/stream) re-check theirs (SessionEvents).
   announceSessionsChanged(userId: string): void {
     this.sessionEvents.announce(userId);
+    if (this.pubsub) {
+      void this.pubsub.publish('system:sessions:changed', userId);
+    }
+    if (this.cache) {
+      void this.cache.delByPattern('session:*');
+    }
   }
 
   async validateAccessTokenState(
     token: string,
   ): Promise<AccessTokenValidationResult> {
     const tokenHash = this.hashToken(token);
+    const cacheKey = `session:${tokenHash}`;
+
+    if (this.cache) {
+      const cached =
+        await this.cache.get<AccessTokenValidationResult>(cacheKey);
+      if (cached) {
+        return cached;
+      }
+    }
+
     // A derived table, because the shared predicate's bare expires_at would be
     // ambiguous with auth_sessions.expires_at in the join's ON clause.
     const [sessions] = await this.pool.execute<SessionUserRow[]>(
@@ -458,14 +483,25 @@ export class AuthService {
       // Activity is best-effort telemetry; token validation has already succeeded.
     }
 
-    return {
+    const result: AccessTokenValidationResult = {
       kind: 'valid',
       userId,
       emailVerified: isSqlTrue(session.email_verified ?? 0),
     };
+
+    if (this.cache) {
+      void this.cache.set(cacheKey, result, { ttlSeconds: 300 });
+    }
+
+    return result;
   }
 
   async logout(token: string): Promise<void> {
+    const tokenHash = this.hashToken(token);
+    if (this.cache) {
+      void this.cache.del(`session:${tokenHash}`);
+    }
+
     const [sessions] = await this.pool.execute<
       (RowDataPacket & { session_id: string; user_id: string })[]
     >(
@@ -646,11 +682,16 @@ export class AuthService {
 
     try {
       // The stored address, never the submitted one.
-      await this.email.send({
+      const message = {
         to: account.email,
         subject: 'Reset your password',
         text: this.passwordResetEmailText(token),
-      });
+      };
+      if (this.emailQueue) {
+        await this.emailQueue.enqueue(message);
+      } else {
+        await this.email.send(message);
+      }
     } catch (error) {
       const code = error instanceof EmailDeliveryError ? error.code : undefined;
       this.logger.warn(

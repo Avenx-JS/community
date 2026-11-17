@@ -2,6 +2,7 @@ import {
   Inject,
   Injectable,
   Logger,
+  Optional,
   type OnModuleDestroy,
   type OnModuleInit,
 } from '@nestjs/common';
@@ -11,6 +12,7 @@ import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import type { Subscription } from 'rxjs';
 import { hashOpaqueToken, MYSQL_POOL } from '../auth/auth.service';
 import { SessionEvents } from '../auth/session-events';
+import { RedisPubSubService } from '../redis/redis-pubsub.service';
 import { ACTIVE_USER_RESTRICTION_PREDICATE } from '../common/active-user-restriction';
 import { readPositiveInteger } from '../common/read-positive-integer';
 import { eitherBlockedSql } from '../users/user-block-policy.service';
@@ -131,15 +133,39 @@ export class NotificationStreamService
     @Inject(MYSQL_POOL) private readonly pool: Pool,
     private readonly sessions: SessionEvents,
     private readonly inbox: NotificationInboxService,
+    @Optional() private readonly pubsub?: RedisPubSubService,
   ) {}
 
   onModuleInit(): void {
+    if (this.pubsub) {
+      void this.pubsub.subscribe<string>(
+        'system:sessions:changed',
+        (userId) => {
+          void this.revalidate(userId).catch(() => undefined);
+        },
+      );
+      void this.pubsub.subscribe<string>('system:unread:changed', (userId) => {
+        void this.refreshUnread(userId).catch(() => undefined);
+      });
+      void this.pubsub.subscribe<{ recipientId: string }>(
+        'system:notifications:created',
+        (data) => {
+          if (data?.recipientId && this.byUser.has(data.recipientId)) {
+            void this.poll();
+          }
+        },
+      );
+    }
+
     this.subscriptions.push(
       this.sessions.changed.subscribe((userId) => {
         void this.revalidate(userId).catch(() => undefined);
       }),
       this.inbox.unreadChanged.subscribe((userId) => {
         void this.refreshUnread(userId).catch(() => undefined);
+        if (this.pubsub) {
+          void this.pubsub.publish('system:unread:changed', userId);
+        }
       }),
     );
     const every = (ms: number, work: () => Promise<void> | void) => {

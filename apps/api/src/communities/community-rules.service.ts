@@ -4,6 +4,7 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -13,6 +14,7 @@ import type {
   RowDataPacket,
 } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
+import { CacheService } from '../redis/redis.types';
 import { CommunityRuleAcceptanceService } from './community-rule-acceptance.service';
 import { hashCommunityRules, CommunityRuleItem } from './community-rules-hash';
 import { ListRuleVersionsDto } from './dto/list-rule-versions.dto';
@@ -92,6 +94,7 @@ export class CommunityRulesService {
   constructor(
     @Inject(MYSQL_POOL) private readonly pool: Pool,
     private readonly acceptanceService: CommunityRuleAcceptanceService,
+    @Optional() private readonly cache?: CacheService,
   ) {}
 
   // The caller's own acceptance state. Requires no membership, so someone
@@ -159,9 +162,25 @@ export class CommunityRulesService {
   }
 
   async getCurrent(name: string): Promise<CommunityRulesDto> {
+    const cacheKey = `comm:rules:${name.toLowerCase()}`;
+    if (this.cache) {
+      const cached = await this.cache.get<CommunityRulesDto>(cacheKey);
+      if (cached) {
+        return cached;
+      }
+    }
+
     const community = await this.getCommunity(this.pool, name);
     const document = await this.getCurrentDocument(this.pool, community.id);
-    return document ? this.toRulesDto(this.pool, document) : { ...NO_RULES };
+    const result = document
+      ? await this.toRulesDto(this.pool, document)
+      : { ...NO_RULES };
+
+    if (this.cache) {
+      void this.cache.set(cacheKey, result, { ttlSeconds: 3600 });
+    }
+
+    return result;
   }
 
   async getVersion(name: string, version: number): Promise<CommunityRulesDto> {
@@ -291,6 +310,9 @@ export class CommunityRulesService {
       }
 
       await connection.commit();
+      if (this.cache) {
+        void this.cache.del(`comm:rules:${name.toLowerCase()}`);
+      }
       return {
         version,
         published_at: new Date(published[0].published_at).toISOString(),

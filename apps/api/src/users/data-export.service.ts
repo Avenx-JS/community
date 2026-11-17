@@ -7,6 +7,7 @@ import {
   NotFoundException,
   OnModuleDestroy,
   OnModuleInit,
+  Optional,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -18,6 +19,7 @@ import type {
 import { MYSQL_POOL } from '../auth/auth.service';
 import { readPositiveInteger } from '../common/read-positive-integer';
 import { UserPreferencesService } from './user-preferences.service';
+import { DataExportQueueService } from '../queues/data-export-queue.service';
 
 // Personal data exports (GET /users/me/export, migration 037): the
 // counterpart of DELETE /users/me. Built asynchronously, downloadable once,
@@ -164,9 +166,13 @@ export class DataExportService implements OnModuleInit, OnModuleDestroy {
   constructor(
     @Inject(MYSQL_POOL) private readonly pool: Pool,
     private readonly preferences: UserPreferencesService,
+    @Optional() private readonly exportQueue?: DataExportQueueService,
   ) {}
 
   onModuleInit(): void {
+    if (this.exportQueue) {
+      this.exportQueue.registerHandler((id, uid) => this.build(id, uid));
+    }
     this.timer = setInterval(() => {
       void this.sweep().catch(() => {
         this.logger.warn('Data export sweep failed');
@@ -207,9 +213,20 @@ export class DataExportService implements OnModuleInit, OnModuleDestroy {
         [id, userId],
       );
     });
-    setImmediate(() => {
-      void this.build(id, userId);
-    });
+
+    if (this.exportQueue) {
+      const enqueued = await this.exportQueue.enqueue(id, userId);
+      if (!enqueued) {
+        setImmediate(() => {
+          void this.build(id, userId);
+        });
+      }
+    } else {
+      setImmediate(() => {
+        void this.build(id, userId);
+      });
+    }
+
     return this.status(userId, id);
   }
 

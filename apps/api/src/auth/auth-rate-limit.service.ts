@@ -1,8 +1,9 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { createHmac } from 'node:crypto';
 import type { Pool, RowDataPacket } from 'mysql2/promise';
 import { readPositiveInteger } from '../common/read-positive-integer';
 import { MYSQL_POOL } from './auth.service';
+import { RateLimiterStore } from '../redis/redis.types';
 
 export interface RateLimitSignal {
   scope: string;
@@ -135,7 +136,10 @@ export class AuthRateLimitService {
   private readonly config = readConfig();
   private readonly hashSecret: string;
 
-  constructor(@Inject(MYSQL_POOL) private readonly pool: Pool) {
+  constructor(
+    @Inject(MYSQL_POOL) private readonly pool: Pool,
+    @Optional() private readonly rateLimiterStore?: RateLimiterStore,
+  ) {
     const secret =
       process.env.RATE_LIMIT_HASH_SECRET ?? process.env.MYSQL_PASSWORD;
     if (!secret && process.env.NODE_ENV === 'production') {
@@ -396,6 +400,16 @@ export class AuthRateLimitService {
   private async consume(signal: RateLimitSignal): Promise<number | null> {
     const windowSeconds = signal.windowSeconds;
     const bucketKey = this.hashSignal(signal.scope, signal.value);
+
+    if (this.rateLimiterStore) {
+      const result = await this.rateLimiterStore.incrementAndCheck(
+        bucketKey,
+        signal.limit,
+        windowSeconds,
+      );
+      return result.allowed ? null : (result.retryAfterSeconds ?? 1);
+    }
+
     await this.pool.execute(
       `INSERT INTO auth_rate_limits (bucket_key, window_started_at, request_count)
        VALUES (?, UTC_TIMESTAMP(), 1)
