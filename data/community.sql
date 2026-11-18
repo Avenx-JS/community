@@ -186,7 +186,8 @@ CREATE TABLE community_moderation_actions (
         'moderator_invite_declined',
         'join_request_approved',
         'join_request_denied',
-        'ownership_transferred'
+        'ownership_transferred',
+        'moderator_left'
     ) NOT NULL,
     target_type ENUM('post', 'comment', 'user', 'rule_document', 'community') NOT NULL,
     target_id VARCHAR(36) NOT NULL,
@@ -447,7 +448,8 @@ CREATE TABLE notifications (
         'restriction_applied',
         'restriction_lifted',
         'content_removed',
-        'community_ownership_transferred'
+        'community_ownership_transferred',
+        'community_moderator_left'
     ) NOT NULL,
     actor_id VARCHAR(36) NULL,
     subject_type ENUM('post', 'comment', 'report', 'restriction', 'community') NOT NULL,
@@ -997,6 +999,10 @@ ALTER TABLE votes
 -- Its two enum members are in CREATE TABLE community_moderation_actions and
 -- CREATE TABLE notifications above; it adds nothing else.
 
+-- A moderator stepping down (043_add_moderator_step_down).
+-- Its two enum members are in CREATE TABLE community_moderation_actions and
+-- CREATE TABLE notifications above; it adds nothing else.
+
 CREATE TABLE schema_migrations (
     version VARCHAR(64) PRIMARY KEY,
     applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -1045,4 +1051,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('039_add_content_labels_and_history'),
     ('040_add_live_notifications'),
     ('041_add_admin_content_and_roles'),
-    ('042_add_community_ownership_transfer');
+    ('042_add_community_ownership_transfer'),
+    ('043_add_moderator_step_down');

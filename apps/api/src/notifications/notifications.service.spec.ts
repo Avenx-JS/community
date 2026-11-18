@@ -118,6 +118,15 @@ const entries = {
     communityId: 'community-1',
     metadata: { actor_username: 'founder', community_name: 'garden' },
   },
+  community_moderator_left: {
+    recipientId: 'founder',
+    type: 'community_moderator_left',
+    actorId: 'former-mod',
+    subjectType: 'community',
+    subjectId: 'community-1',
+    communityId: 'community-1',
+    metadata: { actor_username: 'former_mod', community_name: 'garden' },
+  },
 } satisfies Record<NotificationEntry['type'], NotificationEntry>;
 
 const memberPost = (recipientId: string): typeof entries.community_post => ({

@@ -9,6 +9,8 @@ export const NOTIFICATION_TYPES = [
   'content_removed',
   // Migration 042: a community's creator made the recipient its owner.
   'community_ownership_transferred',
+  // Migration 043: a moderator of the recipient's community stepped down.
+  'community_moderator_left',
 ] as const;
 
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
@@ -121,9 +123,11 @@ export type NotificationEntry =
     }
   // Not a moderation type: the former owner is named, since the new owner
   // has to know whom they took the community over from.
+  // Sent to the creator; the former moderator is named, as they chose to
+  // leave and the creator has to know who did.
   | {
       recipientId: string;
-      type: 'community_ownership_transferred';
+      type: 'community_ownership_transferred' | 'community_moderator_left';
       actorId: string;
       subjectType: 'community';
       subjectId: string;
@@ -178,6 +182,11 @@ const entryShapes: Record<
     hasCommunity: true,
   },
   community_ownership_transferred: {
+    subjectTypes: ['community'],
+    hasActor: true,
+    hasCommunity: true,
+  },
+  community_moderator_left: {
     subjectTypes: ['community'],
     hasActor: true,
     hasCommunity: true,
@@ -379,6 +388,7 @@ export function buildNotificationMetadata(
       );
       break;
     case 'community_ownership_transferred':
+    case 'community_moderator_left':
       fields.push(
         ['actor_username', nameValue(metadata, 'actor_username')],
         ['community_name', nameValue(metadata, 'community_name')],

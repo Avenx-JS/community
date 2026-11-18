@@ -55,6 +55,9 @@ export const COMMUNITY_MODERATION_ACTIONS = [
   // The creator handing the community to one of its moderators (migration
   // 042); the target is the new owner.
   'ownership_transferred',
+  // A moderator stepping down on their own (migration 043): actor and target
+  // are the same account. moderator_removed stays the creator's decision.
+  'moderator_left',
 ] as const;
 
 export type CommunityModerationAction =
@@ -123,7 +126,8 @@ export type CommunityModerationEntry =
         | 'moderator_invite_declined'
         | 'join_request_approved'
         | 'join_request_denied'
-        | 'ownership_transferred';
+        | 'ownership_transferred'
+        | 'moderator_left';
       targetType: 'user';
       metadata?: { username?: string };
     })
@@ -379,6 +383,7 @@ export function buildCommunityModerationMetadata(
     case 'join_request_approved':
     case 'join_request_denied':
     case 'ownership_transferred':
+    case 'moderator_left':
       keep('username', usernameValue(metadata));
       break;
     case 'rules_published':

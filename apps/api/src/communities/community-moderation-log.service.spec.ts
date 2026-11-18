@@ -327,6 +327,18 @@ describe('CommunityModerationLogService', () => {
         },
         { username: 'sam_42' },
       ],
+      // Migration 043: the moderator who stepped down, by username; actor
+      // and target are the same account.
+      [
+        {
+          ...base,
+          action: 'moderator_left',
+          targetType: 'user',
+          targetId: 'user-2',
+          metadata: { username: 'sam_42' },
+        },
+        { username: 'sam_42' },
+      ],
       // Migration 042: the new owner, by username; the actor column names
       // the former owner.
       [

@@ -9,6 +9,14 @@ const normalise = (sql: string) => sql.replace(/\s+/g, ' ').trim();
 const enumList = (values: readonly string[]) =>
   values.map((value) => `'${value}'`).join(', ');
 
+// The enums as 042 left them: 043 appended one member to each.
+const ACTIONS_THROUGH_042 = COMMUNITY_MODERATION_ACTIONS.filter(
+  (action) => action !== 'moderator_left',
+);
+const TYPES_THROUGH_042 = NOTIFICATION_TYPES.filter(
+  (type) => type !== 'community_moderator_left',
+);
+
 describe('migration 042 (community ownership transfer)', () => {
   const file = read(
     '../../../../data/migrations/042_add_community_ownership_transfer.sql',
@@ -20,12 +28,12 @@ describe('migration 042 (community ownership transfer)', () => {
   it('only appends one member to each enum', () => {
     expect(migration).toBe(
       'ALTER TABLE community_moderation_actions ' +
-        `MODIFY COLUMN action ENUM( ${enumList(COMMUNITY_MODERATION_ACTIONS)} ) NOT NULL; ` +
+        `MODIFY COLUMN action ENUM( ${enumList(ACTIONS_THROUGH_042)} ) NOT NULL; ` +
         'ALTER TABLE notifications ' +
-        `MODIFY COLUMN type ENUM( ${enumList(NOTIFICATION_TYPES)} ) NOT NULL;`,
+        `MODIFY COLUMN type ENUM( ${enumList(TYPES_THROUGH_042)} ) NOT NULL;`,
     );
-    expect(COMMUNITY_MODERATION_ACTIONS.at(-1)).toBe('ownership_transferred');
-    expect(NOTIFICATION_TYPES.at(-1)).toBe('community_ownership_transferred');
+    expect(ACTIONS_THROUGH_042.at(-1)).toBe('ownership_transferred');
+    expect(TYPES_THROUGH_042.at(-1)).toBe('community_ownership_transferred');
   });
 
   // As for 025, 031, 038 and 041, the members are folded into the snapshot's
@@ -41,7 +49,7 @@ describe('migration 042 (community ownership transfer)', () => {
       '-- Community ownership transfer (042_add_community_ownership_transfer).',
     );
     expect(snapshot).toContain(
-      "('041_add_admin_content_and_roles'), ('042_add_community_ownership_transfer');",
+      "('041_add_admin_content_and_roles'), ('042_add_community_ownership_transfer'),",
     );
   });
 

@@ -284,6 +284,14 @@ describe('assertNotificationEntry', () => {
   });
 });
 
+// Appended after migration 010, in order: 042, 043.
+const APPENDED_TYPES = [
+  'community_ownership_transferred',
+  'community_moderator_left',
+];
+const read = (path: string) =>
+  readFileSync(resolve(__dirname, path), 'utf8').replace(/\s+/g, ' ');
+
 describe('notification enums', () => {
   it('match the notifications table definition in migration 010', () => {
     const migration = readFileSync(
@@ -302,25 +310,33 @@ describe('notification enums', () => {
       );
     };
 
-    // Migration 042 appended community_ownership_transferred, last.
-    expect(enumValues('type')).toEqual(NOTIFICATION_TYPES.slice(0, -1));
-    expect(NOTIFICATION_TYPES.slice(-1)).toEqual([
-      'community_ownership_transferred',
-    ]);
+    // Later migrations append, last: 042, then 043.
+    expect(enumValues('type')).toEqual(
+      NOTIFICATION_TYPES.filter((type) => !APPENDED_TYPES.includes(type)),
+    );
+    expect(NOTIFICATION_TYPES.slice(-APPENDED_TYPES.length)).toEqual(
+      APPENDED_TYPES,
+    );
     expect(enumValues('subject_type')).toEqual([...NOTIFICATION_SUBJECT_TYPES]);
   });
 
-  it('match migration 042 and the snapshot, appended only', () => {
-    const read = (path: string) =>
-      readFileSync(resolve(__dirname, path), 'utf8').replace(/\s+/g, ' ');
-    const list = NOTIFICATION_TYPES.map((type) => `'${type}'`).join(', ');
-    expect(
-      read(
-        '../../../../data/migrations/042_add_community_ownership_transfer.sql',
-      ),
-    ).toContain(
+  it.each([
+    ['042_add_community_ownership_transfer', 1],
+    ['043_add_moderator_step_down', 2],
+  ])('match migration %s, appended only', (migration, appended) => {
+    const list = NOTIFICATION_TYPES.slice(
+      0,
+      NOTIFICATION_TYPES.length - APPENDED_TYPES.length + appended,
+    )
+      .map((type) => `'${type}'`)
+      .join(', ');
+    expect(read(`../../../../data/migrations/${migration}.sql`)).toContain(
       `ALTER TABLE notifications MODIFY COLUMN type ENUM( ${list} ) NOT NULL;`,
     );
+  });
+
+  it('match the snapshot', () => {
+    const list = NOTIFICATION_TYPES.map((type) => `'${type}'`).join(', ');
     expect(read('../../../../data/community.sql')).toContain(
       `type ENUM( ${list} ) NOT NULL`,
     );

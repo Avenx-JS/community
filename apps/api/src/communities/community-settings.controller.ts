@@ -20,6 +20,7 @@ import {
   ApiOperation,
   ApiTags,
 } from '@nestjs/swagger';
+import { AllowRestricted } from '../auth/allow-restricted.decorator';
 import { AuthGuard, type AuthenticatedRequest } from '../auth/auth.guard';
 import {
   OptionalAuthGuard,
@@ -251,6 +252,38 @@ export class CommunitySettingsController {
     @Req() request: AuthenticatedRequest,
   ): Promise<void> {
     return this.invites.accept(community, request.user.id);
+  }
+
+  // The reverse of accepting an invitation, by the one who accepted it.
+  @Delete('moderators/me')
+  @UseGuards(AuthGuard)
+  @AllowRestricted()
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary: 'Step down as a moderator',
+    description:
+      'The caller gives up their moderator role, without the creator. ' +
+      'Idempotent: 204 also when the caller is not a moderator. Works while ' +
+      'the caller is suspended or banned from the platform, and while banned ' +
+      'from the community. Moderator powers (modqueue, reports, bans, ' +
+      'settings, the moderation log) end with the request. Logged as ' +
+      'moderator_left and notified to the creator ' +
+      '(community_moderator_left). The creator gets 409: transfer the ' +
+      'community (POST /communities/{name}/transfer) or delete it instead.',
+  })
+  @ApiAuthenticated({ allowRestricted: true })
+  @ApiRouteParam('name', 'communityName', 'Exact community name.')
+  @ApiNoContentResponse({ description: 'The caller is not a moderator.' })
+  @ApiErrorResponses({
+    400: 'Invalid community name.',
+    404: 'Community not found, deleted or suspended.',
+    409: 'The caller is the community creator.',
+  })
+  stepDown(
+    @Param('name', name()) community: string,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<void> {
+    return this.invites.stepDown(community, request.user.id);
   }
 
   @Delete('moderators/invites')

@@ -495,7 +495,9 @@ export class CommunitiesController {
     description:
       'Only the community creator may remove. Idempotent; a removal is ' +
       'logged as moderator_removed. Moderators are added only by accepting ' +
-      'an invitation (POST /communities/{name}/moderators/invites).',
+      'an invitation (POST /communities/{name}/moderators/invites). A ' +
+      'moderator steps down on their own with DELETE ' +
+      '/communities/{name}/moderators/me.',
   })
   @ApiAuthenticated({ forbidden: 'The caller is not the community creator.' })
   @ApiRouteParam('name', 'communityName', 'Exact community name.')

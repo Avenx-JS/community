@@ -14,6 +14,7 @@ import type {
 } from 'mysql2/promise';
 import { MYSQL_POOL } from '../auth/auth.service';
 import { visibleCommunityColumnsSql } from '../common/community-visibility';
+import { NotificationsService } from '../notifications/notifications.service';
 import { CommunityBanPolicyService } from './community-ban-policy.service';
 import {
   inTransaction,
@@ -61,6 +62,14 @@ export const DELETE_MODERATOR_INVITE_SQL =
 export const INSERT_MODERATOR_SQL =
   'INSERT INTO community_moderators (community_id, user_id, assigned_by) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE user_id = user_id';
 
+// A moderator stepping down. Values: community id, account id.
+export const LEAVE_MODERATION_SQL =
+  'DELETE FROM community_moderators WHERE community_id = ? AND user_id = ?';
+export const MODERATOR_USERNAME_SQL =
+  'SELECT username FROM users WHERE id = ? LIMIT 1';
+export const CREATOR_CANNOT_LEAVE_MESSAGE =
+  'The creator cannot step down: transfer the community (POST /communities/{name}/transfer) or delete it';
+
 // The caller's invitations, newest first, to communities still there.
 // Values: the caller.
 export const OWN_MODERATOR_INVITES_FROM = `FROM community_moderator_invites i
@@ -74,13 +83,16 @@ export const OWN_MODERATOR_INVITES_FROM = `FROM community_moderator_invites i
 @Injectable()
 export class CommunityModeratorInvitesService {
   private readonly bans: CommunityBanPolicyService;
+  private readonly notifications: NotificationsService;
 
   constructor(
     @Inject(MYSQL_POOL) private readonly pool: Pool,
     private readonly moderationLog: CommunityModerationLogService,
     @Optional() bans?: CommunityBanPolicyService,
+    @Optional() notifications?: NotificationsService,
   ) {
     this.bans = bans ?? new CommunityBanPolicyService(pool);
+    this.notifications = notifications ?? new NotificationsService(pool);
   }
 
   // Creator only. The invitee must be a subscribed member, not banned, and
@@ -195,6 +207,58 @@ export class CommunityModeratorInvitesService {
           metadata: target.username ? { username: target.username } : {},
         });
       }
+    });
+  }
+
+  // The reverse of accept: whoever accepted the role may give it up, without
+  // the creator. Idempotent: a caller who is not a moderator gets the same
+  // success and nothing is written. The creator is refused (409): ownership is
+  // not a community_moderators row, and leaving would orphan the community.
+  // Allowed while platform-restricted (the route is @AllowRestricted), and
+  // in spite of a community ban: giving up a power must never be blocked.
+  // Locks the community row, as the creator's removal and a transfer do, so
+  // the three serialise. Powers end at once: every moderator check reads
+  // community_moderators per request. Community reports are not assigned to
+  // moderators (only platform administrators hold assignments), so there is
+  // nothing to release; decisions the moderator already made keep their
+  // community_reviewed_by.
+  async stepDown(name: string, userId: string): Promise<void> {
+    await inTransaction(this.pool, async (connection) => {
+      const community = await readCommunityRole(connection, name, userId, true);
+      if (community.creator_id === userId) {
+        throw new ConflictException(CREATOR_CANNOT_LEAVE_MESSAGE);
+      }
+      const [result] = await connection.execute<ResultSetHeader>(
+        LEAVE_MODERATION_SQL,
+        [community.id, userId],
+      );
+      if (result.affectedRows === 0) {
+        return;
+      }
+      const [users] = await connection.execute<
+        (RowDataPacket & { username: string })[]
+      >(MODERATOR_USERNAME_SQL, [userId]);
+      const username = users[0]?.username;
+      await this.moderationLog.record(connection, {
+        actorId: userId,
+        communityId: community.id,
+        action: 'moderator_left',
+        targetType: 'user',
+        targetId: userId,
+        metadata: username ? { username } : {},
+      });
+      await this.notifications.record(connection, {
+        recipientId: community.creator_id,
+        type: 'community_moderator_left',
+        actorId: userId,
+        subjectType: 'community',
+        subjectId: community.id,
+        communityId: community.id,
+        metadata: {
+          ...(username ? { actor_username: username } : {}),
+          community_name: community.name,
+        },
+      });
     });
   }
 

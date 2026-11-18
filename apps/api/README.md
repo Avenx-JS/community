@@ -3472,6 +3472,34 @@ Nobody becomes a moderator without consent. **Breaking change:**
 | `POST /communities/:name/moderators/invites/accept` | the invitee | becomes a moderator; the invitation is consumed |
 | `DELETE /communities/:name/moderators/invites` | the invitee | declines |
 | `DELETE /communities/:name/moderators/invites?username=` | creator | revokes |
+| `DELETE /communities/:name/moderators/me` | a moderator | steps down (see below) |
+
+**Stepping down.** Accepting the role is reversible by the one who accepted
+it, without the creator: `DELETE /communities/:name/moderators/me` (migration
+`043_add_moderator_step_down`).
+- `204`, idempotent: a caller who is not a moderator gets `204` too and
+  nothing is written, as with the creator's removal route.
+- **The creator gets `409`**, pointing at
+  [`POST /communities/:name/transfer`](#transferring-ownership) or deletion:
+  ownership is not a `community_moderators` row, and leaving would orphan the
+  community.
+- Open to platform-suspended and banned accounts (`@AllowRestricted`), and
+  to accounts banned from the community: giving up a power is never blocked.
+- Locks the community row, as the creator's removal and a transfer do, so
+  the three cannot interleave.
+- Logged as `moderator_left` (actor and target: the moderator). A distinct
+  action rather than `moderator_removed` with the moderator as actor: the
+  log reads "left" or "removed" without comparing two columns.
+- The creator is notified (`community_moderator_left`, naming the former
+  moderator).
+- Every moderator power (modqueue, community reports, bans, settings, the
+  moderation log) ends with the request: each check reads
+  `community_moderators` per request, and nothing is cached.
+- Nothing to release: community-level reports are not assigned to anyone
+  (`user_reports.assigned_to` is the platform administrators' assignment).
+  Decisions the moderator already made keep their `community_reviewed_by`.
+- `404` for a community that is unknown, deleted or suspended; in a
+  suspended community moderators hold no powers anyway.
 
 #### Flairs
 
@@ -3522,6 +3550,7 @@ the change:
 | `moderator_removed` | `DELETE .../moderators`, only when one was removed | `username` |
 | `join_request_approved`, `join_request_denied` | decisions | `username` |
 | `ownership_transferred` | [`POST .../transfer`](#transferring-ownership) (actor: the former owner) | `username` of the new owner |
+| `moderator_left` | `DELETE .../moderators/me` (actor and target: the moderator) | `username` |
 
 An account deletion removes the account's join requests, invitations, user
 flairs and mutes; the data export includes them (who decided a request is
@@ -3887,7 +3916,8 @@ the direct appointment route was removed. The creator removes a moderator with
 return `404`, and non-creator attempts return `403`. The actor identity comes
 only from the validated bearer token; request data cannot set a role or actor
 ID. The creator cannot delegate moderator management, and moderators cannot
-invite other moderators. Publishing
+invite other moderators; a moderator may
+[step down](#moderator-invitations) on their own. Publishing
 community rules is likewise creator-only (see [Rules API](#rules-api)). The
 creator may hand the role on to a moderator
 ([Transferring ownership](#transferring-ownership)).
@@ -6801,6 +6831,7 @@ the triggering `subject_type`/`subject_id`, an optional `community_id`, a
 | `restriction_lifted`  | the recipient's restriction is lifted (`AdminRestrictionsService`)                                    | the restriction             |
 | `content_removed`     | a moderator removes the recipient's post or comment (`PostsService.removeContent`, `CommentRemovalService.remove`) | the removed post or comment |
 | `community_ownership_transferred` | the creator makes the recipient the community's owner (`CommunitiesService.transferOwnership`, migration 042) | the community |
+| `community_moderator_left` | a moderator of the recipient's community steps down (`CommunityModeratorInvitesService.stepDown`, migration 043) | the community |
 
 Adding a type requires a migration, as for the other enums.
 
@@ -6840,6 +6871,7 @@ does for the audit log. Allowed keys depend on the type:
 | `restriction_lifted`  | `restriction_type`                        | none                                                    |
 | `content_removed`     | none                                      | `community_name`, `post_title`, `excerpt`; never a name |
 | `community_ownership_transferred` | none                       | `actor_username` (the former owner), `community_name` |
+| `community_moderator_left` | none                              | `actor_username` (the former moderator), `community_name` |
 
 "Required" is enforced by the `NotificationEntry` type; at runtime the
 allowlist validates whichever allowed keys are present.

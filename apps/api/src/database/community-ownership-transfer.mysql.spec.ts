@@ -34,9 +34,17 @@ const snapshot = readFileSync(
   'utf8',
 ).replace(/^CREATE DATABASE[^;]*;\s*USE community;/, '');
 
-// The snapshot with 042 undone: its header, its version and the two enum
-// members it folded into CREATE TABLE.
+// The snapshot with 042 and everything after it undone: each one's header,
+// version and the enum members it folded into CREATE TABLE. The runner then
+// applies 042 and 043 in order.
 const preceding = snapshot
+  .replace(
+    /-- A moderator stepping down \(043_add_moderator_step_down\)\.\r?\n(?:--[^\n]*\r?\n)*\r?\n/,
+    '',
+  )
+  .replace(/,\r?\n\s*\('043_add_moderator_step_down'\)/, '')
+  .replace(/,\r?\n\s*'moderator_left'/, '')
+  .replace(/,\r?\n\s*'community_moderator_left'/, '')
   .replace(
     /-- Community ownership transfer \(042_add_community_ownership_transfer\)\.\r?\n(?:--[^\n]*\r?\n)*\r?\n/,
     '',
@@ -85,7 +93,7 @@ integration('community ownership transfer (MySQL)', () => {
     );
 
   beforeAll(async () => {
-    expect(preceding).not.toMatch(/ownership_transferred/);
+    expect(preceding).not.toMatch(/ownership_transferred|moderator_left/);
     connection = await createConnection({
       ...credentials,
       multipleStatements: true,
