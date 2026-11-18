@@ -411,6 +411,8 @@ Only the following metadata keys may be recorded:
 | `post_restored`         | `post`        | `community_name`, `previous_state`, `reason` |
 | `comment_removed`       | `comment`     | `community_name`, `previous_state`, `reason` |
 | `comment_restored`      | `comment`     | `community_name`, `previous_state`, `reason` |
+| `community_owner_changed` | `community` | `community_name`, `username`, `previous_owner_username`, `reason` |
+| `community_moderator_added`, `community_moderator_removed` | `community` | `community_name`, `username`, `reason` |
 
 The three `community_*` actions and the `community` target were added by
 migration `025_add_community_suspension`, so the community-administration
@@ -449,8 +451,8 @@ The service builds metadata from this allowlist and drops extra runtime keys
 non-object metadata value, throws). Passwords and hashes, tokens, session
 identifiers, email addresses, and free text such as `lift_reason` or
 `resolution_note` are never copied to audit metadata; the only free text
-allowed is `reason` on `community_suspended`, `user_role_changed` and the
-four content actions, and `restore_reason` on `community_restored`: in each
+allowed is `reason` on `community_suspended`, `user_role_changed`, the
+four content actions and the three community staff actions, and `restore_reason` on `community_restored`: in each
 case the administrator's own justification, required by the route. A content
 action never copies the content or the moderator's `removal_reason`.
 
@@ -1157,6 +1159,64 @@ their posts created in the range; `suspended_communities`;
 `new_communities` series. `meta.scopes` marks point-in-time and range figures.
 A distribution rather than a ranking: listing the smallest communities would
 point at their few members.
+
+### Admin community owner and moderators
+
+Migration `044_add_admin_community_ownership`. Every owner-only route
+(moderators, invitations, rules, settings, deletion, transfer) checks
+`communities.creator_id`, so a community whose owner is banned, deleted or
+simply gone could not be run by anyone. These routes are the platform's
+recovery tool; by id, for every community but a deleted one (`409`),
+suspended ones included.
+
+| Route | Body | Success |
+| --- | --- | --- |
+| `POST /admin/communities/:id/owner` | `{ "username", "reason" }` | `200`, the [community detail](#admin-community-directory) |
+| `POST /admin/communities/:id/moderators` | `{ "username", "reason" }` | `204`, idempotent |
+| `DELETE /admin/communities/:id/moderators/:username` | `{ "reason" }` | `204`, idempotent |
+
+`AuthGuard` and `AdminGuard` with an explicit `@RequiresRole('admin')`:
+`401` without a token, `403` for anyone else, platform moderators included;
+`404` for an unknown community. `reason` is required: plain text, 1-2,000
+characters, trimmed, as for a community suspension.
+
+**The account** (owner or moderator) must be active (`404` if unknown or
+deleted), not suspended or banned from the platform, and not banned from the
+community (`409`); `409` too if it already owns the community.
+
+**Reassigning the owner.** Unlike the creator's own
+[transfer](#transferring-ownership), the new owner need not be a moderator:
+the administrator is the authority. **Prefer an existing moderator**, who
+accepted responsibility for the community, over a stranger. In one
+transaction on the locked community row:
+- `creator_id` becomes the new owner; their own moderator row and any pending
+  invitation of theirs are dropped;
+- the previous owner becomes a moderator (`assigned_by` the administrator),
+  unless deleted or banned from the platform: then they get no row;
+- one audit entry and one moderation-log entry (below), both with the reason;
+- the new owner is notified (`community_ownership_assigned`), and the
+  previous one unless deleted (`community_ownership_revoked`).
+
+**Adding a moderator** skips the invitation: the account becomes a moderator
+at once (`assigned_by` the administrator), a pending invitation of theirs is
+consumed, and they are notified (`community_moderator_assigned`). An existing
+moderator is a `204` that records nothing.
+
+**Removing a moderator**: an account that is not one is a `204` that records
+nothing; a deleted account can be removed too, to clear it out. The owner
+cannot be removed this way (`409`): reassign the owner instead. No
+notification, as for the creator's own removal.
+
+**Both logs.** Each change is a `community_owner_changed`,
+`community_moderator_added` or `community_moderator_removed` entry in the
+[audit log](#administrative-action-audit-log), and an `admin_owner_changed`,
+`admin_moderator_added` or `admin_moderator_removed` entry in the community's
+own [moderation log](#community-moderation-log), with the administrator as
+the actor and `username` and `reason` as metadata. Distinct actions rather
+than `ownership_transferred` or `moderator_removed`: the moderators reading
+their log see that the platform stepped in, who did, and why. The
+notifications never name the administrator or carry the reason (they are
+moderation types).
 
 ### Admin report queue
 
@@ -3551,6 +3611,7 @@ the change:
 | `join_request_approved`, `join_request_denied` | decisions | `username` |
 | `ownership_transferred` | [`POST .../transfer`](#transferring-ownership) (actor: the former owner) | `username` of the new owner |
 | `moderator_left` | `DELETE .../moderators/me` (actor and target: the moderator) | `username` |
+| `admin_owner_changed`, `admin_moderator_added`, `admin_moderator_removed` | a platform administrator, [`/admin/communities/:id/owner` and `/moderators`](#admin-community-owner-and-moderators) (actor: the administrator) | `username`, `reason` |
 
 An account deletion removes the account's join requests, invitations, user
 flairs and mutes; the data export includes them (who decided a request is
@@ -4005,8 +4066,9 @@ the former owner can delete their account. Deletion is an anonymisation, never
 a hard delete: `communities.creator_id` is `ON DELETE CASCADE`, but no code
 path deletes a `users` row, so neither the transferred community nor the
 former owner's moderator row (`assigned_by` is `ON DELETE CASCADE` too) is
-ever deleted with an account. A platform-administrator fallback for
-communities whose owner is gone is separate work.
+ever deleted with an account. A community whose owner is gone is recovered
+by a platform administrator
+([`POST /admin/communities/:id/owner`](#admin-community-owner-and-moderators)).
 
 #### Moderator and member lists
 
@@ -6832,6 +6894,7 @@ the triggering `subject_type`/`subject_id`, an optional `community_id`, a
 | `content_removed`     | a moderator removes the recipient's post or comment (`PostsService.removeContent`, `CommentRemovalService.remove`) | the removed post or comment |
 | `community_ownership_transferred` | the creator makes the recipient the community's owner (`CommunitiesService.transferOwnership`, migration 042) | the community |
 | `community_moderator_left` | a moderator of the recipient's community steps down (`CommunityModeratorInvitesService.stepDown`, migration 043) | the community |
+| `community_ownership_assigned`, `community_ownership_revoked`, `community_moderator_assigned` | a platform administrator makes the recipient a community's owner, replaces them as owner, or makes them a moderator (`AdminCommunityStaffService`, migration 044) | the community |
 
 Adding a type requires a migration, as for the other enums.
 
@@ -6872,6 +6935,7 @@ does for the audit log. Allowed keys depend on the type:
 | `content_removed`     | none                                      | `community_name`, `post_title`, `excerpt`; never a name |
 | `community_ownership_transferred` | none                       | `actor_username` (the former owner), `community_name` |
 | `community_moderator_left` | none                              | `actor_username` (the former moderator), `community_name` |
+| `community_ownership_assigned`, `community_ownership_revoked`, `community_moderator_assigned` | none | `community_name`; never the administrator or the reason |
 
 "Required" is enforced by the `NotificationEntry` type; at runtime the
 allowlist validates whichever allowed keys are present.
@@ -7065,6 +7129,7 @@ it.
 | A suspension or ban is applied                             | `AdminRestrictionsService.apply`                | the restricted user  | `restriction_applied` | the restriction             | `restriction_type`, plus `expires_at` for a suspension |
 | A restriction is lifted                                    | `AdminRestrictionsService.lift`                 | the user             | `restriction_lifted`  | the restriction             | `restriction_type` only                                |
 | A community moderator or creator removes someone's content | `PostsService.removeContent`, `CommentRemovalService.remove` | the content's author | `content_removed`     | the removed post or comment | `post_title` for a post, `excerpt` for a comment; never `removal_reason` |
+| A platform administrator changes a community's owner or adds a moderator | `AdminCommunityStaffService` | the new owner, the previous owner, the new moderator | `community_ownership_assigned`, `community_ownership_revoked`, `community_moderator_assigned` | the community | `community_name` only; never the administrator or the reason |
 
 - **Reports.** `{ status }` answers "was my report acted on?" and nothing more.
   The notification never carries `resolution` (it describes what happened to

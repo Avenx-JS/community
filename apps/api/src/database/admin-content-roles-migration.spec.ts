@@ -5,6 +5,11 @@ import {
   ADMIN_ACTIONS,
   ADMIN_ACTION_TARGETS,
 } from '../admin/audit-log.service';
+import {
+  ADMIN_ACTION_ADDITIONS,
+  appendedBy,
+  enumThrough,
+} from './enum-history';
 
 const read = (path: string) => readFileSync(resolve(__dirname, path), 'utf8');
 const normalise = (sql: string) => sql.replace(/\s+/g, ' ').trim();
@@ -40,15 +45,14 @@ describe('migration 041 (admin content and roles)', () => {
 
   // Appending keeps every stored value's meaning (see migration 025).
   it('appends the content actions and targets, in the order of the constants', () => {
-    expect(ADMIN_ACTIONS.slice(-4)).toEqual([
-      'post_removed',
-      'post_restored',
-      'comment_removed',
-      'comment_restored',
-    ]);
+    // The actions as 041 left them; later migrations append (enum-history.ts).
+    const actions = enumThrough(ADMIN_ACTIONS, ADMIN_ACTION_ADDITIONS, '041');
+    expect(actions.slice(-4)).toEqual(
+      appendedBy(ADMIN_ACTION_ADDITIONS, '041'),
+    );
     expect(ADMIN_ACTION_TARGETS.slice(-2)).toEqual(['post', 'comment']);
     expect(enums).toBe(
-      `MODIFY COLUMN action ENUM( ${enumList(ADMIN_ACTIONS)} ) NOT NULL, ` +
+      `MODIFY COLUMN action ENUM( ${enumList(actions)} ) NOT NULL, ` +
         `MODIFY COLUMN target_type ENUM(${enumList(ADMIN_ACTION_TARGETS)}) NOT NULL;`,
     );
   });

@@ -97,7 +97,7 @@ describe('AdminGuard', () => {
 
     await expect(
       guard.canActivate(
-        contextFor({ id: 'moderator-id' }, RoleRequirementProbe),
+        contextFor({ id: 'moderator-id' }, undefined, RoleRequirementProbe),
       ),
     ).resolves.toBe(true);
   });

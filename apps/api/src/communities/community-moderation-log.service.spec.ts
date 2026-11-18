@@ -327,6 +327,24 @@ describe('CommunityModerationLogService', () => {
         },
         { username: 'sam_42' },
       ],
+      // Migration 044: a platform administrator acting on the community's
+      // people, with the reason moderators may read.
+      ...(
+        [
+          'admin_owner_changed',
+          'admin_moderator_added',
+          'admin_moderator_removed',
+        ] as const
+      ).map((action): [CommunityModerationEntry, Record<string, unknown>] => [
+        {
+          ...base,
+          action,
+          targetType: 'user',
+          targetId: 'user-2',
+          metadata: { username: 'sam_42', reason: 'Owner banned' },
+        },
+        { username: 'sam_42', reason: 'Owner banned' },
+      ]),
       // Migration 043: the moderator who stepped down, by username; actor
       // and target are the same account.
       [

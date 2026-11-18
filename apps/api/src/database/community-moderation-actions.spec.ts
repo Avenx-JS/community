@@ -5,6 +5,11 @@ import {
   COMMUNITY_MODERATION_ACTIONS,
   COMMUNITY_MODERATION_TARGETS,
 } from '../communities/community-moderation-log.service';
+import {
+  appendedBy,
+  COMMUNITY_MODERATION_ACTION_ADDITIONS,
+  enumThrough,
+} from './enum-history';
 
 const read = (path: string) => readFileSync(resolve(__dirname, path), 'utf8');
 const normalise = (sql: string) => sql.replace(/\s+/g, ' ').trim();
@@ -25,15 +30,11 @@ const ACTIONS_038 = [
   'join_request_approved',
   'join_request_denied',
 ];
-// Added by migration 042 (community ownership transfer), after 038's.
-const ACTIONS_042 = ['ownership_transferred'];
-// Added by migration 043 (moderator step-down), after 042's.
-const ACTIONS_043 = ['moderator_left'];
-const ACTIONS_THROUGH_042 = COMMUNITY_MODERATION_ACTIONS.filter(
-  (action) => !ACTIONS_043.includes(action),
-);
-const ACTIONS_THROUGH_038 = ACTIONS_THROUGH_042.filter(
-  (action) => !ACTIONS_042.includes(action),
+// From 042 on, see enum-history.ts.
+const ACTIONS_THROUGH_038 = enumThrough(
+  COMMUNITY_MODERATION_ACTIONS,
+  COMMUNITY_MODERATION_ACTION_ADDITIONS,
+  '041',
 );
 const ACTIONS_THROUGH_036 = ACTIONS_THROUGH_038.filter(
   (action) => !ACTIONS_038.includes(action),
@@ -185,35 +186,44 @@ describe('migration 038 (community settings) on the moderation log', () => {
   });
 });
 
-describe('migration 042 (community ownership transfer) on the moderation log', () => {
-  const migration = normalise(
-    read(
-      '../../../../data/migrations/042_add_community_ownership_transfer.sql',
-    ).replace(/^--.*$/gm, ''),
+describe('migrations from 042 on, on the moderation log', () => {
+  const MIGRATIONS = [
+    ['042', '042_add_community_ownership_transfer.sql'],
+    ['043', '043_add_moderator_step_down.sql'],
+    ['044', '044_add_admin_community_ownership.sql'],
+  ] as const;
+
+  it.each(MIGRATIONS)(
+    'migration %s appends its actions to the action enum, last',
+    (version, file) => {
+      const through = enumThrough(
+        COMMUNITY_MODERATION_ACTIONS,
+        COMMUNITY_MODERATION_ACTION_ADDITIONS,
+        version,
+      );
+      const appended = appendedBy(
+        COMMUNITY_MODERATION_ACTION_ADDITIONS,
+        version,
+      );
+      expect(through.slice(-appended.length)).toEqual(appended);
+      expect(
+        normalise(
+          read(`../../../../data/migrations/${file}`).replace(/^--.*$/gm, ''),
+        ),
+      ).toContain(
+        'ALTER TABLE community_moderation_actions ' +
+          `MODIFY COLUMN action ENUM( ${enumList(through)} ) NOT NULL;`,
+      );
+    },
   );
 
-  it('appends ownership_transferred to the action enum, last', () => {
-    expect(ACTIONS_THROUGH_042.slice(-1)).toEqual(ACTIONS_042);
-    expect(migration).toContain(
-      'ALTER TABLE community_moderation_actions ' +
-        `MODIFY COLUMN action ENUM( ${enumList(ACTIONS_THROUGH_042)} ) NOT NULL;`,
-    );
-  });
-});
-
-describe('migration 043 (moderator step-down) on the moderation log', () => {
-  const migration = normalise(
-    read('../../../../data/migrations/043_add_moderator_step_down.sql').replace(
-      /^--.*$/gm,
-      '',
-    ),
-  );
-
-  it('appends moderator_left to the action enum, last', () => {
-    expect(COMMUNITY_MODERATION_ACTIONS.slice(-1)).toEqual(ACTIONS_043);
-    expect(migration).toContain(
-      'ALTER TABLE community_moderation_actions ' +
-        `MODIFY COLUMN action ENUM( ${enumList(COMMUNITY_MODERATION_ACTIONS)} ) NOT NULL;`,
-    );
+  it('accounts for every member in the history', () => {
+    expect(
+      enumThrough(
+        COMMUNITY_MODERATION_ACTIONS,
+        COMMUNITY_MODERATION_ACTION_ADDITIONS,
+        '999',
+      ),
+    ).toEqual([...COMMUNITY_MODERATION_ACTIONS]);
   });
 });

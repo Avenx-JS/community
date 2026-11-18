@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
+import { CommunitiesModule } from '../communities/communities.module';
 import { DatabaseModule } from '../database/database.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { UsersModule } from '../users/users.module';
@@ -11,6 +12,7 @@ import { AdminCommunitiesController } from './admin-communities.controller';
 import { AdminContentController } from './admin-content.controller';
 import { AdminContentService } from './admin-content.service';
 import { AdminCommunitiesService } from './admin-communities.service';
+import { AdminCommunityStaffService } from './admin-community-staff.service';
 import { AdminReportsController } from './admin-reports.controller';
 import { AdminReportsService } from './admin-reports.service';
 import { AdminRestrictionsController } from './admin-restrictions.controller';
@@ -22,7 +24,13 @@ import { AdminUsersService } from './admin-users.service';
 import { AuditLogService } from './audit-log.service';
 
 @Module({
-  imports: [AuthModule, DatabaseModule, NotificationsModule, UsersModule],
+  imports: [
+    AuthModule,
+    CommunitiesModule,
+    DatabaseModule,
+    NotificationsModule,
+    UsersModule,
+  ],
   controllers: [
     AdminReportsController,
     AdminUsersController,
@@ -37,6 +45,7 @@ import { AuditLogService } from './audit-log.service';
     AdminAnalyticsService,
     AdminAuditLogService,
     AdminCommunitiesService,
+    AdminCommunityStaffService,
     AdminContentService,
     AdminRolesService,
     AdminReportsService,

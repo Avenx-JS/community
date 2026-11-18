@@ -123,6 +123,24 @@ export class SuspendCommunityDto {
   reason!: string;
 }
 
+// Body of POST /admin/communities/:id/owner and /moderators: the account,
+// by the rules of ManageModeratorDto, and the administrator's reason, by
+// the rules of SuspendCommunityDto. Required: it is written to the audit log
+// and to the community's own moderation log.
+export class AdminCommunityStaffDto {
+  @ApiProperty({ pattern: '^[a-zA-Z0-9_]{3,50}$' })
+  @IsString()
+  @Matches(/^[a-zA-Z0-9_]{3,50}$/)
+  username!: string;
+
+  @ApiProperty({ minLength: 1, maxLength: 2000 })
+  @Transform(trim)
+  @IsString()
+  @Length(1, 2000)
+  @Validate(PlainTextConstraint)
+  reason!: string;
+}
+
 // A reversal is a decision too, as lifting a restriction is.
 export class RestoreCommunityDto {
   @ApiProperty({ minLength: 1, maxLength: 2000 })

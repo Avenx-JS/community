@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
-import { assertValidKey, type MediaStorage } from './media-storage';
+import { assertStorageKey, type MediaStorage } from './media-storage';
 
 export class LocalMediaStorage implements MediaStorage {
   private readonly directory: string;
@@ -11,7 +11,7 @@ export class LocalMediaStorage implements MediaStorage {
   }
 
   async put(key: string, body: Buffer): Promise<void> {
-    assertValidKey(key);
+    assertStorageKey(key);
     const targetPath = join(this.directory, key);
     const dir = dirname(targetPath);
     await mkdir(dir, { recursive: true });
@@ -21,7 +21,7 @@ export class LocalMediaStorage implements MediaStorage {
   }
 
   async get(key: string): Promise<Buffer | null> {
-    assertValidKey(key);
+    assertStorageKey(key);
     const targetPath = join(this.directory, key);
     try {
       return await readFile(targetPath);
@@ -39,7 +39,7 @@ export class LocalMediaStorage implements MediaStorage {
   }
 
   async delete(key: string): Promise<void> {
-    assertValidKey(key);
+    assertStorageKey(key);
     const targetPath = join(this.directory, key);
     try {
       await unlink(targetPath);

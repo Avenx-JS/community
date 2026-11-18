@@ -45,9 +45,9 @@ describe('ReportsService', () => {
     };
     throwOnInsert = false;
     connection = {
-      beginTransaction: jest.fn().mockResolvedValue(undefined),
-      commit: jest.fn().mockResolvedValue(undefined),
-      rollback: jest.fn().mockResolvedValue(undefined),
+      beginTransaction: jest.fn(() => Promise.resolve()),
+      commit: jest.fn(() => Promise.resolve()),
+      rollback: jest.fn(() => Promise.resolve()),
       release: jest.fn(),
       execute: (sql, values) => {
         connectionCalls.push({ sql, values });

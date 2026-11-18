@@ -3,6 +3,23 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { COMMUNITY_MODERATION_ACTIONS } from '../communities/community-moderation-log.service';
 import { NOTIFICATION_TYPES } from '../notifications/notification-metadata';
+import {
+  COMMUNITY_MODERATION_ACTION_ADDITIONS,
+  enumThrough,
+  NOTIFICATION_TYPE_ADDITIONS,
+} from './enum-history';
+
+// The enums as 043 left them.
+const ACTIONS_THROUGH_043 = enumThrough(
+  COMMUNITY_MODERATION_ACTIONS,
+  COMMUNITY_MODERATION_ACTION_ADDITIONS,
+  '043',
+);
+const TYPES_THROUGH_043 = enumThrough(
+  NOTIFICATION_TYPES,
+  NOTIFICATION_TYPE_ADDITIONS,
+  '043',
+);
 
 const read = (path: string) => readFileSync(resolve(__dirname, path), 'utf8');
 const normalise = (sql: string) => sql.replace(/\s+/g, ' ').trim();
@@ -21,12 +38,12 @@ describe('migration 043 (moderator step-down)', () => {
   it('only appends one member to each enum', () => {
     expect(migration).toBe(
       'ALTER TABLE community_moderation_actions ' +
-        `MODIFY COLUMN action ENUM( ${enumList(COMMUNITY_MODERATION_ACTIONS)} ) NOT NULL; ` +
+        `MODIFY COLUMN action ENUM( ${enumList(ACTIONS_THROUGH_043)} ) NOT NULL; ` +
         'ALTER TABLE notifications ' +
-        `MODIFY COLUMN type ENUM( ${enumList(NOTIFICATION_TYPES)} ) NOT NULL;`,
+        `MODIFY COLUMN type ENUM( ${enumList(TYPES_THROUGH_043)} ) NOT NULL;`,
     );
-    expect(COMMUNITY_MODERATION_ACTIONS.at(-1)).toBe('moderator_left');
-    expect(NOTIFICATION_TYPES.at(-1)).toBe('community_moderator_left');
+    expect(ACTIONS_THROUGH_043.at(-1)).toBe('moderator_left');
+    expect(TYPES_THROUGH_043.at(-1)).toBe('community_moderator_left');
   });
 
   it('is folded into the snapshot, with its version recorded', () => {
@@ -40,7 +57,7 @@ describe('migration 043 (moderator step-down)', () => {
       '-- A moderator stepping down (043_add_moderator_step_down).',
     );
     expect(snapshot).toContain(
-      "('042_add_community_ownership_transfer'), ('043_add_moderator_step_down');",
+      "('042_add_community_ownership_transfer'), ('043_add_moderator_step_down'),",
     );
   });
 

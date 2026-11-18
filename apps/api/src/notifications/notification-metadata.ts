@@ -11,6 +11,11 @@ export const NOTIFICATION_TYPES = [
   'community_ownership_transferred',
   // Migration 043: a moderator of the recipient's community stepped down.
   'community_moderator_left',
+  // Migration 044: a platform administrator made the recipient a
+  // community's owner, replaced them as its owner, or made them a moderator.
+  'community_ownership_assigned',
+  'community_ownership_revoked',
+  'community_moderator_assigned',
 ] as const;
 
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
@@ -33,6 +38,9 @@ export const MODERATION_NOTIFICATION_TYPES: readonly NotificationType[] = [
   'restriction_applied',
   'restriction_lifted',
   'content_removed',
+  'community_ownership_assigned',
+  'community_ownership_revoked',
+  'community_moderator_assigned',
 ];
 
 // Optional snapshot of the actor and community, kept so a row stays readable
@@ -123,6 +131,20 @@ export type NotificationEntry =
     }
   // Not a moderation type: the former owner is named, since the new owner
   // has to know whom they took the community over from.
+  // A platform administrator's decision: never names the administrator or
+  // the reason, as for every moderation type.
+  | {
+      recipientId: string;
+      type:
+        | 'community_ownership_assigned'
+        | 'community_ownership_revoked'
+        | 'community_moderator_assigned';
+      actorId: null;
+      subjectType: 'community';
+      subjectId: string;
+      communityId: string;
+      metadata: { community_name?: string };
+    }
   // Sent to the creator; the former moderator is named, as they chose to
   // leave and the creator has to know who did.
   | {
@@ -189,6 +211,21 @@ const entryShapes: Record<
   community_moderator_left: {
     subjectTypes: ['community'],
     hasActor: true,
+    hasCommunity: true,
+  },
+  community_ownership_assigned: {
+    subjectTypes: ['community'],
+    hasActor: false,
+    hasCommunity: true,
+  },
+  community_ownership_revoked: {
+    subjectTypes: ['community'],
+    hasActor: false,
+    hasCommunity: true,
+  },
+  community_moderator_assigned: {
+    subjectTypes: ['community'],
+    hasActor: false,
     hasCommunity: true,
   },
 };
@@ -386,6 +423,12 @@ export function buildNotificationMetadata(
         ['post_title', snapshotValue(metadata, 'post_title')],
         ['excerpt', snapshotValue(metadata, 'excerpt')],
       );
+      break;
+    case 'community_ownership_assigned':
+    case 'community_ownership_revoked':
+    case 'community_moderator_assigned':
+      // Never the administrator's username.
+      fields.push(['community_name', nameValue(metadata, 'community_name')]);
       break;
     case 'community_ownership_transferred':
     case 'community_moderator_left':

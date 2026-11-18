@@ -11,7 +11,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { HttpAdapterHost, Reflector } from '@nestjs/core';
 import request from 'supertest';
 import type { App } from 'supertest/types';
-import { AdminAuthenticatedRequest } from '../src/auth/auth.guard';
+import type { AdminAuthenticatedRequest } from '../src/auth/auth.guard';
 import { AdminGuard } from '../src/auth/admin.guard';
 import { AuthGuard } from '../src/auth/auth.guard';
 import { AuthService } from '../src/auth/auth.service';

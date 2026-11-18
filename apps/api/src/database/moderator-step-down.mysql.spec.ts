@@ -20,6 +20,7 @@ import {
   runMigrations,
   type MigrationConnection,
 } from './migrate';
+import { snapshotBefore } from './enum-history';
 import { runSqlScript } from './sql-script';
 
 const migrations = resolve(__dirname, '../../../../data/migrations');
@@ -30,16 +31,9 @@ const snapshot = readFileSync(
   'utf8',
 ).replace(/^CREATE DATABASE[^;]*;\s*USE community;/, '');
 
-// The snapshot with 043 undone: its header, its version and the two enum
-// members it folded into CREATE TABLE.
-const preceding = snapshot
-  .replace(
-    /-- A moderator stepping down \(043_add_moderator_step_down\)\.\r?\n(?:--[^\n]*\r?\n)*\r?\n/,
-    '',
-  )
-  .replace(/,\r?\n\s*\('043_add_moderator_step_down'\)/, '')
-  .replace(/,\r?\n\s*'moderator_left'/, '')
-  .replace(/,\r?\n\s*'community_moderator_left'/, '');
+// The snapshot with 043 and every later enum-only migration undone
+// (enum-history.ts); the runner then applies them in order.
+const preceding = snapshotBefore(snapshot, '043');
 
 // Migration 043 through the real runner over a database at 042, then a
 // step-down on a real server and the moderator checks after it. Opt in with

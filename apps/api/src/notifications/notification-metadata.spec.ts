@@ -8,6 +8,10 @@ import {
   NOTIFICATION_TYPES,
   type NotificationEntry,
 } from './notification-metadata';
+import {
+  enumThrough,
+  NOTIFICATION_TYPE_ADDITIONS,
+} from '../database/enum-history';
 
 const privateFields = {
   email: 'private@example.com',
@@ -284,11 +288,10 @@ describe('assertNotificationEntry', () => {
   });
 });
 
-// Appended after migration 010, in order: 042, 043.
-const APPENDED_TYPES = [
-  'community_ownership_transferred',
-  'community_moderator_left',
-];
+// Appended after migration 010: see enum-history.ts.
+const APPENDED_TYPES = NOTIFICATION_TYPE_ADDITIONS.flatMap(
+  ([, members]) => members,
+);
 const read = (path: string) =>
   readFileSync(resolve(__dirname, path), 'utf8').replace(/\s+/g, ' ');
 
@@ -321,16 +324,18 @@ describe('notification enums', () => {
   });
 
   it.each([
-    ['042_add_community_ownership_transfer', 1],
-    ['043_add_moderator_step_down', 2],
-  ])('match migration %s, appended only', (migration, appended) => {
-    const list = NOTIFICATION_TYPES.slice(
-      0,
-      NOTIFICATION_TYPES.length - APPENDED_TYPES.length + appended,
+    ['042', '042_add_community_ownership_transfer.sql'],
+    ['043', '043_add_moderator_step_down.sql'],
+    ['044', '044_add_admin_community_ownership.sql'],
+  ])('match migration %s, appended only', (version, file) => {
+    const list = enumThrough(
+      NOTIFICATION_TYPES,
+      NOTIFICATION_TYPE_ADDITIONS,
+      version,
     )
       .map((type) => `'${type}'`)
       .join(', ');
-    expect(read(`../../../../data/migrations/${migration}.sql`)).toContain(
+    expect(read(`../../../../data/migrations/${file}`)).toContain(
       `ALTER TABLE notifications MODIFY COLUMN type ENUM( ${list} ) NOT NULL;`,
     );
   });

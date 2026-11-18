@@ -28,6 +28,10 @@ export const ADMIN_ACTIONS = [
   'post_restored',
   'comment_removed',
   'comment_restored',
+  // 044_add_admin_community_ownership.
+  'community_owner_changed',
+  'community_moderator_added',
+  'community_moderator_removed',
 ] as const;
 
 export type AdminAction = (typeof ADMIN_ACTIONS)[number];
@@ -156,6 +160,16 @@ export type AuditEntry =
   // removal; a restoration of a moderator's or an administrator's removal.
   | {
       actorId: string;
+      action:
+        | 'community_owner_changed'
+        | 'community_moderator_added'
+        | 'community_moderator_removed';
+      targetType: 'community';
+      targetId: string;
+      metadata?: CommunityStaffMetadata;
+    }
+  | {
+      actorId: string;
       action: 'post_removed' | 'post_restored';
       targetType: 'post';
       targetId: string;
@@ -168,6 +182,17 @@ export type AuditEntry =
       targetId: string;
       metadata?: ContentActionMetadata;
     };
+
+// An administrator changing a community's owner or moderators
+// (/admin/communities/:id/owner and /moderators). username is the new owner
+// or the moderator; previous_owner_username the owner replaced. Both are
+// snapshots, readable after the accounts are gone.
+export interface CommunityStaffMetadata {
+  community_name?: string;
+  username?: string;
+  previous_owner_username?: string;
+  reason?: string;
+}
 
 export const CONTENT_STATES = [
   'visible',
@@ -434,6 +459,22 @@ export function buildAuditMetadata(
     case 'report_unassigned': {
       const assignee = usernameSnapshotValue(metadata, 'assignee_username');
       if (assignee !== undefined) result.assignee_username = assignee;
+      break;
+    }
+    case 'community_owner_changed':
+    case 'community_moderator_added':
+    case 'community_moderator_removed': {
+      const communityName = communityNameValue(metadata);
+      const username = usernameSnapshotValue(metadata, 'username');
+      const previous = usernameSnapshotValue(
+        metadata,
+        'previous_owner_username',
+      );
+      const reason = reasonValue(metadata);
+      if (communityName !== undefined) result.community_name = communityName;
+      if (username !== undefined) result.username = username;
+      if (previous !== undefined) result.previous_owner_username = previous;
+      if (reason !== undefined) result.reason = reason;
       break;
     }
     case 'post_removed':

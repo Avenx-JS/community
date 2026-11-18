@@ -24,6 +24,7 @@ import {
   runMigrations,
   type MigrationConnection,
 } from './migrate';
+import { snapshotBefore } from './enum-history';
 import { runSqlScript } from './sql-script';
 
 const migrations = resolve(__dirname, '../../../../data/migrations');
@@ -34,24 +35,9 @@ const snapshot = readFileSync(
   'utf8',
 ).replace(/^CREATE DATABASE[^;]*;\s*USE community;/, '');
 
-// The snapshot with 042 and everything after it undone: each one's header,
-// version and the enum members it folded into CREATE TABLE. The runner then
-// applies 042 and 043 in order.
-const preceding = snapshot
-  .replace(
-    /-- A moderator stepping down \(043_add_moderator_step_down\)\.\r?\n(?:--[^\n]*\r?\n)*\r?\n/,
-    '',
-  )
-  .replace(/,\r?\n\s*\('043_add_moderator_step_down'\)/, '')
-  .replace(/,\r?\n\s*'moderator_left'/, '')
-  .replace(/,\r?\n\s*'community_moderator_left'/, '')
-  .replace(
-    /-- Community ownership transfer \(042_add_community_ownership_transfer\)\.\r?\n(?:--[^\n]*\r?\n)*\r?\n/,
-    '',
-  )
-  .replace(/,\r?\n\s*\('042_add_community_ownership_transfer'\)/, '')
-  .replace(/,\r?\n\s*'ownership_transferred'/, '')
-  .replace(/,\r?\n\s*'community_ownership_transferred'/, '');
+// The snapshot with 042 and every later enum-only migration undone
+// (enum-history.ts); the runner then applies them in order.
+const preceding = snapshotBefore(snapshot, '042');
 
 // Migration 042 through the real runner over a database at 041, then
 // transfers and account deletion on a real server. Opt in with

@@ -127,6 +127,33 @@ const entries = {
     communityId: 'community-1',
     metadata: { actor_username: 'former_mod', community_name: 'garden' },
   },
+  community_ownership_assigned: {
+    recipientId: 'new-owner',
+    type: 'community_ownership_assigned',
+    actorId: null,
+    subjectType: 'community',
+    subjectId: 'community-1',
+    communityId: 'community-1',
+    metadata: { community_name: 'garden' },
+  },
+  community_ownership_revoked: {
+    recipientId: 'founder',
+    type: 'community_ownership_revoked',
+    actorId: null,
+    subjectType: 'community',
+    subjectId: 'community-1',
+    communityId: 'community-1',
+    metadata: { community_name: 'garden' },
+  },
+  community_moderator_assigned: {
+    recipientId: 'new-mod',
+    type: 'community_moderator_assigned',
+    actorId: null,
+    subjectType: 'community',
+    subjectId: 'community-1',
+    communityId: 'community-1',
+    metadata: { community_name: 'garden' },
+  },
 } satisfies Record<NotificationEntry['type'], NotificationEntry>;
 
 const memberPost = (recipientId: string): typeof entries.community_post => ({

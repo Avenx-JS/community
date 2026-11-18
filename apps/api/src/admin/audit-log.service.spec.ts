@@ -37,7 +37,10 @@ describe('AuditLogService', () => {
   let service: AuditLogService;
 
   beforeEach(async () => {
-    const pool = { getConnection: () => Promise.resolve(fakeConnection()) };
+    const pool = {
+      getConnection: () =>
+        Promise.resolve(fakeConnection(() => Promise.resolve([[], []]))),
+    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [AuditLogService, { provide: MYSQL_POOL, useValue: pool }],
     }).compile();

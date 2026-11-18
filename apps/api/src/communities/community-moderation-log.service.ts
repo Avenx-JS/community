@@ -58,6 +58,12 @@ export const COMMUNITY_MODERATION_ACTIONS = [
   // A moderator stepping down on their own (migration 043): actor and target
   // are the same account. moderator_removed stays the creator's decision.
   'moderator_left',
+  // A platform administrator acting on the community's people (migration
+  // 044): the actor is the administrator, the target the account, and the
+  // administrator's reason is kept, so moderators can see who and why.
+  'admin_owner_changed',
+  'admin_moderator_added',
+  'admin_moderator_removed',
 ] as const;
 
 export type CommunityModerationAction =
@@ -130,6 +136,14 @@ export type CommunityModerationEntry =
         | 'moderator_left';
       targetType: 'user';
       metadata?: { username?: string };
+    })
+  | (EntryBase & {
+      action:
+        | 'admin_owner_changed'
+        | 'admin_moderator_added'
+        | 'admin_moderator_removed';
+      targetType: 'user';
+      metadata?: { username?: string; reason?: string };
     })
   | (EntryBase & {
       action: 'rules_published';
@@ -385,6 +399,12 @@ export function buildCommunityModerationMetadata(
     case 'ownership_transferred':
     case 'moderator_left':
       keep('username', usernameValue(metadata));
+      break;
+    case 'admin_owner_changed':
+    case 'admin_moderator_added':
+    case 'admin_moderator_removed':
+      keep('username', usernameValue(metadata));
+      keep('reason', reasonValue(metadata));
       break;
     case 'rules_published':
       keep('version', versionValue(metadata));

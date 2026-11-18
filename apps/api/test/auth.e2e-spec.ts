@@ -39,6 +39,10 @@ import {
   LOCK_ACCOUNT_SQL,
 } from '../src/users/account-deletion.service';
 import { ACTIVE_ADMINS_SQL } from '../src/users/users.service';
+import {
+  RateLimiterStore,
+  type RateLimitResult,
+} from '../src/redis/redis.types';
 
 interface TestUser {
   id: string;
@@ -321,45 +325,6 @@ describe('Auth endpoints (e2e)', () => {
           [],
         ]);
       }
-      if (sql.startsWith('INSERT INTO auth_rate_limits')) {
-        const [bucketKey] = values as [string];
-        const match = sql.match(/INTERVAL (\d+) SECOND/);
-        if (!match) {
-          return Promise.reject(new Error('Missing rate-limit window'));
-        }
-        const windowSeconds = Number(match[1]);
-        const now = Date.now();
-        const bucket = rateLimitBuckets.get(bucketKey);
-        if (!bucket || bucket.windowStartedAt <= now - windowSeconds * 1000) {
-          rateLimitBuckets.set(bucketKey, {
-            requestCount: 1,
-            windowStartedAt: now,
-            windowSeconds,
-          });
-        } else {
-          bucket.requestCount += 1;
-        }
-        return Promise.resolve([{ affectedRows: 1 }, []]);
-      }
-      if (sql.startsWith('SELECT request_count')) {
-        const [bucketKey] = values as [string];
-        const bucket = rateLimitBuckets.get(bucketKey);
-        if (!bucket) {
-          return Promise.resolve([[], []]);
-        }
-        const elapsedSeconds = Math.floor(
-          (Date.now() - bucket.windowStartedAt) / 1000,
-        );
-        return Promise.resolve([
-          [
-            {
-              request_count: bucket.requestCount,
-              retry_after: Math.max(1, bucket.windowSeconds - elapsedSeconds),
-            },
-          ],
-          [],
-        ]);
-      }
       return Promise.reject(new Error(`Unexpected SQL query: ${sql}`));
     };
     const connectionExecute = (
@@ -610,6 +575,39 @@ describe('Auth endpoints (e2e)', () => {
           return failEmail ? Promise.reject(failEmail) : Promise.resolve();
         },
       })
+      // The rate-limit store the app uses (RedisModule provides one, the
+      // memory store without Redis), counting in rateLimitBuckets so that
+      // tests can empty the buckets or let a window run out. A fixed window:
+      // every request counts, refused ones too, and the one past the limit
+      // is refused until the window ends.
+      .overrideProvider(RateLimiterStore)
+      .useValue({
+        incrementAndCheck: (
+          bucketKey: string,
+          limit: number,
+          windowSeconds: number,
+        ): Promise<RateLimitResult> => {
+          const now = Date.now();
+          let bucket = rateLimitBuckets.get(bucketKey);
+          if (!bucket || bucket.windowStartedAt <= now - windowSeconds * 1000) {
+            bucket = { requestCount: 0, windowStartedAt: now, windowSeconds };
+            rateLimitBuckets.set(bucketKey, bucket);
+          }
+          bucket.requestCount += 1;
+          const allowed = bucket.requestCount <= limit;
+          const elapsedSeconds = Math.floor(
+            (now - bucket.windowStartedAt) / 1000,
+          );
+          return Promise.resolve({
+            allowed,
+            currentCount: bucket.requestCount,
+            remainingCount: Math.max(0, limit - bucket.requestCount),
+            retryAfterSeconds: allowed
+              ? null
+              : Math.max(1, windowSeconds - elapsedSeconds),
+          });
+        },
+      } satisfies RateLimiterStore)
       .compile();
 
     app = moduleFixture.createNestApplication();

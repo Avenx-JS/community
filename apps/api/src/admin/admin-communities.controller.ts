@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -11,9 +12,15 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiNoContentResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 import { AdminGuard } from '../auth/admin.guard';
 import { AuthGuard } from '../auth/auth.guard';
+import { RequiresRole } from '../auth/requires-role.decorator';
 import type { AdminAuthenticatedRequest } from '../auth/auth.guard';
 import {
   ApiAuthenticated,
@@ -22,12 +29,15 @@ import {
 } from '../common/openapi';
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
 import { AdminCommunitiesService } from './admin-communities.service';
+import { AdminCommunityStaffService } from './admin-community-staff.service';
+import { AdminReasonDto } from './dto/admin-content.dto';
 import { ADMIN_ONLY } from './admin.openapi';
 import {
   AdminCommunityDetailResponse,
   AdminCommunityListResponse,
 } from './admin.responses';
 import {
+  AdminCommunityStaffDto,
   AdminUpdateCommunityDto,
   ListAdminCommunitiesDto,
   RestoreCommunityDto,
@@ -42,7 +52,10 @@ import {
 @Controller('admin/communities')
 @UseGuards(AuthGuard, AdminGuard)
 export class AdminCommunitiesController {
-  constructor(private readonly communities: AdminCommunitiesService) {}
+  constructor(
+    private readonly communities: AdminCommunitiesService,
+    private readonly staff: AdminCommunityStaffService,
+  ) {}
 
   @Get()
   @ApiOperation({
@@ -125,6 +138,106 @@ export class AdminCommunitiesController {
     @Req() request: AdminAuthenticatedRequest,
   ) {
     return this.communities.suspend(id, body, request.user.id);
+  }
+
+  // Recovery for a community whose owner is banned, deleted or gone: every
+  // owner-only route (moderators, rules, settings) depends on creator_id.
+  @Post(':id/owner')
+  @RequiresRole('admin')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: "Reassign a community's owner",
+    description:
+      'Makes an account the owner (creator_id), in any state but deleted, ' +
+      'suspended included. The account must be active, not suspended or ' +
+      'banned from the platform, and not banned from the community. Unlike ' +
+      'POST /communities/{name}/transfer it need not be a moderator: prefer ' +
+      'an existing moderator, who accepted responsibility for the community. ' +
+      'The previous owner becomes a moderator unless deleted or banned from ' +
+      'the platform; the new owner’s moderator entry and pending invitation ' +
+      'are dropped. Requires a reason. Recorded as community_owner_changed ' +
+      'in the audit log and admin_owner_changed in the community moderation ' +
+      'log, both with the reason; the new and the previous owner are ' +
+      'notified, without the administrator or the reason.',
+  })
+  @ApiAuthenticated(ADMIN_ONLY)
+  @ApiRouteParam('id', 'id', 'Community ID.')
+  @ApiOkResponse({ type: AdminCommunityDetailResponse })
+  @ApiErrorResponses({
+    400: 'Invalid community ID, username or reason, or any other property.',
+    404: 'Community not found, or the account is unknown or deleted.',
+    409: 'The community is deleted; the account already owns it, is suspended or banned from the platform, or is banned from the community.',
+  })
+  changeOwner(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Body() body: AdminCommunityStaffDto,
+    @Req() request: AdminAuthenticatedRequest,
+  ) {
+    return this.staff.changeOwner(id, body, request.user.id);
+  }
+
+  @Post(':id/moderators')
+  @RequiresRole('admin')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary: 'Add a moderator without an invitation',
+    description:
+      'The same eligibility as for an owner. Idempotent: an existing ' +
+      'moderator is a 204 that records nothing. A pending invitation of the ' +
+      'account is consumed. Requires a reason. Recorded as ' +
+      'community_moderator_added in the audit log and admin_moderator_added ' +
+      'in the community moderation log; the moderator is notified ' +
+      '(community_moderator_assigned).',
+  })
+  @ApiAuthenticated(ADMIN_ONLY)
+  @ApiRouteParam('id', 'id', 'Community ID.')
+  @ApiNoContentResponse({ description: 'The account is a moderator.' })
+  @ApiErrorResponses({
+    400: 'Invalid community ID, username or reason, or any other property.',
+    404: 'Community not found, or the account is unknown or deleted.',
+    409: 'The community is deleted; the account owns it, is suspended or banned from the platform, or is banned from the community.',
+  })
+  addModerator(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Body() body: AdminCommunityStaffDto,
+    @Req() request: AdminAuthenticatedRequest,
+  ): Promise<void> {
+    return this.staff.addModerator(id, body, request.user.id);
+  }
+
+  @Delete(':id/moderators/:username')
+  @RequiresRole('admin')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary: 'Remove a moderator',
+    description:
+      'Idempotent: an account that is not a moderator is a 204 that records ' +
+      'nothing. Works for a deleted account, to clear it out. The owner ' +
+      'cannot be removed here: reassign the owner instead. The reason goes ' +
+      'in the JSON body. Recorded as community_moderator_removed in the ' +
+      'audit log and admin_moderator_removed in the community moderation log.',
+  })
+  @ApiAuthenticated(ADMIN_ONLY)
+  @ApiRouteParam('id', 'id', 'Community ID.')
+  @ApiRouteParam('username', 'username', 'Username of the moderator.')
+  @ApiNoContentResponse({ description: 'The account is not a moderator.' })
+  @ApiErrorResponses({
+    400: 'Invalid community ID, username or reason, or any other property.',
+    404: 'Community or account not found.',
+    409: 'The community is deleted, or the account is its owner.',
+  })
+  removeModerator(
+    @Param('id', new SafeRouteParamPipe('id')) id: string,
+    @Param('username', new SafeRouteParamPipe('username')) username: string,
+    @Body() body: AdminReasonDto,
+    @Req() request: AdminAuthenticatedRequest,
+  ): Promise<void> {
+    return this.staff.removeModerator(
+      id,
+      username,
+      body.reason,
+      request.user.id,
+    );
   }
 
   @Post(':id/restore')

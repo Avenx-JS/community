@@ -1,168 +1,88 @@
-import { createHash, createHmac } from 'node:crypto';
 import type { S3StorageConfig } from '../media.config';
-import { assertValidKey, type MediaStorage } from './media-storage';
+import { sha256Hex, signRequest } from './aws-signature-v4';
+import { assertStorageKey, type MediaStorage } from './media-storage';
 
+// The HTTP side, replaceable in tests.
+export type Fetcher = (url: URL, init: RequestInit) => Promise<Response>;
+
+// S3 or any S3-compatible server (MinIO, Ceph, R2), signed with
+// aws-signature-v4.ts: PUT, GET and DELETE of single objects, no SDK.
+// Errors name the method, key and status only, never the response body,
+// which can echo request details.
 export class S3MediaStorage implements MediaStorage {
-  constructor(private readonly config: S3StorageConfig) {}
+  constructor(
+    private readonly config: S3StorageConfig,
+    private readonly fetcher: Fetcher = (url, init) => fetch(url, init),
+  ) {}
 
-  private getUrl(key: string): { url: URL; host: string; path: string } {
-    const rawEndpoint = this.config.endpoint.replace(/\/+$/, '');
-    const endpointUrl = new URL(rawEndpoint);
-
+  // Path-style (endpoint/bucket/key) or virtual-hosted (bucket.endpoint/key).
+  objectUrl(key: string): URL {
+    const endpoint = new URL(this.config.endpoint.replace(/\/+$/, ''));
+    const base = endpoint.pathname.replace(/\/+$/, '');
     if (this.config.forcePathStyle) {
-      const path = `/${this.config.bucket}/${key}`;
-      const url = new URL(path, endpointUrl);
-      return { url, host: endpointUrl.host, path };
+      return new URL(`${endpoint.origin}${base}/${this.config.bucket}/${key}`);
     }
-
-    const host = `${this.config.bucket}.${endpointUrl.host}`;
-    const path = `/${key}`;
-    const url = new URL(`${endpointUrl.protocol}//${host}${path}`);
-    return { url, host, path };
-  }
-
-  private sign(
-    method: string,
-    host: string,
-    path: string,
-    payloadHash: string,
-    extraHeaders: Record<string, string> = {},
-  ): Record<string, string> {
-    const now = new Date();
-    const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
-    const dateStamp = amzDate.slice(0, 8);
-
-    const headers: Record<string, string> = {
-      host,
-      'x-amz-content-sha256': payloadHash,
-      'x-amz-date': amzDate,
-      ...extraHeaders,
-    };
-
-    const sortedHeaderKeys = Object.keys(headers)
-      .map((k) => k.toLowerCase())
-      .sort();
-
-    const canonicalHeaders = sortedHeaderKeys
-      .map((k) => `${k}:${headers[k].trim()}\n`)
-      .join('');
-
-    const signedHeaders = sortedHeaderKeys.join(';');
-
-    const canonicalRequest = [
-      method,
-      path,
-      '', // query string
-      canonicalHeaders,
-      signedHeaders,
-      payloadHash,
-    ].join('\n');
-
-    const canonicalRequestHash = createHash('sha256')
-      .update(canonicalRequest)
-      .digest('hex');
-
-    const credentialScope = `${dateStamp}/${this.config.region}/s3/aws4_request`;
-    const stringToSign = [
-      'AWS4-HMAC-SHA256',
-      amzDate,
-      credentialScope,
-      canonicalRequestHash,
-    ].join('\n');
-
-    const kDate = createHmac('sha256', `AWS4${this.config.secretAccessKey}`)
-      .update(dateStamp)
-      .digest();
-    const kRegion = createHmac('sha256', kDate)
-      .update(this.config.region)
-      .digest();
-    const kService = createHmac('sha256', kRegion).update('s3').digest();
-    const kSigning = createHmac('sha256', kService)
-      .update('aws4_request')
-      .digest();
-
-    const signature = createHmac('sha256', kSigning)
-      .update(stringToSign)
-      .digest('hex');
-
-    const authorization = `AWS4-HMAC-SHA256 Credential=${this.config.accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
-
-    return {
-      ...headers,
-      authorization,
-    };
+    return new URL(
+      `${endpoint.protocol}//${this.config.bucket}.${endpoint.host}${base}/${key}`,
+    );
   }
 
   async put(key: string, body: Buffer, mimeType: string): Promise<void> {
-    assertValidKey(key);
-    const { url, host, path } = this.getUrl(key);
-    const payloadHash = createHash('sha256').update(body).digest('hex');
-    const extraHeaders: Record<string, string> = {
+    const response = await this.send('PUT', key, body, {
       'content-type': mimeType,
-      'x-amz-acl': 'private',
-    };
-    const signedHeaders = this.sign(
-      'PUT',
-      host,
-      path,
-      payloadHash,
-      extraHeaders,
-    );
-
-    const response = await fetch(url.toString(), {
-      method: 'PUT',
-      headers: signedHeaders,
-      body: new Uint8Array(body),
+      'content-length': String(body.length),
     });
-
-    if (!response.ok) {
-      throw new Error(
-        `S3 PUT ${key} failed with status ${response.status} ${response.statusText}`,
-      );
-    }
+    this.assertOk('PUT', key, response);
   }
 
   async get(key: string): Promise<Buffer | null> {
-    assertValidKey(key);
-    const { url, host, path } = this.getUrl(key);
-    const payloadHash = createHash('sha256').update('').digest('hex');
-    const signedHeaders = this.sign('GET', host, path, payloadHash);
-
-    const response = await fetch(url.toString(), {
-      method: 'GET',
-      headers: signedHeaders,
-    });
-
+    const response = await this.send('GET', key);
     if (response.status === 404) {
       return null;
     }
-
-    if (!response.ok) {
-      throw new Error(
-        `S3 GET ${key} failed with status ${response.status} ${response.statusText}`,
-      );
-    }
-
-    const arrayBuffer = await response.arrayBuffer();
-    return Buffer.from(arrayBuffer);
+    this.assertOk('GET', key, response);
+    return Buffer.from(await response.arrayBuffer());
   }
 
+  // Idempotent: a missing object is already deleted.
   async delete(key: string): Promise<void> {
-    assertValidKey(key);
-    const { url, host, path } = this.getUrl(key);
-    const payloadHash = createHash('sha256').update('').digest('hex');
-    const signedHeaders = this.sign('DELETE', host, path, payloadHash);
+    const response = await this.send('DELETE', key);
+    if (response.status === 404) {
+      return;
+    }
+    this.assertOk('DELETE', key, response);
+  }
 
-    const response = await fetch(url.toString(), {
-      method: 'DELETE',
-      headers: signedHeaders,
+  private send(
+    method: 'GET' | 'PUT' | 'DELETE',
+    key: string,
+    body?: Buffer,
+    headers: Record<string, string> = {},
+  ): Promise<Response> {
+    assertStorageKey(key);
+    const url = this.objectUrl(key);
+    const signed = signRequest(
+      { method, url, headers, payloadHash: sha256Hex(body ?? '') },
+      {
+        accessKeyId: this.config.accessKeyId,
+        secretAccessKey: this.config.secretAccessKey,
+        region: this.config.region,
+      },
+      new Date(),
+    );
+    // fetch sets Host itself, from the URL that was signed.
+    const { host: _host, ...sent } = signed;
+    void _host;
+    return this.fetcher(url, {
+      method,
+      headers: sent,
+      ...(body ? { body: new Uint8Array(body) } : {}),
     });
+  }
 
-    // 204, 200, or 404 all count as successful delete
-    if (!response.ok && response.status !== 404) {
-      throw new Error(
-        `S3 DELETE ${key} failed with status ${response.status} ${response.statusText}`,
-      );
+  private assertOk(method: string, key: string, response: Response): void {
+    if (!response.ok) {
+      throw new Error(`S3 ${method} ${key} failed with ${response.status}`);
     }
   }
 }

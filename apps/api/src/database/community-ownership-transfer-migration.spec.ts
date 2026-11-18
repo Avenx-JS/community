@@ -3,18 +3,27 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { COMMUNITY_MODERATION_ACTIONS } from '../communities/community-moderation-log.service';
 import { NOTIFICATION_TYPES } from '../notifications/notification-metadata';
+import {
+  COMMUNITY_MODERATION_ACTION_ADDITIONS,
+  enumThrough,
+  NOTIFICATION_TYPE_ADDITIONS,
+} from './enum-history';
 
 const read = (path: string) => readFileSync(resolve(__dirname, path), 'utf8');
 const normalise = (sql: string) => sql.replace(/\s+/g, ' ').trim();
 const enumList = (values: readonly string[]) =>
   values.map((value) => `'${value}'`).join(', ');
 
-// The enums as 042 left them: 043 appended one member to each.
-const ACTIONS_THROUGH_042 = COMMUNITY_MODERATION_ACTIONS.filter(
-  (action) => action !== 'moderator_left',
+// The enums as 042 left them.
+const ACTIONS_THROUGH_042 = enumThrough(
+  COMMUNITY_MODERATION_ACTIONS,
+  COMMUNITY_MODERATION_ACTION_ADDITIONS,
+  '042',
 );
-const TYPES_THROUGH_042 = NOTIFICATION_TYPES.filter(
-  (type) => type !== 'community_moderator_left',
+const TYPES_THROUGH_042 = enumThrough(
+  NOTIFICATION_TYPES,
+  NOTIFICATION_TYPE_ADDITIONS,
+  '042',
 );
 
 describe('migration 042 (community ownership transfer)', () => {

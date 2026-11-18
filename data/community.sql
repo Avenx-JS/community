@@ -187,7 +187,10 @@ CREATE TABLE community_moderation_actions (
         'join_request_approved',
         'join_request_denied',
         'ownership_transferred',
-        'moderator_left'
+        'moderator_left',
+        'admin_owner_changed',
+        'admin_moderator_added',
+        'admin_moderator_removed'
     ) NOT NULL,
     target_type ENUM('post', 'comment', 'user', 'rule_document', 'community') NOT NULL,
     target_id VARCHAR(36) NOT NULL,
@@ -423,7 +426,10 @@ CREATE TABLE admin_actions (
         'post_removed',
         'post_restored',
         'comment_removed',
-        'comment_restored'
+        'comment_restored',
+        'community_owner_changed',
+        'community_moderator_added',
+        'community_moderator_removed'
     ) NOT NULL,
     target_type ENUM('user', 'report', 'restriction', 'community', 'post', 'comment') NOT NULL,
     target_id VARCHAR(36) NOT NULL,
@@ -449,7 +455,10 @@ CREATE TABLE notifications (
         'restriction_lifted',
         'content_removed',
         'community_ownership_transferred',
-        'community_moderator_left'
+        'community_moderator_left',
+        'community_ownership_assigned',
+        'community_ownership_revoked',
+        'community_moderator_assigned'
     ) NOT NULL,
     actor_id VARCHAR(36) NULL,
     subject_type ENUM('post', 'comment', 'report', 'restriction', 'community') NOT NULL,
@@ -1003,6 +1012,10 @@ ALTER TABLE votes
 -- Its two enum members are in CREATE TABLE community_moderation_actions and
 -- CREATE TABLE notifications above; it adds nothing else.
 
+-- Admin community ownership and moderators (044_add_admin_community_ownership).
+-- Its enum members are in CREATE TABLE admin_actions,
+-- community_moderation_actions and notifications above; it adds nothing else.
+
 CREATE TABLE schema_migrations (
     version VARCHAR(64) PRIMARY KEY,
     applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -1052,4 +1065,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('040_add_live_notifications'),
     ('041_add_admin_content_and_roles'),
     ('042_add_community_ownership_transfer'),
-    ('043_add_moderator_step_down');
+    ('043_add_moderator_step_down'),
+    ('044_add_admin_community_ownership');

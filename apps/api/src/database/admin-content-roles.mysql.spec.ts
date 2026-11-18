@@ -19,6 +19,7 @@ import {
   runMigrations,
   type MigrationConnection,
 } from './migrate';
+import { snapshotBefore } from './enum-history';
 import { runSqlScript } from './sql-script';
 
 const migrations = resolve(__dirname, '../../../../data/migrations');
@@ -31,7 +32,8 @@ const snapshot = readFileSync(
 
 // The snapshot with 041 undone: its appended block, its version, and the
 // admin_actions members it folded into CREATE TABLE.
-const preceding = snapshot
+// The later enum-only migrations first (enum-history.ts), then 041 itself.
+const preceding = snapshotBefore(snapshot, '042')
   .replace(
     /-- Admin content removal, role administration and analytics indexes \(041_add_admin_content_and_roles\)\.\r?\n[\s\S]*?(?=-- [^\n]*\(\d{3}_[a-z_]+\)\.\r?\n|CREATE TABLE schema_migrations)/,
     '',
