@@ -28,7 +28,7 @@ import {
   USER_ID_BY_USERNAME_SQL,
   type UserCommentDto,
 } from '../users/user-activity.service';
-import type { UserProfile } from '../users/users.service';
+import type { UserSummary } from '../users/users.service';
 import { loadVoteScores } from '../votes/vote-scores';
 import { loadMediaByIds } from '../media/media-dto';
 import type {
@@ -49,7 +49,7 @@ export interface SearchResults<T> {
   total: number;
 }
 
-export type SearchItem = UserProfile | CommunityDto | PostDto | UserCommentDto;
+export type SearchItem = UserSummary | CommunityDto | PostDto | UserCommentDto;
 
 // Each MATCH column list is exactly its FULLTEXT index's (migration 015), or
 // MySQL cannot use the index. Never edit one without the other.
@@ -181,7 +181,7 @@ export class SearchService {
       rows.map((row) => row.avatar_media_id),
     );
     return {
-      items: rows.map((row): UserProfile => ({
+      items: rows.map((row): UserSummary => ({
         username: row.username,
         display_name: row.display_name,
         bio: row.bio,

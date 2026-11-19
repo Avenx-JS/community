@@ -3,7 +3,7 @@ import { CommunityResponse } from '../communities/communities.responses';
 import { PostResponse } from '../posts/posts.responses';
 import {
   UserCommentResponse,
-  UserProfileResponse,
+  UserSummaryResponse,
 } from '../users/users.responses';
 import type { SearchType } from './dto/search-query.dto';
 
@@ -26,8 +26,8 @@ export class UserSearchResultListResponse extends SearchResultListResponse {
   @ApiProperty({ enum: ['users'] })
   type!: Extract<SearchType, 'users'>;
 
-  @ApiProperty({ type: [UserProfileResponse] })
-  items!: UserProfileResponse[];
+  @ApiProperty({ type: [UserSummaryResponse] })
+  items!: UserSummaryResponse[];
 }
 
 export class CommunitySearchResultListResponse extends SearchResultListResponse {

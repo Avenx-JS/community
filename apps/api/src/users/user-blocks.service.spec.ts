@@ -8,6 +8,7 @@ import { USER_ID_BY_USERNAME_SQL } from './user-activity.service';
 import {
   BLOCK_STATE_SQL,
   BLOCK_USER_SQL,
+  REMOVE_PAIR_FOLLOWS_SQL,
   BLOCKED_USERS_COUNT_SQL,
   BLOCKED_USERS_FROM,
   BLOCKED_USERS_SQL,
@@ -83,6 +84,11 @@ describe('UserBlocksService', () => {
         { sql: LOCK_BLOCKED_SQL, values: ['u-target'] },
         { sql: BLOCK_STATE_SQL, values: ['u-target', 'u-caller'] },
         { sql: BLOCK_USER_SQL, values: ['u-caller', 'u-target'] },
+        // A block ends following both ways (migration 047).
+        {
+          sql: REMOVE_PAIR_FOLLOWS_SQL,
+          values: ['u-caller', 'u-target', 'u-target', 'u-caller'],
+        },
       ]);
       expect(log).toEqual(['begin', 'commit', 'release']);
     });
@@ -155,7 +161,7 @@ describe('UserBlocksService', () => {
       it('defaults to 1000', async () => {
         results = [[{ id: 'u-target' }], alive, alive, state(999), {}];
         await service().block('target', 'u-caller');
-        expect(queries.at(-1)?.sql).toBe(BLOCK_USER_SQL);
+        expect(queries.at(-2)?.sql).toBe(BLOCK_USER_SQL);
 
         queries = [];
         results = [[{ id: 'u-target' }], alive, alive, state(1000)];
@@ -179,7 +185,7 @@ describe('UserBlocksService', () => {
         await expect(
           service('2').block('target', 'u-caller'),
         ).resolves.toBeUndefined();
-        expect(queries.at(-1)?.sql).toBe(BLOCK_USER_SQL);
+        expect(queries.at(-2)?.sql).toBe(BLOCK_USER_SQL);
       });
 
       it('refuses an invalid USER_BLOCKS_MAX at startup', () => {
@@ -244,6 +250,9 @@ describe('UserBlocksService', () => {
               if (sql === BLOCK_USER_SQL) {
                 pending.push(values[1]);
                 return [{}, []];
+              }
+              if (sql === REMOVE_PAIR_FOLLOWS_SQL) {
+                return [{ affectedRows: 0 }, []];
               }
               throw new Error(`Unexpected SQL: ${sql}`);
             },

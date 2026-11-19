@@ -29,11 +29,13 @@ export const NOTIFICATION_TYPE_ADDITIONS: EnumAdditions = [
   ],
   ['045', ['mention']],
   ['046', ['modmail_message']],
+  ['047', ['new_follower']],
 ];
 
 // notifications.subject_type, as migration 010 created it plus these.
 export const NOTIFICATION_SUBJECT_TYPE_ADDITIONS: EnumAdditions = [
   ['046', ['modmail_message']],
+  ['047', ['user']],
 ];
 
 // user_reports.target_type, as migration 016 created it plus these.
@@ -97,6 +99,7 @@ const FOLDED_MIGRATIONS: ReadonlyArray<
   ],
   ['045', '045_add_mentions', 'Mentions'],
   ['046', '046_create_modmail', 'Modmail'],
+  ['047', '047_create_user_follows', 'Following users'],
 ];
 
 // The snapshot as it stood before migration `version`: for it and every
@@ -104,9 +107,19 @@ const FOLDED_MIGRATIONS: ReadonlyArray<
 // the enum members it appended are taken out, so the migration runner can
 // apply them again over a database built from the result. Works on LF and
 // restores CRLF if the snapshot has it. Names and members are [a-z0-9_]
-// only, so they need no escaping in the patterns. A member is removed from
-// every enum that lists it, multi-line or single-line: each member name
-// here is used by the migration that appended it only.
+// only, so they need no escaping in the patterns. A member is removed only
+// from an enum of the column its history names, and only as that enum's last
+// member (an appended member is last while the later migrations are undone
+// first): a name like 'user', which other enums list too (users.role,
+// community_user_flairs.kind), is left alone there.
+const ENUM_COLUMNS: ReadonlyArray<readonly [EnumAdditions, string]> = [
+  [COMMUNITY_MODERATION_ACTION_ADDITIONS, 'action'],
+  [ADMIN_ACTION_ADDITIONS, 'action'],
+  [NOTIFICATION_TYPE_ADDITIONS, 'type'],
+  [NOTIFICATION_SUBJECT_TYPE_ADDITIONS, 'subject_type'],
+  [REPORT_TARGET_TYPE_ADDITIONS, 'target_type'],
+];
+
 export function snapshotBefore(snapshot: string, version: string): string {
   const crlf = snapshot.includes('\r\n');
   let result = snapshot.replace(/\r\n/g, '\n');
@@ -119,17 +132,17 @@ export function snapshotBefore(snapshot: string, version: string): string {
       result = result.slice(0, start) + result.slice(end + 2);
     }
     result = result.replace(new RegExp(String.raw`,\n\s*\('${name}'\)`), '');
-    const members = new Set(
-      [
-        COMMUNITY_MODERATION_ACTION_ADDITIONS,
-        NOTIFICATION_TYPE_ADDITIONS,
-        NOTIFICATION_SUBJECT_TYPE_ADDITIONS,
-        REPORT_TARGET_TYPE_ADDITIONS,
-        ADMIN_ACTION_ADDITIONS,
-      ].flatMap((additions) => appendedBy(additions, added)),
-    );
-    for (const member of members) {
-      result = result.replace(new RegExp(String.raw`,\s*'${member}'`, 'g'), '');
+    for (const [additions, column] of ENUM_COLUMNS) {
+      // Last first: each is then the enum's last member when removed.
+      for (const member of [...appendedBy(additions, added)].reverse()) {
+        result = result.replace(
+          new RegExp(
+            String.raw`(\b${column} ENUM\([^)]*?),\s*'${member}'(?=\s*\))`,
+            'g',
+          ),
+          '$1',
+        );
+      }
     }
   }
   return crlf ? result.replace(/\n/g, '\r\n') : result;

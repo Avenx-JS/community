@@ -525,6 +525,41 @@ describe('AuthRateLimitService', () => {
     },
   );
 
+  // Following notifies the followee (migration 047): a bucket per account
+  // for POST /users/:username/follow only, beside the write buckets.
+  it.each([
+    ['POST', '/users/a_user/follow', true],
+    ['DELETE', '/users/a_user/follow', false],
+    ['GET', '/users/a_user/followers', false],
+    ['POST', '/users/a_user/follow/extra', false],
+  ])(
+    'counts %s %s against the follow bucket: %s',
+    async (method, path, counted) => {
+      const hmac = (scope: string, value: string) =>
+        createHmac(
+          'sha256',
+          process.env.RATE_LIMIT_HASH_SECRET ??
+            process.env.MYSQL_PASSWORD ??
+            'community-local-rate-limit-secret',
+        )
+          .update(scope)
+          .update('\0')
+          .update(value)
+          .digest('hex');
+
+      await service.enforceApiRequest('192.0.2.10', method, path, 'account-1');
+
+      const keys = calls
+        .filter((call) => call.sql.startsWith('INSERT INTO auth_rate_limits'))
+        .map((call) => call.values[0]);
+      if (counted) {
+        expect(keys).toContain(hmac('api:follow:account', 'account-1'));
+      } else {
+        expect(keys).not.toContain(hmac('api:follow:account', 'account-1'));
+      }
+    },
+  );
+
   it.each([
     ['GET', '/media'],
     ['GET', '/media/some-id/file'],

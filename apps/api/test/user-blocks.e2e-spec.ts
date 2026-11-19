@@ -17,6 +17,7 @@ import {
   LOCK_BLOCKED_SQL,
   LOCK_BLOCKER_SQL,
   UNBLOCK_USER_SQL,
+  REMOVE_PAIR_FOLLOWS_SQL,
 } from '../src/users/user-blocks.service';
 
 interface FakeUser {
@@ -134,6 +135,10 @@ describe('User blocks (e2e)', () => {
         }
         clock += 60_000;
         return Promise.resolve([{ affectedRows: 1 }, []]);
+      }
+      // A block ends following both ways (migration 047); no follows here.
+      if (sql === REMOVE_PAIR_FOLLOWS_SQL) {
+        return Promise.resolve([{ affectedRows: 0 }, []]);
       }
       if (sql === UNBLOCK_USER_SQL) {
         const [blockerId, blockedId] = values as string[];
@@ -554,14 +559,15 @@ describe('User blocks (e2e)', () => {
       expect(await listNames('token-b')).toEqual([]);
     });
 
-    it('writes no notification and no audit entry, touching only the block tables', async () => {
+    // And ends following both ways (migration 047): the one other table.
+    it('writes no notification and no audit entry, touching only the block and follow tables', async () => {
       await userA.block('bob').expect(204);
       await userA.unblock('bob').expect(204);
       const writes = queryCalls
         .map(({ sql }) => sql)
         .filter((sql) => /^(INSERT|UPDATE|DELETE)\b/.test(sql));
       expect(new Set(writes)).toEqual(
-        new Set([BLOCK_USER_SQL, UNBLOCK_USER_SQL]),
+        new Set([BLOCK_USER_SQL, REMOVE_PAIR_FOLLOWS_SQL, UNBLOCK_USER_SQL]),
       );
     });
 

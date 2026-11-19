@@ -105,6 +105,16 @@ export class UpdateUserPreferencesDto {
   @IsOptional()
   @IsBoolean()
   notify_mentions?: boolean;
+
+  @ApiPropertyOptional({
+    default: true,
+    description:
+      'Whether you are notified (new_follower) when someone follows you. ' +
+      'Optional in PUT: absent means the default, true. Added by migration 047.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  notify_new_followers?: boolean;
 }
 
 export type UserPreferences = Required<UpdateUserPreferencesDto>;
@@ -117,4 +127,5 @@ export const DEFAULT_USER_PREFERENCES: UserPreferences = {
   language: 'en',
   push_notifications: true,
   notify_mentions: true,
+  notify_new_followers: true,
 };

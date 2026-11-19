@@ -49,6 +49,7 @@ interface AuthRateLimitConfig {
   searchIp: RateLimitOptions;
   autocompleteAccount: RateLimitOptions;
   usernameAvailableIp: RateLimitOptions;
+  followAccount: RateLimitOptions;
   communityNameAvailableAccount: RateLimitOptions;
   mediaUploadIp: RateLimitOptions;
   mediaUploadAccount: RateLimitOptions;
@@ -117,6 +118,7 @@ function readConfig(): AuthRateLimitConfig {
     searchIp: readOptions('API_SEARCH_IP', 30, 60),
     autocompleteAccount: readOptions('API_AUTOCOMPLETE_ACCOUNT', 60, 60),
     usernameAvailableIp: readOptions('AUTH_USERNAME_AVAILABLE_IP', 30, 60),
+    followAccount: readOptions('API_FOLLOW_ACCOUNT', 60, 3600),
     communityNameAvailableAccount: readOptions(
       'API_COMMUNITY_NAME_AVAILABLE_ACCOUNT',
       30,
@@ -391,6 +393,18 @@ export class AuthRateLimitService {
     // needs no token.
     if (method === 'GET' && path === '/search') {
       signals.push(this.signal('api:search:ip', ip, this.config.searchIp));
+    }
+
+    // Following: follow spam (following many accounts to be noticed, each
+    // one notified) is a known abuse pattern. Per account, an hour.
+    if (
+      method === 'POST' &&
+      /^\/users\/[^/]+\/follow$/.test(path) &&
+      accountId
+    ) {
+      signals.push(
+        this.signal('api:follow:account', accountId, this.config.followAccount),
+      );
     }
 
     // Username and community-name checks: enumeration oracles, as

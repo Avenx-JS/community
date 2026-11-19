@@ -49,6 +49,12 @@ export const BLOCK_STATE_SQL =
 export const BLOCK_USER_SQL =
   'INSERT INTO user_blocks (blocker_id, blocked_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE created_at = created_at';
 
+// A block ends following in both directions, in the block's transaction:
+// a block cannot be worked around by following (migration 047). Values:
+// blocker, blocked, blocked, blocker.
+export const REMOVE_PAIR_FOLLOWS_SQL =
+  'DELETE FROM user_follows WHERE (follower_id = ? AND followee_id = ?) OR (follower_id = ? AND followee_id = ?)';
+
 export const UNBLOCK_USER_SQL =
   'DELETE FROM user_blocks WHERE blocker_id = ? AND blocked_id = ?';
 
@@ -125,6 +131,12 @@ export class UserBlocksService {
       await connection.execute<ResultSetHeader>(BLOCK_USER_SQL, [
         blockerId,
         blockedId,
+      ]);
+      await connection.execute<ResultSetHeader>(REMOVE_PAIR_FOLLOWS_SQL, [
+        blockerId,
+        blockedId,
+        blockedId,
+        blockerId,
       ]);
 
       await connection.commit();

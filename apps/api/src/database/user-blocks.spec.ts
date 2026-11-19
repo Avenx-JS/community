@@ -107,6 +107,9 @@ describe('user blocks are read through one definition', () => {
       'users/user-autocomplete.service.ts',
       'users/user-block-policy.module.ts',
       'users/user-block-policy.service.ts',
+      // A follow is refused across a block, and the follow lists leave out
+      // accounts blocked either way by the viewer (migration 047).
+      'users/user-follows.service.ts',
       'votes/votes.service.ts',
     ]);
   });

@@ -73,6 +73,10 @@ export const DELETE_PRIVATE_STATE_SQL = [
   // account's browsers.
   'DELETE FROM push_subscriptions WHERE user_id = ?',
   'DELETE FROM notification_stream_tickets WHERE user_id = ?',
+  // Following (migration 047), both ways: a deleted account follows nobody
+  // and is followed by nobody.
+  'DELETE FROM user_follows WHERE follower_id = ?',
+  'DELETE FROM user_follows WHERE followee_id = ?',
   // The avatar and uploads never posted are released (migration 035); the
   // sweep deletes them. Files in the account's posts stay with the posts.
   ...RELEASE_ACCOUNT_MEDIA_SQL,

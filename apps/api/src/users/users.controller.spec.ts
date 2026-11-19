@@ -20,6 +20,8 @@ describe('UsersController', () => {
     bio: null,
     created_at: '2026-10-21T20:00:00.000Z',
     avatar: null,
+    follower_count: 2,
+    following_count: 1,
   };
   const ownProfile = {
     ...profile,

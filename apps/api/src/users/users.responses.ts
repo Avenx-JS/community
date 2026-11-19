@@ -13,9 +13,14 @@ import type {
   UserSuggestionList,
 } from './user-autocomplete.service';
 import type { BlockedUserDto } from './user-blocks.service';
-import type { OwnProfile, PlatformRole, UserProfile } from './users.service';
+import type {
+  OwnProfile,
+  PlatformRole,
+  UserProfile,
+  UserSummary,
+} from './users.service';
 
-export class UserProfileResponse implements UserProfile {
+export class UserSummaryResponse implements UserSummary {
   @ApiProperty()
   username!: string;
 
@@ -35,6 +40,25 @@ export class UserProfileResponse implements UserProfile {
       'Set with PUT /users/me/avatar, 256×256 WebP; null without an avatar.',
   })
   avatar!: MediaResponse | null;
+}
+
+export class UserProfileResponse
+  extends UserSummaryResponse
+  implements UserProfile
+{
+  @ApiProperty({
+    type: 'integer',
+    description:
+      'Accounts following this one (GET /users/{username}/followers), ' +
+      'deleted accounts not counted. The same for every viewer.',
+  })
+  follower_count!: number;
+
+  @ApiProperty({
+    type: 'integer',
+    description: 'Accounts this one follows (GET /users/{username}/following).',
+  })
+  following_count!: number;
 }
 
 export class OwnProfileResponse

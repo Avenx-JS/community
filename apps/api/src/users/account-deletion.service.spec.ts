@@ -192,6 +192,9 @@ describe('AccountDeletionService', () => {
       // Live notifications (migration 040).
       'DELETE FROM push_subscriptions WHERE user_id = ?',
       'DELETE FROM notification_stream_tickets WHERE user_id = ?',
+      // Following (migration 047), both ways.
+      'DELETE FROM user_follows WHERE follower_id = ?',
+      'DELETE FROM user_follows WHERE followee_id = ?',
       // Releases, never deletes: the sweep deletes the files (migration 035).
       ...RELEASE_ACCOUNT_MEDIA_SQL,
     ]);

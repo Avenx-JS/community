@@ -7,6 +7,8 @@ import { UserActivityService } from './user-activity.service';
 import { UserAutocompleteService } from './user-autocomplete.service';
 import { UserBlocksController } from './user-blocks.controller';
 import { UserBlocksService } from './user-blocks.service';
+import { UserFollowsController } from './user-follows.controller';
+import { UserFollowsService } from './user-follows.service';
 import { UsersController } from './users.controller';
 import { UsersService } from './users.service';
 import { AccountDataController } from './account-data.controller';
@@ -27,10 +29,16 @@ import { UserPreferencesService } from './user-preferences.service';
     UserActivityService,
     UserAutocompleteService,
     UserBlocksService,
+    UserFollowsService,
     UserPreferencesService,
     DataExportService,
   ],
-  controllers: [UsersController, UserBlocksController, AccountDataController],
+  controllers: [
+    UsersController,
+    UserBlocksController,
+    UserFollowsController,
+    AccountDataController,
+  ],
   exports: [UsersService],
 })
 export class UsersModule {}

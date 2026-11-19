@@ -2025,10 +2025,14 @@ HTTP `200`:
   "display_name": "Sam",
   "bio": "Grows tomatoes.",
   "created_at": "2026-10-21T20:00:00.000Z",
-  "avatar": null
+  "avatar": null,
+  "follower_count": 12,
+  "following_count": 3
 }
 ```
 
+`follower_count` and `following_count` count the account's
+[follows](#following-users), leaving out deleted accounts.
 `avatar` is the account's [avatar](#avatars-icons-and-banners), the media
 object of a 256×256 WebP, or `null`; `GET /users/me` and user search results
 carry it too. `display_name` and `bio` are user-authored public text and are `null` until the
@@ -2298,7 +2302,7 @@ whole operation back and the account stays fully intact):
    No one can register a placeholder in advance and block a deletion.
 5. The account's private state is deleted: its `community_subscriptions`,
    `community_notification_preferences`, the `notifications` it received, its
-   `saved_posts`, and its `user_blocks` in both directions. The account row is
+   `saved_posts`, its `user_blocks` and its `user_follows` in both directions. The account row is
    anonymised, not deleted, so the `ON DELETE CASCADE` on those foreign keys
    would never fire: the deletion removes them explicitly. Reports assigned to
    the account are unassigned (`assigned_to` and `assigned_at` cleared, the
@@ -2502,6 +2506,7 @@ defaults, and `GET` writes nothing.
 | `language` | `en` | A BCP 47 tag: language, optional script and region (`de`, `en-GB`, `zh-Hant-TW`) |
 | `push_notifications` | `true` | Whether notifications reach your browsers by [Web Push](#web-push); optional in `PUT`, absent means `true` (added by migration 040) |
 | `notify_mentions` | `true` | Whether you are notified when someone writes @your_username ([Mentions](#mentions)); optional in `PUT`, absent means `true` (added by migration 045) |
+| `notify_new_followers` | `true` | Whether you are notified when someone [follows](#following-users) you; optional in `PUT`, absent means `true` (added by migration 047) |
 
 ### Exporting your data
 
@@ -2713,6 +2718,9 @@ and `API_CONTENT_COOLDOWN_WINDOW_SECONDS`; and `API_SEARCH_IP_MAX` and
 minute by default; and `API_AUTOCOMPLETE_ACCOUNT_MAX` and
 `API_AUTOCOMPLETE_ACCOUNT_WINDOW_SECONDS` for
 [`GET /users/autocomplete`](#mentions), 60 per account per minute by default;
+and `API_FOLLOW_ACCOUNT_MAX` and `API_FOLLOW_ACCOUNT_WINDOW_SECONDS` for
+[`POST /users/:username/follow`](#following-users), 60 per account per hour
+by default;
 and `AUTH_USERNAME_AVAILABLE_IP_MAX`, `AUTH_USERNAME_AVAILABLE_IP_WINDOW_SECONDS`,
 `API_COMMUNITY_NAME_AVAILABLE_ACCOUNT_MAX` and
 `API_COMMUNITY_NAME_AVAILABLE_ACCOUNT_WINDOW_SECONDS` for the
@@ -6827,6 +6835,8 @@ the thing themselves.
 | `PUT /comments/:id/vote` | The comment's author | `403` |
 | A [mention](#mentions) in a post or comment | The account mentioned | Nothing: no notification, the text stays |
 | `GET /users/autocomplete` | The accounts suggested | Left out of the suggestions |
+| `POST /users/:username/follow` | The account followed | `403`; a block also removes the pair's follows ([Following users](#following-users)) |
+| `GET /users/:username/followers`, `/following` | The accounts listed | Left out, for a signed-in viewer |
 
 A reply is directed at the comment it answers. Replying to a third person's
 comment under a blocked user's post is not interacting with the blocked user,
@@ -6921,6 +6931,66 @@ probes per candidate row, inside its existing `recipient_id` index range.
 cached block decision would let a blocked interaction through for the cache's
 lifetime. If the inbox filter ever becomes a problem, the honest fix is a bounded
 `IN` list of blocked ids for callers with small lists, not a cache.
+
+## Following users
+
+Migration `047_create_user_follows`. Following an account is one-way and
+needs no approval. It spans every community and changes nothing about what
+either account may do; it only records the relationship, makes it public and
+notifies the followee.
+
+| Route | Auth | Answer |
+| --- | --- | --- |
+| `POST /users/:username/follow` | token | `204`, also when already following |
+| `DELETE /users/:username/follow` | token | `204`, also when not following |
+| `GET /users/:username/followers` | optional | `200`, the accounts following the user |
+| `GET /users/:username/following` | optional | `200`, the accounts the user follows |
+| `GET /users/:username/follow-status` | token | `200`, `{ "following": true, "followed_by": false }` |
+
+- **Errors.** `404` for an unknown or deleted account on every route,
+  `400` for following yourself, and `403` `{ "reason": "user_blocked" }`
+  when either account has blocked the other. The `403` is the same whichever
+  side blocked, so it does not say who did.
+- **Idempotent.** A repeat follow keeps the first row and its `created_at`
+  (`INSERT IGNORE` on the primary key `(follower_id, followee_id)`).
+  `chk_user_follows_not_self` refuses a self-follow in the database as well.
+- **Lists.** `page` (default 1) and `limit` (1–100, default 20), as on the
+  activity listings. The answer is `{ items, page, limit, total }`, and each
+  item is `{ username, display_name, avatar_url, followed_at }`, newest
+  follow first (`created_at DESC`, then the account id), served by
+  `idx_user_follows_followee` and `idx_user_follows_follower_created`.
+  Deleted accounts are never listed. A signed-in viewer does not see accounts
+  that they have blocked or that have blocked them, so `total` counts what
+  that viewer can page through.
+- **Profile counts.** `GET /users/:username` and `GET /users/me` carry
+  `follower_count` and `following_count`, public totals that leave out
+  deleted accounts but are not filtered per viewer.
+- **`follow-status`** reports both directions between the caller and the
+  user. For yourself it is `false` and `false`.
+- **Notification.** The first follow notifies the followee (`new_follower`,
+  the follower as actor and subject, `subject_type: user`), unless they set
+  `notify_new_followers` to `false` in [Preferences](#preferences).
+  Unfollowing and following again does not notify again: the notification's
+  unique key already holds that event.
+- **Blocks.** A block removes the pair's follows in both directions, in the
+  block's own transaction (`REMOVE_PAIR_FOLLOWS_SQL`), and unblocking does
+  not restore them. While the block stands, neither account can follow the
+  other.
+- **Account deletion** removes the account's follows in both directions
+  (the row is anonymised, so the `ON DELETE CASCADE` would never fire).
+- **Rate limit.** `POST /users/:username/follow` counts against
+  `API_FOLLOW_ACCOUNT_MAX` per `API_FOLLOW_ACCOUNT_WINDOW_SECONDS`, 60 per
+  account per hour by default, beside the write buckets. Unfollowing is not
+  counted against it.
+- **Concurrency.** A follow takes share locks on both account rows in id
+  order, as a block does, so a concurrent block or account deletion waits for
+  it and then removes the row.
+
+**Follow-ups, not in this migration.** Following is public: a
+`hide_follow_lists` preference, which would hide both lists from everyone but
+the owner, is deferred. So are posts of followed accounts in the home feed,
+`GET /users/me/following/posts`, a notification when a followed account
+posts, and the follow lists in the data export.
 
 ## Modmail
 
@@ -7024,6 +7094,7 @@ the triggering `subject_type`/`subject_id`, an optional `community_id`, a
 | `community_ownership_assigned`, `community_ownership_revoked`, `community_moderator_assigned` | a platform administrator makes the recipient a community's owner, replaces them as owner, or makes them a moderator (`AdminCommunityStaffService`, migration 044) | the community |
 | `mention` | someone writes @the_recipient in a post or comment (`MentionService`, migration 045; see [Mentions](#mentions)) | the post or comment |
 | `modmail_message` | a message in a [modmail](#modmail) thread: to the user from the team, to the team from the user (migration 046) | the message (`subject_type: modmail_message`) |
+| `new_follower` | someone [follows](#following-users) the recipient for the first time, unless `notify_new_followers` is off (`UserFollowsService.follow`, migration 047) | the follower's account (`subject_type: user`) |
 
 Adding a type requires a migration, as for the other enums.
 
@@ -7067,6 +7138,7 @@ does for the audit log. Allowed keys depend on the type:
 | `community_ownership_assigned`, `community_ownership_revoked`, `community_moderator_assigned` | none | `community_name`; never the administrator or the reason |
 | `mention` | none | `actor_username`, `community_name`, `post_title`, `excerpt`, and `post_id` for a comment |
 | `modmail_message` | `thread_id`, `sender` (`user`, `moderators`) | `community_name`, `thread_subject`, `excerpt`, `from_username` on a user's message; never the moderator |
+| `new_follower` | none | `actor_username` (the follower) |
 
 "Required" is enforced by the `NotificationEntry` type; at runtime the
 allowlist validates whichever allowed keys are present.

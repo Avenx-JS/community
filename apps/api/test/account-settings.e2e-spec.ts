@@ -311,6 +311,7 @@ describe('Account settings (e2e)', () => {
                     language: row[4],
                     push_notifications: row[5],
                     notify_mentions: row[6],
+                    notify_new_followers: row[7],
                   },
                 ]
               : [],
@@ -630,6 +631,7 @@ describe('Account settings (e2e)', () => {
         language: 'en',
         push_notifications: true,
         notify_mentions: true,
+        notify_new_followers: true,
       });
       const set = {
         email_notifications: false,
@@ -649,7 +651,12 @@ describe('Account settings (e2e)', () => {
       expect(
         (await as('token-a').put('/users/me/preferences', set).expect(200))
           .body,
-      ).toEqual({ ...set, push_notifications: true, notify_mentions: true });
+      ).toEqual({
+        ...set,
+        push_notifications: true,
+        notify_mentions: true,
+        notify_new_followers: true,
+      });
       expect(
         (
           await as('token-a')
@@ -660,10 +667,20 @@ describe('Account settings (e2e)', () => {
             })
             .expect(200)
         ).body,
-      ).toEqual({ ...set, push_notifications: false, notify_mentions: false });
+      ).toEqual({
+        ...set,
+        push_notifications: false,
+        notify_mentions: false,
+        notify_new_followers: true,
+      });
       expect(
         (await as('token-a').get('/users/me/preferences').expect(200)).body,
-      ).toEqual({ ...set, push_notifications: false, notify_mentions: false });
+      ).toEqual({
+        ...set,
+        push_notifications: false,
+        notify_mentions: false,
+        notify_new_followers: true,
+      });
       await as('token-a')
         .put('/users/me/preferences', { ...set, notify_mentions: 'yes' })
         .expect(400);

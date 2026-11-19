@@ -2,7 +2,12 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { beforeEach, describe, expect, it } from '@jest/globals';
 import { NotFoundException } from '@nestjs/common';
 import { MYSQL_POOL } from '../auth/auth.service';
-import { OWN_PROFILE_SQL, PlatformRole, UsersService } from './users.service';
+import {
+  OWN_PROFILE_SQL,
+  USER_PROFILE_SQL,
+  PlatformRole,
+  UsersService,
+} from './users.service';
 
 describe('UsersService', () => {
   let service: UsersService;
@@ -54,6 +59,8 @@ describe('UsersService', () => {
       bio: 'Gardener',
       created_at: '2026-10-21T20:00:00.000Z',
       avatar: null,
+      follower_count: 0,
+      following_count: 0,
     });
     expect(Object.keys(profile)).toEqual([
       'username',
@@ -61,11 +68,13 @@ describe('UsersService', () => {
       'bio',
       'created_at',
       'avatar',
+      'follower_count',
+      'following_count',
     ]);
     // Without an avatar, no media lookup.
     expect(queryCalls).toEqual([
       {
-        sql: 'SELECT username, display_name, bio, created_at, avatar_media_id FROM users WHERE username = ? AND deleted_at IS NULL LIMIT 1',
+        sql: USER_PROFILE_SQL,
         values: ['sample'],
       },
     ]);
@@ -91,11 +100,17 @@ describe('UsersService', () => {
       role: 'moderator',
       created_at: '2026-10-21T20:00:00.000Z',
       avatar: null,
+      follower_count: 0,
+      following_count: 0,
     });
     expect(queryCalls).toEqual([{ sql: OWN_PROFILE_SQL, values: ['user-id'] }]);
-    expect(OWN_PROFILE_SQL).toBe(
-      'SELECT id, username, email, email_verified_at, display_name, bio, role, created_at, avatar_media_id FROM users WHERE id = ? LIMIT 1',
+    // The account's own columns, then the follow counts (migration 047):
+    // never a credential or last_seen_at.
+    expect(OWN_PROFILE_SQL).toMatch(
+      /^SELECT id, username, email, email_verified_at, display_name, bio, role, created_at, avatar_media_id,\s+\(SELECT COUNT\(\*\) FROM user_follows/,
     );
+    expect(OWN_PROFILE_SQL).toMatch(/FROM users WHERE id = \? LIMIT 1$/);
+    expect(OWN_PROFILE_SQL).not.toMatch(/password|last_seen_at|token/);
   });
 
   it('throws 404 when the own account no longer exists', async () => {

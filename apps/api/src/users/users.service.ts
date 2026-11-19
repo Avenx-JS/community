@@ -10,6 +10,9 @@ interface UserProfileRow extends RowDataPacket {
   bio: string | null;
   created_at: Date | string;
   avatar_media_id?: string | null;
+  // Migration 047; absent in rows read by older fixtures.
+  follower_count?: number | string;
+  following_count?: number | string;
 }
 
 interface OwnProfileRow extends UserProfileRow {
@@ -38,13 +41,21 @@ export const PLATFORM_ROLE_SQL =
 export const ACTIVE_ADMINS_SQL =
   "SELECT id FROM users WHERE role = 'admin' AND deleted_at IS NULL ORDER BY id FOR UPDATE";
 
-export interface UserProfile {
+// An account as a search result shows it.
+export interface UserSummary {
   username: string;
   display_name: string | null;
   bio: string | null;
   created_at: string;
   // PUT /users/me/avatar; null without one.
   avatar: MediaDto | null;
+}
+
+export interface UserProfile extends UserSummary {
+  // Accounts following this one, and accounts it follows; deleted accounts
+  // not counted (migration 047).
+  follower_count: number;
+  following_count: number;
 }
 
 // The caller's own account. The only response that carries email and role;
@@ -57,10 +68,24 @@ export interface OwnProfile extends UserProfile {
   role: PlatformRole;
 }
 
-export const OWN_PROFILE_SQL =
-  'SELECT id, username, email, email_verified_at, display_name, bio, role, created_at, avatar_media_id FROM users WHERE id = ? LIMIT 1';
-export const USER_PROFILE_SQL =
-  'SELECT username, display_name, bio, created_at, avatar_media_id FROM users WHERE username = ? AND deleted_at IS NULL LIMIT 1';
+// The profile's follow counts, as the lists count them: deleted accounts
+// excluded. Served by idx_user_follows_followee and the primary key.
+const FOLLOW_COUNTS = `(SELECT COUNT(*) FROM user_follows f JOIN users fu ON fu.id = f.follower_id
+          WHERE f.followee_id = users.id AND fu.deleted_at IS NULL) AS follower_count,
+         (SELECT COUNT(*) FROM user_follows f JOIN users fu ON fu.id = f.followee_id
+          WHERE f.follower_id = users.id AND fu.deleted_at IS NULL) AS following_count`;
+
+export const OWN_PROFILE_SQL = `SELECT id, username, email, email_verified_at, display_name, bio, role, created_at, avatar_media_id,
+         ${FOLLOW_COUNTS}
+       FROM users WHERE id = ? LIMIT 1`;
+export const USER_PROFILE_SQL = `SELECT username, display_name, bio, created_at, avatar_media_id,
+         ${FOLLOW_COUNTS}
+       FROM users WHERE username = ? AND deleted_at IS NULL LIMIT 1`;
+
+const followCounts = (row: UserProfileRow) => ({
+  follower_count: Number(row.follower_count ?? 0),
+  following_count: Number(row.following_count ?? 0),
+});
 
 @Injectable()
 export class UsersService {
@@ -83,6 +108,7 @@ export class UsersService {
       bio: user.bio,
       created_at: new Date(user.created_at).toISOString(),
       avatar: await this.avatarOf(user),
+      ...followCounts(user),
     };
   }
 
@@ -113,6 +139,7 @@ export class UsersService {
       role: user.role,
       created_at: new Date(user.created_at).toISOString(),
       avatar: await this.avatarOf(user),
+      ...followCounts(user),
     };
   }
 

@@ -460,10 +460,11 @@ CREATE TABLE notifications (
         'community_ownership_revoked',
         'community_moderator_assigned',
         'mention',
-        'modmail_message'
+        'modmail_message',
+        'new_follower'
     ) NOT NULL,
     actor_id VARCHAR(36) NULL,
-    subject_type ENUM('post', 'comment', 'report', 'restriction', 'community', 'modmail_message') NOT NULL,
+    subject_type ENUM('post', 'comment', 'report', 'restriction', 'community', 'modmail_message', 'user') NOT NULL,
     subject_id VARCHAR(36) NOT NULL,
     community_id VARCHAR(36) NULL,
     metadata JSON NULL,
@@ -1058,6 +1059,22 @@ CREATE TABLE modmail_messages (
         FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE SET NULL
 );
 
+-- Following users (047_create_user_follows).
+-- Its enum members are in CREATE TABLE notifications above.
+CREATE TABLE user_follows (
+    follower_id VARCHAR(36) NOT NULL,
+    followee_id VARCHAR(36) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (follower_id, followee_id),
+    INDEX idx_user_follows_followee (followee_id, created_at, follower_id),
+    INDEX idx_user_follows_follower_created (follower_id, created_at, followee_id),
+    CONSTRAINT chk_user_follows_not_self CHECK (follower_id <> followee_id),
+    FOREIGN KEY (follower_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (followee_id) REFERENCES users(id) ON DELETE CASCADE
+);
+ALTER TABLE user_preferences
+  ADD COLUMN notify_new_followers BOOLEAN NOT NULL DEFAULT TRUE;
+
 CREATE TABLE schema_migrations (
     version VARCHAR(64) PRIMARY KEY,
     applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -1110,4 +1127,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('043_add_moderator_step_down'),
     ('044_add_admin_community_ownership'),
     ('045_add_mentions'),
-    ('046_create_modmail');
+    ('046_create_modmail'),
+    ('047_create_user_follows');

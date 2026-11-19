@@ -20,6 +20,8 @@ export const NOTIFICATION_TYPES = [
   'mention',
   // Migration 046: a modmail message, to the user or to the moderator team.
   'modmail_message',
+  // Migration 047: someone followed the recipient.
+  'new_follower',
 ] as const;
 
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
@@ -32,6 +34,8 @@ export const NOTIFICATION_SUBJECT_TYPES = [
   'community',
   // Migration 046.
   'modmail_message',
+  // Migration 047: an account, the follower of new_follower.
+  'user',
 ] as const;
 
 export type NotificationSubjectType =
@@ -161,6 +165,18 @@ export type NotificationEntry =
         from_username?: string;
       };
     }
+  // The follower is named, and is the subject: the notification is about
+  // them. A follow that is removed and repeated notifies once (the unique
+  // key), so unfollowing and following again is no way to spam an account.
+  | {
+      recipientId: string;
+      type: 'new_follower';
+      actorId: string;
+      subjectType: 'user';
+      subjectId: string;
+      communityId: null;
+      metadata: { actor_username?: string };
+    }
   // The author is named: a mention is someone addressing the recipient.
   | {
       recipientId: string;
@@ -282,6 +298,11 @@ const entryShapes: Record<
     subjectTypes: ['modmail_message'],
     hasActor: false,
     hasCommunity: true,
+  },
+  new_follower: {
+    subjectTypes: ['user'],
+    hasActor: true,
+    hasCommunity: false,
   },
 };
 
@@ -484,6 +505,9 @@ export function buildNotificationMetadata(
         ['post_title', snapshotValue(metadata, 'post_title')],
         ['excerpt', snapshotValue(metadata, 'excerpt')],
       );
+      break;
+    case 'new_follower':
+      fields.push(['actor_username', nameValue(metadata, 'actor_username')]);
       break;
     case 'modmail_message':
       // Never the moderator who wrote a reply.

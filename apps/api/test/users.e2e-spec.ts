@@ -28,6 +28,7 @@ import {
 } from '../src/users/user-activity.service';
 import { answerVoteScores } from './fakes/vote-scores';
 import { answerSavedFlags } from './fakes/saved-posts';
+import { USER_PROFILE_SQL } from '../src/users/users.service';
 
 type UserFixture = Record<string, string | Date | null>;
 type Row = Record<string, unknown>;
@@ -143,6 +144,12 @@ describe('User profile endpoints (e2e)', () => {
       notification_stream_tickets: [
         { user_id: 'user-a' },
         { user_id: 'user-b' },
+      ],
+      // Following (migration 047): every row touching A goes, B and C's stays.
+      user_follows: [
+        { follower_id: 'user-a', followee_id: 'user-b' },
+        { follower_id: 'user-b', followee_id: 'user-a' },
+        { follower_id: 'user-b', followee_id: 'user-banned' },
       ],
       hidden_posts: [
         { user_id: 'user-a', post_id: 'post-a' },
@@ -355,9 +362,14 @@ describe('User profile endpoints (e2e)', () => {
           [],
         ]);
       }
+      // The profile reads carry the follow counts (migration 047) as
+      // subqueries; without follows here they count 0.
       const select =
         /^SELECT ([\w, ]+) FROM users WHERE (username|id) = \?( AND deleted_at IS NULL)? LIMIT 1$/.exec(
-          sql,
+          sql.replace(
+            /,\s+\(SELECT COUNT\(\*\) FROM user_follows[\s\S]*AS following_count\s+/,
+            ' ',
+          ),
         );
       if (select) {
         const columns = select[1].split(', ');
@@ -608,6 +620,8 @@ describe('User profile endpoints (e2e)', () => {
         bio: 'Hi',
         created_at: '2026-10-21T20:00:00.000Z',
         avatar: null,
+        follower_count: 0,
+        following_count: 0,
       });
       for (const field of [
         'id',
@@ -622,7 +636,7 @@ describe('User profile endpoints (e2e)', () => {
       expect(JSON.stringify(response.body)).not.toMatch(SECRET);
       expect(queryCalls).toEqual([
         {
-          sql: 'SELECT username, display_name, bio, created_at, avatar_media_id FROM users WHERE username = ? AND deleted_at IS NULL LIMIT 1',
+          sql: USER_PROFILE_SQL,
           values: ['sample_user'],
         },
       ]);
@@ -670,6 +684,8 @@ describe('User profile endpoints (e2e)', () => {
         role: 'user',
         created_at: '2026-10-21T20:00:00.000Z',
         avatar: null,
+        follower_count: 0,
+        following_count: 0,
       });
       expect(response.body).not.toHaveProperty('last_seen_at');
       expect(JSON.stringify(response.body)).not.toMatch(SECRET);
@@ -767,6 +783,8 @@ describe('User profile endpoints (e2e)', () => {
         'display_name',
         'email',
         'email_verified',
+        'follower_count',
+        'following_count',
         'id',
         'role',
         'username',
@@ -924,6 +942,9 @@ describe('User profile endpoints (e2e)', () => {
         expect(owned(table, 'user_id', 'user-a')).toEqual([]);
         expect(owned(table, 'user_id', 'user-b')).toHaveLength(1);
       }
+      expect(tables.user_follows).toEqual([
+        { follower_id: 'user-b', followee_id: 'user-banned' },
+      ]);
       // Other accounts' rows, including a notification A caused, survive.
       expect(
         owned('community_subscriptions', 'user_id', 'user-b'),

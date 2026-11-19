@@ -9,9 +9,9 @@ import {
 } from './dto/user-preferences.dto';
 
 export const USER_PREFERENCES_SQL =
-  'SELECT email_notifications, new_community_notifications, show_nsfw, timezone, language, push_notifications, notify_mentions FROM user_preferences WHERE user_id = ? LIMIT 1';
+  'SELECT email_notifications, new_community_notifications, show_nsfw, timezone, language, push_notifications, notify_mentions, notify_new_followers FROM user_preferences WHERE user_id = ? LIMIT 1';
 export const UPSERT_USER_PREFERENCES_SQL =
-  'INSERT INTO user_preferences (user_id, email_notifications, new_community_notifications, show_nsfw, timezone, language, push_notifications, notify_mentions) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE email_notifications = VALUES(email_notifications), new_community_notifications = VALUES(new_community_notifications), show_nsfw = VALUES(show_nsfw), timezone = VALUES(timezone), language = VALUES(language), push_notifications = VALUES(push_notifications), notify_mentions = VALUES(notify_mentions)';
+  'INSERT INTO user_preferences (user_id, email_notifications, new_community_notifications, show_nsfw, timezone, language, push_notifications, notify_mentions, notify_new_followers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE email_notifications = VALUES(email_notifications), new_community_notifications = VALUES(new_community_notifications), show_nsfw = VALUES(show_nsfw), timezone = VALUES(timezone), language = VALUES(language), push_notifications = VALUES(push_notifications), notify_mentions = VALUES(notify_mentions), notify_new_followers = VALUES(notify_new_followers)';
 
 // Applied when an account subscribes to a community (CommunitiesService):
 // with new_community_notifications off, the new membership starts with
@@ -32,6 +32,8 @@ interface PreferencesRow extends RowDataPacket {
   push_notifications?: number | boolean;
   // Migration 045; likewise.
   notify_mentions?: number | boolean;
+  // Migration 047; likewise.
+  notify_new_followers?: number | boolean;
 }
 
 @Injectable()
@@ -62,6 +64,10 @@ export class UserPreferencesService {
         row.notify_mentions === undefined
           ? DEFAULT_USER_PREFERENCES.notify_mentions
           : isSqlTrue(row.notify_mentions),
+      notify_new_followers:
+        row.notify_new_followers === undefined
+          ? DEFAULT_USER_PREFERENCES.notify_new_followers
+          : isSqlTrue(row.notify_new_followers),
     };
   }
 
@@ -79,6 +85,8 @@ export class UserPreferencesService {
       // Optional in PUT, added after clients existed: absent is the default.
       input.push_notifications ?? DEFAULT_USER_PREFERENCES.push_notifications,
       input.notify_mentions ?? DEFAULT_USER_PREFERENCES.notify_mentions,
+      input.notify_new_followers ??
+        DEFAULT_USER_PREFERENCES.notify_new_followers,
     ]);
     return this.get(userId);
   }

@@ -184,6 +184,15 @@ const entries = {
       sender: 'moderators',
     },
   },
+  new_follower: {
+    recipientId: 'maintainer',
+    type: 'new_follower',
+    actorId: 'fan',
+    subjectType: 'user',
+    subjectId: 'fan',
+    communityId: null,
+    metadata: { actor_username: 'fan_1' },
+  },
 } satisfies Record<NotificationEntry['type'], NotificationEntry>;
 
 const memberPost = (recipientId: string): typeof entries.community_post => ({
