@@ -27,6 +27,7 @@ import {
 } from '../common/community-visibility';
 import type { NotificationEntry } from '../notifications/notification-metadata';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
+import { MentionService } from '../notifications/mention.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreateCommentDto } from './dto/create-comment.dto';
 import { UpdateCommentDto } from './dto/update-comment.dto';
@@ -60,6 +61,11 @@ interface EditableCommentRow extends RowDataPacket {
   author_id: string;
   community_id: string;
   content: string;
+  // For the mentions an edit adds (migration 045). Absent in older fakes.
+  post_id?: string;
+  post_title?: string;
+  post_author_id?: string;
+  parent_author_id?: string | null;
   created_at: Date | string;
   edited_at: Date | string | null;
   removed_at: Date | string | null;
@@ -319,6 +325,7 @@ export interface CommentReplyListDto {
 export class CommentsService {
   private readonly blocks: UserBlockPolicyService;
   private readonly bans: CommunityBanPolicyService;
+  private readonly mentions: MentionService;
 
   constructor(
     @Inject(MYSQL_POOL) private readonly pool: Pool,
@@ -326,9 +333,11 @@ export class CommentsService {
     private readonly ruleAcceptance: CommunityRuleAcceptanceService,
     @Optional() blocks?: UserBlockPolicyService,
     @Optional() bans?: CommunityBanPolicyService,
+    @Optional() mentions?: MentionService,
   ) {
     this.blocks = blocks ?? new UserBlockPolicyService(pool);
     this.bans = bans ?? new CommunityBanPolicyService(pool);
+    this.mentions = mentions ?? new MentionService(pool, notifications);
   }
 
   // The thread varies by viewer only where content was removed. A removed
@@ -668,9 +677,11 @@ export class CommentsService {
         `SELECT comments.id, comments.author_id, comments.content,
            comments.created_at, comments.edited_at,
            comments.removed_at, posts.removed_at AS post_removed_at,
-           posts.community_id
+           posts.community_id, comments.post_id, posts.title AS post_title,
+           posts.author_id AS post_author_id, parent.author_id AS parent_author_id
          FROM comments
          INNER JOIN posts ON posts.id = comments.post_id
+         LEFT JOIN comments parent ON parent.id = comments.parent_id
          WHERE comments.id = ? AND ${visibleCommunitySql('posts.community_id')}
          LIMIT 1 FOR UPDATE OF comments`,
         [id],
@@ -709,6 +720,20 @@ export class CommentsService {
           'UPDATE comments SET content = ?, edited_at = UTC_TIMESTAMP() WHERE id = ?',
           [input.content, id],
         );
+        // Only the mentions the edit adds; the account the comment already
+        // notified (its post's or parent's author) is not notified again.
+        await this.mentions.record(connection, {
+          authorId: actorId,
+          communityId: comment.community_id,
+          subjectType: 'comment',
+          subjectId: id,
+          postId: comment.post_id,
+          postTitle: comment.post_title,
+          text: input.content,
+          previousText: comment.content,
+          alreadyNotified: [comment.parent_author_id ?? comment.post_author_id],
+          excerpt: input.content,
+        });
       }
 
       const dto = await this.readFlat(connection, id);
@@ -877,6 +902,18 @@ export class CommentsService {
               },
             };
       await this.notifications.record(connection, notification);
+      // Not again for the account post_comment or comment_reply notified.
+      await this.mentions.record(connection, {
+        authorId,
+        communityId: post.community_id,
+        subjectType: 'comment',
+        subjectId: comment.id,
+        postId: post.id,
+        postTitle: post.title,
+        text: comment.content,
+        alreadyNotified: [notification.recipientId],
+        excerpt: comment.content,
+      });
 
       await connection.commit();
       return {

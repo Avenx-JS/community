@@ -77,7 +77,10 @@ describe('migration 044 (admin community ownership)', () => {
     expect(snapshot).toContain(
       '-- Admin community ownership and moderators (044_add_admin_community_ownership).',
     );
-    expect(snapshot).toContain("('044_add_admin_community_ownership');");
+    // Followed by ';', or by ',' once a later migration is recorded.
+    expect(snapshot).toMatch(
+      /\('043_add_moderator_step_down'\), \('044_add_admin_community_ownership'\)[,;]/,
+    );
   });
 
   // The administrator is never named to the people affected.

@@ -27,6 +27,7 @@ export const NOTIFICATION_TYPE_ADDITIONS: EnumAdditions = [
       'community_moderator_assigned',
     ],
   ],
+  ['045', ['mention']],
 ];
 
 export const ADMIN_ACTION_ADDITIONS: EnumAdditions = [
@@ -65,8 +66,10 @@ export function appendedBy(
   return additions.find(([added]) => added === version)?.[1] ?? [];
 }
 
-// The migrations that only append enum members, which data/community.sql
-// folds into its CREATE TABLE statements under a header-only block.
+// The migrations whose enum members data/community.sql folds into its
+// CREATE TABLE statements, under one appended block that ends at its first
+// blank line: only the header for 042-044, the header and its other
+// statements for 045.
 const FOLDED_MIGRATIONS: ReadonlyArray<
   readonly [version: string, name: string, header: string]
 > = [
@@ -81,6 +84,7 @@ const FOLDED_MIGRATIONS: ReadonlyArray<
     '044_add_admin_community_ownership',
     'Admin community ownership and moderators',
   ],
+  ['045', '045_add_mentions', 'Mentions'],
 ];
 
 // The snapshot as it stood before migration `version`: for it and every

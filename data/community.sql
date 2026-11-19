@@ -458,7 +458,8 @@ CREATE TABLE notifications (
         'community_moderator_left',
         'community_ownership_assigned',
         'community_ownership_revoked',
-        'community_moderator_assigned'
+        'community_moderator_assigned',
+        'mention'
     ) NOT NULL,
     actor_id VARCHAR(36) NULL,
     subject_type ENUM('post', 'comment', 'report', 'restriction', 'community') NOT NULL,
@@ -1016,6 +1017,12 @@ ALTER TABLE votes
 -- Its enum members are in CREATE TABLE admin_actions,
 -- community_moderation_actions and notifications above; it adds nothing else.
 
+-- Mentions (045_add_mentions).
+-- Its notification type is in CREATE TABLE notifications above.
+ALTER TABLE user_preferences
+  ADD COLUMN notify_mentions BOOLEAN NOT NULL DEFAULT TRUE;
+CREATE INDEX idx_users_display_name ON users (display_name);
+
 CREATE TABLE schema_migrations (
     version VARCHAR(64) PRIMARY KEY,
     applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -1066,4 +1073,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('041_add_admin_content_and_roles'),
     ('042_add_community_ownership_transfer'),
     ('043_add_moderator_step_down'),
-    ('044_add_admin_community_ownership');
+    ('044_add_admin_community_ownership'),
+    ('045_add_mentions');

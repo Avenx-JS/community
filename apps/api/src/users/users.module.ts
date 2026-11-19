@@ -4,6 +4,7 @@ import { DatabaseModule } from '../database/database.module';
 import { UserBlockPolicyModule } from './user-block-policy.module';
 import { AccountDeletionService } from './account-deletion.service';
 import { UserActivityService } from './user-activity.service';
+import { UserAutocompleteService } from './user-autocomplete.service';
 import { UserBlocksController } from './user-blocks.controller';
 import { UserBlocksService } from './user-blocks.service';
 import { UsersController } from './users.controller';
@@ -24,6 +25,7 @@ import { UserPreferencesService } from './user-preferences.service';
     UsersService,
     AccountDeletionService,
     UserActivityService,
+    UserAutocompleteService,
     UserBlocksService,
     UserPreferencesService,
     DataExportService,

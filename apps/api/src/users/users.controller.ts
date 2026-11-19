@@ -32,6 +32,8 @@ import {
 import { UserActivityService } from './user-activity.service';
 import { DeleteOwnAccountDto } from './dto/delete-own-account.dto';
 import { UpdateOwnProfileDto } from './dto/update-own-profile.dto';
+import { AutocompleteUsersDto } from './dto/autocomplete-users.dto';
+import { UserAutocompleteService } from './user-autocomplete.service';
 import { UsersService } from './users.service';
 import {
   OwnProfileResponse,
@@ -39,6 +41,7 @@ import {
   UserCommunityListResponse,
   UserPostListResponse,
   UserProfileResponse,
+  UserSuggestionListResponse,
 } from './users.responses';
 import {
   OptionalAuthGuard,
@@ -53,6 +56,7 @@ export class UsersController {
     private readonly usersService: UsersService,
     private readonly accountDeletion: AccountDeletionService,
     private readonly userActivity: UserActivityService,
+    private readonly autocomplete: UserAutocompleteService,
   ) {}
 
   // The 'me' routes must stay above ':username', or Express would hand
@@ -129,6 +133,32 @@ export class UsersController {
       request.user.id,
       body.password,
     );
+  }
+
+  // Above ':username', like 'me'. The username autocomplete is reserved at
+  // registration (RESERVED_USERNAMES), so no account's profile hides here.
+  @Get('autocomplete')
+  @UseGuards(AuthGuard)
+  @ApiOperation({
+    summary: 'Suggest usernames for a mention',
+    description:
+      'Up to 10 accounts whose username or display name starts with q, ' +
+      'case-insensitive, exact username matches first. Never a deleted ' +
+      'account, the caller, or an account blocked by or blocking the caller. ' +
+      'Authenticated, so the directory cannot be enumerated anonymously, and ' +
+      'rate-limited per account (API_AUTOCOMPLETE_ACCOUNT_*, 60 a minute) on ' +
+      'top of the general limits.',
+  })
+  @ApiAuthenticated()
+  @ApiOkResponse({ type: UserSuggestionListResponse })
+  @ApiErrorResponses({
+    400: 'q is missing, shorter than 2 or longer than 50 characters, or not plain text.',
+  })
+  suggest(
+    @Query() query: AutocompleteUsersDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.autocomplete.suggest(request.user.id, query.q);
   }
 
   @Get(':username')

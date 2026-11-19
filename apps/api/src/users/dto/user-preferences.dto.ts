@@ -94,6 +94,17 @@ export class UpdateUserPreferencesDto {
   @IsOptional()
   @IsBoolean()
   push_notifications?: boolean;
+
+  @ApiPropertyOptional({
+    default: true,
+    description:
+      'Whether you are notified (mention) when someone writes @your_username ' +
+      'in a post or comment. Optional in PUT: absent means the default, ' +
+      'true. Added by migration 045.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  notify_mentions?: boolean;
 }
 
 export type UserPreferences = Required<UpdateUserPreferencesDto>;
@@ -105,4 +116,5 @@ export const DEFAULT_USER_PREFERENCES: UserPreferences = {
   timezone: 'UTC',
   language: 'en',
   push_notifications: true,
+  notify_mentions: true,
 };

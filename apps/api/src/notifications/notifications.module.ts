@@ -5,6 +5,7 @@ import { NotificationInboxService } from './notification-inbox.service';
 import { NotificationStreamController } from './notification-stream.controller';
 import { NotificationStreamService } from './notification-stream.service';
 import { NotificationsController } from './notifications.controller';
+import { MentionService } from './mention.service';
 import { NotificationsService } from './notifications.service';
 import { PushSubscriptionsController } from './push-subscriptions.controller';
 import {
@@ -25,6 +26,7 @@ import { PushSubscriptionsService } from './web-push/push-subscriptions.service'
     PushSubscriptionsController,
   ],
   providers: [
+    MentionService,
     NotificationInboxService,
     NotificationsService,
     NotificationStreamService,
@@ -33,6 +35,6 @@ import { PushSubscriptionsService } from './web-push/push-subscriptions.service'
     { provide: PUSH_CONFIG, useFactory: () => readPushConfig() },
     { provide: PUSH_TRANSPORT, useValue: fetchPushTransport },
   ],
-  exports: [NotificationsService],
+  exports: [MentionService, NotificationsService],
 })
 export class NotificationsModule {}

@@ -327,6 +327,7 @@ describe('notification enums', () => {
     ['042', '042_add_community_ownership_transfer.sql'],
     ['043', '043_add_moderator_step_down.sql'],
     ['044', '044_add_admin_community_ownership.sql'],
+    ['045', '045_add_mentions.sql'],
   ])('match migration %s, appended only', (version, file) => {
     const list = enumThrough(
       NOTIFICATION_TYPES,

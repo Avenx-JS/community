@@ -1,9 +1,11 @@
 import { IsEmail, IsString, Length, Matches, MaxLength } from 'class-validator';
+import { IsNotReservedUsername } from './reserved-username';
 
 export class RegisterDto {
   @IsString()
   @Length(3, 50)
   @Matches(/^[a-zA-Z0-9_]+$/)
+  @IsNotReservedUsername()
   username!: string;
 
   @IsEmail()

@@ -154,6 +154,21 @@ const entries = {
     communityId: 'community-1',
     metadata: { community_name: 'garden' },
   },
+  mention: {
+    recipientId: 'maintainer',
+    type: 'mention',
+    actorId: 'author',
+    subjectType: 'comment',
+    subjectId: 'comment-1',
+    communityId: 'community-1',
+    metadata: {
+      actor_username: 'author_1',
+      community_name: 'garden',
+      post_id: 'post-1',
+      post_title: 'First tomatoes',
+      excerpt: '@maintainer can you confirm?',
+    },
+  },
 } satisfies Record<NotificationEntry['type'], NotificationEntry>;
 
 const memberPost = (recipientId: string): typeof entries.community_post => ({

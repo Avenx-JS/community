@@ -7,6 +7,7 @@ import type { AuthenticatedRequest } from '../auth/auth.guard';
 import { AuthService } from '../auth/auth.service';
 import { AccountDeletionService } from './account-deletion.service';
 import { UserActivityService } from './user-activity.service';
+import { UserAutocompleteService } from './user-autocomplete.service';
 import { UsersController } from './users.controller';
 import { UsersService } from './users.service';
 
@@ -78,6 +79,7 @@ describe('UsersController', () => {
         { provide: UsersService, useValue: usersService },
         { provide: AccountDeletionService, useValue: accountDeletion },
         { provide: UserActivityService, useValue: userActivity },
+        { provide: UserAutocompleteService, useValue: {} },
         // AuthGuard's dependency; the guard itself does not run here.
         { provide: AuthService, useValue: {} },
       ],
@@ -140,6 +142,11 @@ describe('UsersController', () => {
     );
     expect(position(':username', RequestMethod.GET)).toBeGreaterThan(
       position('me', RequestMethod.GET),
+    );
+    // Likewise /users/autocomplete (migration 045).
+    expect(position('autocomplete', RequestMethod.GET)).toBeGreaterThan(-1);
+    expect(position(':username', RequestMethod.GET)).toBeGreaterThan(
+      position('autocomplete', RequestMethod.GET),
     );
     // The activity listings come after both, as the issue specifies.
     for (const path of [

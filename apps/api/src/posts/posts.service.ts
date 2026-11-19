@@ -30,6 +30,8 @@ import {
 import { readPositiveInteger } from '../common/read-positive-integer';
 import { CommunityModerationLogService } from '../communities/community-moderation-log.service';
 import { CommunityRuleAcceptanceService } from '../communities/community-rule-acceptance.service';
+import { MentionService } from '../notifications/mention.service';
+import { mentionText } from '../notifications/mentions';
 import { NotificationsService } from '../notifications/notifications.service';
 import {
   CreatePostDto,
@@ -354,6 +356,7 @@ export class PostsService {
   );
 
   private readonly bans: CommunityBanPolicyService;
+  private readonly mentions: MentionService;
 
   constructor(
     @Inject(MYSQL_POOL) private readonly pool: Pool,
@@ -364,8 +367,10 @@ export class PostsService {
     // Optional so the service also runs without the media module (tests);
     // the periodic sweep frees released files then.
     @Optional() private readonly mediaCleanup?: MediaCleanupService,
+    @Optional() mentions?: MentionService,
   ) {
     this.bans = bans ?? new CommunityBanPolicyService(pool);
+    this.mentions = mentions ?? new MentionService(pool, notifications);
   }
 
   // The upload a media post attaches: the author's own, for a post, not
@@ -549,6 +554,17 @@ export class PostsService {
           `Skipped community_post notifications for community ${post.community_id}: ${fanOut.recipients} eligible recipients exceed NOTIFICATION_FANOUT_MAX (${this.fanOutMax})`,
         );
       }
+      // Mentions in the title or the text; a member mentioned also gets the
+      // community_post above, which is about the community, not about them.
+      await this.mentions.record(connection, {
+        authorId,
+        communityId: post.community_id,
+        subjectType: 'post',
+        subjectId: post.id,
+        postTitle: post.title,
+        text: mentionText(post.title, post.content),
+        excerpt: post.content ?? undefined,
+      });
 
       await connection.commit();
       // A new post has no votes yet.
@@ -889,6 +905,19 @@ export class PostsService {
           `UPDATE posts SET ${changes.map(([column]) => `${column} = ?`).join(', ')}, edited_at = UTC_TIMESTAMP() WHERE id = ?`,
           [...changes.map(([, value]) => value), id],
         );
+        const title = input.title ?? post.title;
+        const content = input.content ?? post.content;
+        // Only the mentions the edit adds.
+        await this.mentions.record(connection, {
+          authorId: actorId,
+          communityId: post.community_id,
+          subjectType: 'post',
+          subjectId: id,
+          postTitle: title,
+          text: mentionText(title, content),
+          previousText: mentionText(post.title, post.content),
+          excerpt: content ?? undefined,
+        });
       }
 
       const [rows] = await connection.execute<PostRow[]>(

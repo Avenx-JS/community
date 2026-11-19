@@ -47,6 +47,7 @@ interface AuthRateLimitConfig {
   accountDeleteIp: RateLimitOptions;
   accountDeleteAccount: RateLimitOptions;
   searchIp: RateLimitOptions;
+  autocompleteAccount: RateLimitOptions;
   mediaUploadIp: RateLimitOptions;
   mediaUploadAccount: RateLimitOptions;
   emailVerifyRequestIp: RateLimitOptions;
@@ -112,6 +113,7 @@ function readConfig(): AuthRateLimitConfig {
     accountDeleteIp: readOptions('API_ACCOUNT_DELETE_IP', 10, 86400),
     accountDeleteAccount: readOptions('API_ACCOUNT_DELETE_ACCOUNT', 5, 86400),
     searchIp: readOptions('API_SEARCH_IP', 30, 60),
+    autocompleteAccount: readOptions('API_AUTOCOMPLETE_ACCOUNT', 60, 60),
     mediaUploadIp: readOptions('API_MEDIA_UPLOAD_IP', 30, 3600),
     mediaUploadAccount: readOptions('API_MEDIA_UPLOAD_ACCOUNT', 20, 3600),
     // Every one sends an email, to an address the caller chose or owns.
@@ -381,6 +383,19 @@ export class AuthRateLimitService {
     // needs no token.
     if (method === 'GET' && path === '/search') {
       signals.push(this.signal('api:search:ip', ip, this.config.searchIp));
+    }
+
+    // An editor asks on every keystroke, and each answer reveals accounts:
+    // its own budget per account (the route needs a token), apart from the
+    // general read limit.
+    if (method === 'GET' && path === '/users/autocomplete' && accountId) {
+      signals.push(
+        this.signal(
+          'api:autocomplete:account',
+          accountId,
+          this.config.autocompleteAccount,
+        ),
+      );
     }
 
     return this.enforceSignals(signals);

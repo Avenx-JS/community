@@ -16,6 +16,8 @@ export const NOTIFICATION_TYPES = [
   'community_ownership_assigned',
   'community_ownership_revoked',
   'community_moderator_assigned',
+  // Migration 045: someone wrote @username in a post or comment.
+  'mention',
 ] as const;
 
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
@@ -131,6 +133,21 @@ export type NotificationEntry =
     }
   // Not a moderation type: the former owner is named, since the new owner
   // has to know whom they took the community over from.
+  // The author is named: a mention is someone addressing the recipient.
+  | {
+      recipientId: string;
+      type: 'mention';
+      actorId: string;
+      subjectType: 'post' | 'comment';
+      subjectId: string;
+      communityId: string;
+      metadata: CommunitySnapshot & {
+        // The post a comment belongs to; absent for a post.
+        post_id?: string;
+        post_title?: string;
+        excerpt?: string;
+      };
+    }
   // A platform administrator's decision: never names the administrator or
   // the reason, as for every moderation type.
   | {
@@ -226,6 +243,11 @@ const entryShapes: Record<
   community_moderator_assigned: {
     subjectTypes: ['community'],
     hasActor: false,
+    hasCommunity: true,
+  },
+  mention: {
+    subjectTypes: ['post', 'comment'],
+    hasActor: true,
     hasCommunity: true,
   },
 };
@@ -420,6 +442,15 @@ export function buildNotificationMetadata(
       // Never the moderator's username.
       fields.push(
         ['community_name', nameValue(metadata, 'community_name')],
+        ['post_title', snapshotValue(metadata, 'post_title')],
+        ['excerpt', snapshotValue(metadata, 'excerpt')],
+      );
+      break;
+    case 'mention':
+      fields.push(
+        ['actor_username', nameValue(metadata, 'actor_username')],
+        ['community_name', nameValue(metadata, 'community_name')],
+        ['post_id', identifierValue(metadata, 'post_id')],
         ['post_title', snapshotValue(metadata, 'post_title')],
         ['excerpt', snapshotValue(metadata, 'excerpt')],
       );

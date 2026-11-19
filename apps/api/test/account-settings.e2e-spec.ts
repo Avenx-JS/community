@@ -310,6 +310,7 @@ describe('Account settings (e2e)', () => {
                     timezone: row[3],
                     language: row[4],
                     push_notifications: row[5],
+                    notify_mentions: row[6],
                   },
                 ]
               : [],
@@ -628,6 +629,7 @@ describe('Account settings (e2e)', () => {
         timezone: 'UTC',
         language: 'en',
         push_notifications: true,
+        notify_mentions: true,
       });
       const set = {
         email_notifications: false,
@@ -642,21 +644,29 @@ describe('Account settings (e2e)', () => {
       await as('token-a')
         .put('/users/me/preferences', { show_nsfw: true })
         .expect(400);
-      // push_notifications is optional in PUT (migration 040): absent is on.
+      // push_notifications (migration 040) and notify_mentions (migration
+      // 045) are optional in PUT: absent is on.
       expect(
         (await as('token-a').put('/users/me/preferences', set).expect(200))
           .body,
-      ).toEqual({ ...set, push_notifications: true });
+      ).toEqual({ ...set, push_notifications: true, notify_mentions: true });
       expect(
         (
           await as('token-a')
-            .put('/users/me/preferences', { ...set, push_notifications: false })
+            .put('/users/me/preferences', {
+              ...set,
+              push_notifications: false,
+              notify_mentions: false,
+            })
             .expect(200)
         ).body,
-      ).toEqual({ ...set, push_notifications: false });
+      ).toEqual({ ...set, push_notifications: false, notify_mentions: false });
       expect(
         (await as('token-a').get('/users/me/preferences').expect(200)).body,
-      ).toEqual({ ...set, push_notifications: false });
+      ).toEqual({ ...set, push_notifications: false, notify_mentions: false });
+      await as('token-a')
+        .put('/users/me/preferences', { ...set, notify_mentions: 'yes' })
+        .expect(400);
     });
   });
 

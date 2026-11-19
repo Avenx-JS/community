@@ -93,6 +93,8 @@ describe('user blocks are read through one definition', () => {
       ),
     ).toEqual([
       'comments/comments.service.ts',
+      // A mention notifies nobody across a block, in either direction.
+      'notifications/mention.service.ts',
       'notifications/notification-inbox.service.ts',
       // The live channels deliver exactly what the inbox shows the recipient.
       'notifications/notification-stream.service.ts',
@@ -100,6 +102,9 @@ describe('user blocks are read through one definition', () => {
       // GET /feed, the caller's own surface (FEED_UNBLOCKED_AUTHOR_SQL).
       'posts/posts.service.ts',
       'users/user-activity.service.ts',
+      // Suggesting a blocked account would offer a mention that notifies
+      // nobody.
+      'users/user-autocomplete.service.ts',
       'users/user-block-policy.module.ts',
       'users/user-block-policy.service.ts',
       'votes/votes.service.ts',

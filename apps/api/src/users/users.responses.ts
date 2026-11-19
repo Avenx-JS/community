@@ -8,6 +8,10 @@ import type {
   UserCommunityDto,
   UserCommunityRole,
 } from './user-activity.service';
+import type {
+  UserSuggestion,
+  UserSuggestionList,
+} from './user-autocomplete.service';
 import type { BlockedUserDto } from './user-blocks.service';
 import type { OwnProfile, PlatformRole, UserProfile } from './users.service';
 
@@ -172,4 +176,24 @@ export class UserCommunityListResponse implements Page<UserCommunityDto> {
 
   @ApiProperty({ type: 'integer' })
   total!: number;
+}
+
+export class UserSuggestionResponse implements UserSuggestion {
+  @ApiProperty()
+  username!: string;
+
+  @ApiProperty({ type: String, nullable: true })
+  display_name!: string | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description: "The avatar's URL; null without one.",
+  })
+  avatar_url!: string | null;
+}
+
+export class UserSuggestionListResponse implements UserSuggestionList {
+  @ApiProperty({ type: [UserSuggestionResponse], maxItems: 10 })
+  items!: UserSuggestionResponse[];
 }

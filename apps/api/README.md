@@ -2461,6 +2461,7 @@ defaults, and `GET` writes nothing.
 | `timezone` | `UTC` | An IANA zone this runtime knows, in its proper case (`Europe/Berlin`) |
 | `language` | `en` | A BCP 47 tag: language, optional script and region (`de`, `en-GB`, `zh-Hant-TW`) |
 | `push_notifications` | `true` | Whether notifications reach your browsers by [Web Push](#web-push); optional in `PUT`, absent means `true` (added by migration 040) |
+| `notify_mentions` | `true` | Whether you are notified when someone writes @your_username ([Mentions](#mentions)); optional in `PUT`, absent means `true` (added by migration 045) |
 
 ### Exporting your data
 
@@ -2669,7 +2670,10 @@ environment variables: `API_REQUEST_IP_MAX` and
 `API_CONTENT_CREATE_ACCOUNT_WINDOW_SECONDS`; and `API_CONTENT_COOLDOWN_MAX`
 and `API_CONTENT_COOLDOWN_WINDOW_SECONDS`; and `API_SEARCH_IP_MAX` and
 `API_SEARCH_IP_WINDOW_SECONDS` for [`GET /search`](#search), 30 per IP per
-minute by default; and `API_MEDIA_UPLOAD_IP_MAX`,
+minute by default; and `API_AUTOCOMPLETE_ACCOUNT_MAX` and
+`API_AUTOCOMPLETE_ACCOUNT_WINDOW_SECONDS` for
+[`GET /users/autocomplete`](#mentions), 60 per account per minute by default;
+and `API_MEDIA_UPLOAD_IP_MAX`,
 `API_MEDIA_UPLOAD_IP_WINDOW_SECONDS`, `API_MEDIA_UPLOAD_ACCOUNT_MAX` and
 `API_MEDIA_UPLOAD_ACCOUNT_WINDOW_SECONDS` for [uploads](#media), 30 per IP and
 20 per account per hour by default. Configure the same values and
@@ -6774,6 +6778,8 @@ the thing themselves.
 | `POST /posts/:postId/comments` with `parent_id` | The **parent comment's** author, not the post's | `403` |
 | `PUT /posts/:id/vote` | The post's author | `403` |
 | `PUT /comments/:id/vote` | The comment's author | `403` |
+| A [mention](#mentions) in a post or comment | The account mentioned | Nothing: no notification, the text stays |
+| `GET /users/autocomplete` | The accounts suggested | Left out of the suggestions |
 
 A reply is directed at the comment it answers. Replying to a third person's
 comment under a blocked user's post is not interacting with the blocked user,
@@ -6895,6 +6901,7 @@ the triggering `subject_type`/`subject_id`, an optional `community_id`, a
 | `community_ownership_transferred` | the creator makes the recipient the community's owner (`CommunitiesService.transferOwnership`, migration 042) | the community |
 | `community_moderator_left` | a moderator of the recipient's community steps down (`CommunityModeratorInvitesService.stepDown`, migration 043) | the community |
 | `community_ownership_assigned`, `community_ownership_revoked`, `community_moderator_assigned` | a platform administrator makes the recipient a community's owner, replaces them as owner, or makes them a moderator (`AdminCommunityStaffService`, migration 044) | the community |
+| `mention` | someone writes @the_recipient in a post or comment (`MentionService`, migration 045; see [Mentions](#mentions)) | the post or comment |
 
 Adding a type requires a migration, as for the other enums.
 
@@ -6936,6 +6943,7 @@ does for the audit log. Allowed keys depend on the type:
 | `community_ownership_transferred` | none                       | `actor_username` (the former owner), `community_name` |
 | `community_moderator_left` | none                              | `actor_username` (the former moderator), `community_name` |
 | `community_ownership_assigned`, `community_ownership_revoked`, `community_moderator_assigned` | none | `community_name`; never the administrator or the reason |
+| `mention` | none | `actor_username`, `community_name`, `post_title`, `excerpt`, and `post_id` for a comment |
 
 "Required" is enforced by the `NotificationEntry` type; at runtime the
 allowlist validates whichever allowed keys are present.
@@ -7371,6 +7379,66 @@ rather than a bypass.
 support in the API, and adding a transport would be a new architectural
 dependency nothing here requires. Polling `unread-count` is the delivery
 mechanism.
+
+### Mentions
+
+Migration `045_add_mentions`. Writing `@username` in a post (title or text)
+or a comment notifies that account (`mention`), through the inbox, the
+[stream](#live-notifications) and Web Push like every notification. There is
+no write endpoint: `POST` and `PATCH` of posts and comments read the text, in
+the same transaction as the content.
+
+**What counts.** `@` followed by a whole username (3-50 of `[A-Za-z0-9_]`),
+not preceded by a word character or another `@` (so `dev@example.com` and
+`@@name` are not mentions), compared case-insensitively. Mentions inside
+inline code (`` `@name` ``), fenced code blocks (```` ``` ```` or `~~~`,
+an unclosed fence to the end of the text) and URLs (`https://example.com/@name`)
+do not count. The first `MENTIONS_PER_ITEM` (10) distinct names of a post or
+comment are considered; the rest stay plain text, so a list of names is not a
+broadcast.
+
+**Who is not notified**, decided in one statement
+(`mentionRecipientsSql` in `mention.service.ts`):
+- an unknown or deleted account, and the author themselves;
+- an account blocked by, or blocking, the author ([Blocking users](#blocking-users));
+- an account with [`notify_mentions`](#preferences) off;
+- an account banned from the community;
+- in a private community, an account that is not a member, which could not
+  read the content;
+- for a comment, the account it already notifies (`post_comment` to the
+  post's author, `comment_reply` to the parent comment's author): one
+  notification per comment, not two.
+
+Removed content takes no new comments and cannot be edited, so it never
+mentions anyone.
+
+**Edits** notify only the mentions they add: names in the new version (within
+the limit) that the version it replaces did not contain. An account is
+notified at most once per post or comment, however often an edit removes and
+re-adds it: the notifications table's unique key (recipient, type, subject)
+keeps the first. A notification the recipient deleted
+(`DELETE /notifications/:id`) is gone, though, and a later re-adding edit
+notifies again.
+
+#### `GET /users/autocomplete`
+
+Username suggestions for an editor, for `?q=` (2-50 characters, plain text; a
+leading `@` is ignored). `{ "items": [{ "username", "display_name",
+"avatar_url" }] }`, at most 10: accounts whose username or display name starts
+with `q`, case-insensitive, exact username prefixes first, then shorter
+usernames. Never a deleted account, the caller, or an account blocked by or
+blocking the caller: a mention of them would notify nobody.
+
+- **Authenticated** (`401` without a token): the directory cannot be
+  enumerated anonymously. At least two characters, for the same reason.
+- **Rate-limited** per account by `API_AUTOCOMPLETE_ACCOUNT_MAX` and
+  `API_AUTOCOMPLETE_ACCOUNT_WINDOW_SECONDS` (60 a minute), on top of the
+  general read limit: an editor asks on every keystroke.
+- Served by the unique username index and `idx_users_display_name` (migration
+  045).
+- `autocomplete` is a reserved username: `POST /auth/register` answers `400`
+  for it (`RESERVED_USERNAMES`), since `/users/autocomplete` is this route and
+  a profile of that name could never be reached.
 
 ### Live notifications
 
