@@ -10,6 +10,7 @@ import {
 } from './notification-metadata';
 import {
   enumThrough,
+  NOTIFICATION_SUBJECT_TYPE_ADDITIONS,
   NOTIFICATION_TYPE_ADDITIONS,
 } from '../database/enum-history';
 
@@ -320,7 +321,13 @@ describe('notification enums', () => {
     expect(NOTIFICATION_TYPES.slice(-APPENDED_TYPES.length)).toEqual(
       APPENDED_TYPES,
     );
-    expect(enumValues('subject_type')).toEqual([...NOTIFICATION_SUBJECT_TYPES]);
+    expect(enumValues('subject_type')).toEqual(
+      enumThrough(
+        NOTIFICATION_SUBJECT_TYPES,
+        NOTIFICATION_SUBJECT_TYPE_ADDITIONS,
+        '010',
+      ),
+    );
   });
 
   it.each([
@@ -328,6 +335,7 @@ describe('notification enums', () => {
     ['043', '043_add_moderator_step_down.sql'],
     ['044', '044_add_admin_community_ownership.sql'],
     ['045', '045_add_mentions.sql'],
+    ['046', '046_create_modmail.sql'],
   ])('match migration %s, appended only', (version, file) => {
     const list = enumThrough(
       NOTIFICATION_TYPES,
@@ -336,8 +344,11 @@ describe('notification enums', () => {
     )
       .map((type) => `'${type}'`)
       .join(', ');
-    expect(read(`../../../../data/migrations/${file}`)).toContain(
-      `ALTER TABLE notifications MODIFY COLUMN type ENUM( ${list} ) NOT NULL;`,
+    // Ends the statement, or another MODIFY of the table follows (046).
+    expect(read(`../../../../data/migrations/${file}`)).toMatch(
+      new RegExp(
+        `ALTER TABLE notifications MODIFY COLUMN type ENUM\\( ${list} \\) NOT NULL[,;]`,
+      ),
     );
   });
 

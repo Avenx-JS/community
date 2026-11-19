@@ -143,6 +143,13 @@ export const EXPORT_SECTIONS: Array<[string, string]> = [
     'push_subscriptions',
     'SELECT user_agent, created_at, last_success_at, expires_at FROM push_subscriptions WHERE user_id = ? ORDER BY created_at',
   ],
+  // Modmail (migration 046): the account's threads with community moderator
+  // teams, message by message. Never which moderator wrote a team message:
+  // that is the team's, as it is in GET /users/me/modmail/:id.
+  [
+    'modmail_messages',
+    'SELECT c.name AS community, t.subject, t.status, m.is_moderator AS from_moderators, m.body, m.created_at FROM modmail_threads t JOIN communities c ON c.id = t.community_id JOIN modmail_messages m ON m.thread_id = t.id WHERE t.user_id = ? ORDER BY t.created_at, t.id, m.created_at, m.id',
+  ],
   [
     'sessions',
     'SELECT created_at, last_used_at, ip_prefix, user_agent FROM auth_sessions WHERE user_id = ? ORDER BY created_at',

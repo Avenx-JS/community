@@ -199,6 +199,7 @@ describe('AdminReportsService.queueStats', () => {
       post: 4,
       comment: 0,
       community: 0,
+      modmail_message: 0,
     });
   });
 

@@ -63,6 +63,11 @@ const RETURNED_METADATA_KEYS = [
   'status',
   'restriction_type',
   'expires_at',
+  // modmail_message (migration 046).
+  'thread_id',
+  'thread_subject',
+  'sender',
+  'from_username',
 ] as const;
 
 function parseMetadata(value: unknown): Record<string, unknown> {

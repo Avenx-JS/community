@@ -2,6 +2,7 @@ import { describe, expect, it } from '@jest/globals';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { checkTriggerRule, checkTriggerSql } from './check-trigger-rules';
+import { REPORT_TARGET_TYPE_ADDITIONS } from './enum-history';
 
 const read = (path: string) => readFileSync(resolve(__dirname, path), 'utf8');
 const normalise = (sql: string) => sql.replace(/\s+/g, ' ').trim();
@@ -77,8 +78,17 @@ describe('migration 016 (generalise report targets)', () => {
     );
 
     expect(table).toContain('reported_user_id VARCHAR(36) NULL,');
+    // 016's targets, and those later migrations appended (enum-history.ts).
     expect(table).toContain(
-      "target_type ENUM('user', 'post', 'comment', 'community') NOT NULL DEFAULT 'user',",
+      `target_type ENUM(${[
+        'user',
+        'post',
+        'comment',
+        'community',
+        ...REPORT_TARGET_TYPE_ADDITIONS.flatMap(([, members]) => members),
+      ]
+        .map((type) => `'${type}'`)
+        .join(', ')}) NOT NULL DEFAULT 'user',`,
     );
     expect(table).toContain('target_id VARCHAR(36) NOT NULL,');
     expect(table).toContain('target_author_id VARCHAR(36) NULL,');

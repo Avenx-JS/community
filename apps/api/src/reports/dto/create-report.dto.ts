@@ -53,8 +53,10 @@ export class CreateReportDto {
   target_type!: ReportTargetType;
 
   /**
-   * A username for user, a community name for community, an ID for post and
-   * comment. The format for the given target_type is checked after this
+   * A username for user, a community name for community, an ID for post,
+   * comment and modmail_message (only a party to the thread may report one
+   * of its messages; administrators review it). The format for the given
+   * target_type is checked after this
    * combined pattern: username 3-50 letters, digits or underscores; community
    * name 1-50, also allowing hyphens; ID 1-36, also allowing hyphens.
    */

@@ -11,6 +11,7 @@ import { AdminModule } from './admin/admin.module';
 import { ReportsModule } from './reports/reports.module';
 import { SearchModule } from './search/search.module';
 import { MediaModule } from './media/media.module';
+import { ModmailModule } from './modmail/modmail.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { EmailModule } from './email/email.module';
 import { RedisModule } from './redis/redis.module';
@@ -30,6 +31,7 @@ import { QueuesModule } from './queues/queues.module';
     ReportsModule,
     SearchModule,
     MediaModule,
+    ModmailModule,
     NotificationsModule,
     EmailModule,
   ],

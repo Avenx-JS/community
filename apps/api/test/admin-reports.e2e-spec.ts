@@ -1738,7 +1738,13 @@ describe('Admin reports API (e2e)', () => {
           impersonation: 0,
           other: 0,
         },
-        by_target_type: { user: 0, post: 0, comment: 0, community: 0 },
+        by_target_type: {
+          user: 0,
+          post: 0,
+          comment: 0,
+          community: 0,
+          modmail_message: 0,
+        },
         oldest_open_at: null,
         meta: { scopes: expect.any(Object) as unknown },
       });

@@ -24,6 +24,10 @@ import type {
 import { REPORT_TARGET_JOINS_SQL } from './report-target.sql';
 import type { CommunityReportStatus } from './community-report-review';
 import { visibleCommunityColumnsSql } from '../common/community-visibility';
+import {
+  canModerateCommunitySql,
+  isSqlTrue,
+} from '../common/community-moderation';
 
 interface ReportedUserRow extends RowDataPacket {
   id: string;
@@ -34,6 +38,21 @@ interface ContentAuthorRow extends RowDataPacket {
   author_id: string;
   community_id: string;
 }
+
+interface ReportedModmailRow extends RowDataPacket {
+  author_id: string | null;
+  user_id: string;
+  can_moderate: number | string | boolean;
+}
+
+// The message, and whether the reporter may read it: the thread's user, or
+// a moderator or the creator of its community. Values: reporter, reporter,
+// message id.
+export const REPORTED_MODMAIL_SQL = `SELECT m.author_id, t.user_id,
+         ${canModerateCommunitySql('t.community_id')} AS can_moderate
+       FROM modmail_messages m
+       INNER JOIN modmail_threads t ON t.id = m.thread_id
+       WHERE m.id = ? LIMIT 1`;
 
 interface ReportedCommunityRow extends RowDataPacket {
   id: string;
@@ -108,6 +127,7 @@ const OWN_REPORT_TARGET_LABEL_SQL = `CASE ur.target_type
            WHEN 'post' THEN IF(target_post.removed_at IS NULL, target_post.title, NULL)
            WHEN 'comment' THEN IF(target_comment.removed_at IS NULL, LEFT(target_comment.content, 100), NULL)
            WHEN 'community' THEN IF(${visibleCommunityColumnsSql('target_community')}, target_community.name, NULL)
+           WHEN 'modmail_message' THEN LEFT(target_modmail.body, 100)
          END AS target_label`;
 
 // The column list is the response's allow-list: nothing moderator-only is ever
@@ -161,6 +181,7 @@ const TARGET_FORMATS: Record<ReportTargetType, SafeRouteParamKind> = {
   community: 'communityName',
   post: 'id',
   comment: 'id',
+  modmail_message: 'id',
 };
 
 @Injectable()
@@ -423,6 +444,8 @@ export class ReportsService {
       case 'post':
       case 'comment':
         return this.resolveContent(input.target_type, input.target, reporterId);
+      case 'modmail_message':
+        return this.resolveModmail(input.target, reporterId);
     }
   }
 
@@ -471,6 +494,40 @@ export class ReportsService {
       targetAuthorId: authorId,
       reportedUsername: null,
       communityId,
+    };
+  }
+
+  // Only a party to the thread may report one of its messages, and not their
+  // own: anyone else gets 404, which never confirms the message exists.
+  // Platform administrators review it (no community queue): the moderation
+  // team is a party to every modmail thread. A team reply names its
+  // moderator to the administrators only (reported_user_id), never to the
+  // reporting user.
+  private async resolveModmail(
+    id: string,
+    reporterId: string,
+  ): Promise<ResolvedTarget> {
+    const [rows] = await this.pool.execute<ReportedModmailRow[]>(
+      REPORTED_MODMAIL_SQL,
+      [reporterId, reporterId, id],
+    );
+    const message = rows[0];
+    if (
+      !message ||
+      (message.user_id !== reporterId && !isSqlTrue(message.can_moderate))
+    ) {
+      throw new NotFoundException('Modmail message not found');
+    }
+    if (message.author_id === reporterId) {
+      throw new BadRequestException('You cannot report your own message');
+    }
+    return {
+      type: 'modmail_message',
+      id,
+      reportedUserId: message.author_id,
+      targetAuthorId: message.author_id,
+      reportedUsername: null,
+      communityId: null,
     };
   }
 

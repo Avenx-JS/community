@@ -71,6 +71,10 @@ export function createOpenApiDocument(app: INestApplication): OpenAPIObject {
     )
     .addTag('reports', 'Reporting users to platform administrators.')
     .addTag('notifications', "The authenticated user's notification inbox.")
+    .addTag(
+      'modmail',
+      'Conversations between a user and a community moderator team. Private messages between users are out of scope.',
+    )
     .addTag('admin: users', 'Account directory for administrators.')
     .addTag(
       'admin: communities',

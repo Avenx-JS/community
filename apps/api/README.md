@@ -1231,7 +1231,7 @@ envelope. Optional query parameters:
 | ------------------- | -------------------------------------------------------------------------------------------- |
 | `status`            | `open`, `under_review`, `resolved`, `rejected`                                               |
 | `reason`            | `spam`, `harassment`, `hate_speech`, `sexual_content`, `self_harm`, `impersonation`, `other` |
-| `target_type`       | `user`, `post`, `comment`, `community`; omit it for every type in one ordered stream          |
+| `target_type`       | `user`, `post`, `comment`, `community`, `modmail_message`; omit it for every type in one ordered stream |
 | `reported_username` | Exact username, 3–50 letters, digits, or underscores. Does not match community reports       |
 | `reporter_username` | Exact username, 3–50 letters, digits, or underscores                                         |
 | `withdrawn`         | `exclude` (default) hides reports their reporter withdrew; `include` lists them too; `only` lists nothing else |
@@ -1269,6 +1269,7 @@ human-readable `target_label`:
 | `post` | The post's title |
 | `comment` | The first 100 characters of the comment |
 | `community` | The community's name |
+| `modmail_message` | The first 100 characters of the message |
 
 **`target_label` is `null` when the target no longer exists.** `target_id` has no
 foreign key, so a report outlives its target. The label comes from a left join
@@ -2856,7 +2857,7 @@ abuse traffic.
 
 The JSON body accepts:
 
-- `target_type`: `user`, `post`, `comment` or `community`.
+- `target_type`: `user`, `post`, `comment`, `community` or `modmail_message`.
 - `target`: what is being reported, read according to `target_type`. Each resource
   is addressed the way the rest of the API addresses it:
 
@@ -2865,6 +2866,7 @@ The JSON body accepts:
   | `user` | A username | 3–50 letters, digits or underscores |
   | `community` | A community name | 1–50 letters, digits, underscores or hyphens |
   | `post`, `comment` | An ID | 1–36 letters, digits, underscores or hyphens |
+  | `modmail_message` | A message ID, of a thread you are a party to ([Modmail](#modmail)) | 1–36 letters, digits, underscores or hyphens |
 
   A target that does not match its type's format returns `400`.
 - `reason`: one of `spam`, `harassment`, `hate_speech`, `sexual_content`,
@@ -2959,7 +2961,7 @@ lives, as an exception to the
 | Parameter | Accepted values |
 | --- | --- |
 | `status` | `open`, `under_review`, `resolved`, `rejected` |
-| `target_type` | `user`, `post`, `comment`, `community` |
+| `target_type` | `user`, `post`, `comment`, `community`, `modmail_message` |
 | `page` | Integer 1–10000; defaults to `1` |
 | `limit` | Integer 1–100; defaults to `20` |
 | `sort` | `new` (default) or `oldest`; ties use the report ID |
@@ -3168,7 +3170,8 @@ notification type and is a follow-up; `GET /reports` shows it.
 ### Report targets
 
 Since migration `016_generalise_report_targets`, a report names one
-polymorphic target: `target_type` is `user`, `post`, `comment` or `community`,
+polymorphic target: `target_type` is `user`, `post`, `comment`, `community` or
+`modmail_message` (migration 046),
 and `target_id` is that row's ID.
 
 One table with one target column was chosen over one table per target kind,
@@ -3193,6 +3196,7 @@ deletes reports about it.
 | `user` | the account | the account | `NULL` |
 | `post`, `comment` | the content | the content's author | the author at submission |
 | `community` | the community | `NULL` | `NULL` |
+| `modmail_message` | the message | its author (a moderator, for a team reply) | the same |
 
 `target_author_id` (`ON DELETE SET NULL`) records a content target's author at
 submission time. A later change to `reported_user_id` therefore cannot silently
@@ -6875,6 +6879,80 @@ cached block decision would let a blocked interaction through for the cache's
 lifetime. If the inbox filter ever becomes a problem, the honest fix is a bounded
 `IN` list of blocked ids for callers with small lists, not a cache.
 
+## Modmail
+
+Migration `046_create_modmail`. A conversation between one user and the
+moderator team of one community: an appeal against a ban, a question about a
+removal, a warning before a ban, an application to moderate. The team is the
+community's creator and its moderators (`canModerateCommunitySql`); every one
+of them is a party to every thread of the community.
+
+**Private messages between users are out of scope.** They bring a much larger
+spam and abuse surface; they could later share these tables.
+
+| Route | Who | Does |
+| --- | --- | --- |
+| `POST /communities/:name/modmail` | any user | `{ "subject", "body" }`: writes to the team (`201`, the thread) |
+| `POST /communities/:name/modmail` | the team | `{ "username", "subject", "body" }`: writes to any account |
+| `GET /communities/:name/modmail?status=open\|archived` | the team | the community's threads (`open` by default), most recently active first |
+| `GET /communities/:name/modmail/:id` | the team | one thread with its messages |
+| `POST /communities/:name/modmail/:id/messages` | the team | `{ "body" }`: replies |
+| `POST /communities/:name/modmail/:id/archive`, `/unarchive` | the team | idempotent, `200` |
+| `GET /users/me/modmail` | the user | their threads, archived included |
+| `GET /users/me/modmail/:id` | the user | one of them |
+| `POST /users/me/modmail/:id/messages` | the user | `{ "body" }`: replies; reopens an archived thread |
+
+`404` for an unknown, deleted or suspended community (its team holds no
+powers then), `403` on the team routes for anyone else, `404` for a thread
+that is not the caller's or not the community's. A member of the team writing
+to their own team gets `409`.
+
+**Who wrote.** Each message has `is_moderator`, an `author_label` (the user's
+username, or "moderators of c/<name>" for a team message) and
+`author_username`. For a team message, `author_username` is the moderator to
+the team and always `null` to the user: the user talks to the team, never to
+a person. The one place that decides it is `ModmailService.withMessages`.
+`modmail_messages.author_id` is `ON DELETE SET NULL`.
+
+**Bodies** are plain text (line breaks allowed, no control characters),
+trimmed: a subject of 1-200 characters, a message of 1-10,000.
+
+**Appeals and limits.** A user banned from the community may still write to
+its team: that is the appeal path. A user opens at most
+`MODMAIL_THREADS_PER_DAY` (3) new threads a day with one community, and
+`MODMAIL_BANNED_THREADS_PER_DAY` (1) while banned from it; beyond, `429` with
+`retry_after_seconds`. The count runs under a lock on the user's row, so two
+concurrent requests cannot both pass it. Replies count against the general
+write limits only.
+
+**Restricted accounts.** The three `/users/me/modmail` routes are
+`@AllowRestricted`: a suspended or banned account can read and answer its
+threads, an appeal included. Opening a new thread is refused (`403`), as
+every other write.
+
+**Blocks do not apply.** A user cannot block the moderation team, and the team
+cannot block its way out of an appeal: modmail checks no block, and its
+notifications carry no actor, which is what the inbox filters blocks by.
+
+**Notifications** (`modmail_message`, one per message, the message as the
+subject): a team message notifies the user (`sender: moderators`); a user's
+message notifies every member of the team except one who muted the community
+(`POST /communities/:name/mute`), with `from_username`. Never an actor, so the
+moderator is never named. Metadata: `community_name`, `thread_id`,
+`thread_subject`, `excerpt`, `sender`, and `from_username` on a user's
+message.
+
+**Reports.** A message can be reported (`target_type: modmail_message`) by a
+party to its thread: the user, or a member of the team; anyone else gets
+`404`, one's own message `400`. Platform administrators review it, never the
+community's own queue: the team is a party to every thread. A reported team
+message names its moderator to the administrators (`reported_user_id`), not to
+the user.
+
+**Accounts.** An account deletion keeps its threads (the team's record of a
+decision); the user shows as `null`. The data export includes the account's
+threads, message by message, with `from_moderators` instead of who wrote.
+
 ## Notifications
 
 Notifications are stored in the `notifications` table (migration
@@ -6902,6 +6980,7 @@ the triggering `subject_type`/`subject_id`, an optional `community_id`, a
 | `community_moderator_left` | a moderator of the recipient's community steps down (`CommunityModeratorInvitesService.stepDown`, migration 043) | the community |
 | `community_ownership_assigned`, `community_ownership_revoked`, `community_moderator_assigned` | a platform administrator makes the recipient a community's owner, replaces them as owner, or makes them a moderator (`AdminCommunityStaffService`, migration 044) | the community |
 | `mention` | someone writes @the_recipient in a post or comment (`MentionService`, migration 045; see [Mentions](#mentions)) | the post or comment |
+| `modmail_message` | a message in a [modmail](#modmail) thread: to the user from the team, to the team from the user (migration 046) | the message (`subject_type: modmail_message`) |
 
 Adding a type requires a migration, as for the other enums.
 
@@ -6944,6 +7023,7 @@ does for the audit log. Allowed keys depend on the type:
 | `community_moderator_left` | none                              | `actor_username` (the former moderator), `community_name` |
 | `community_ownership_assigned`, `community_ownership_revoked`, `community_moderator_assigned` | none | `community_name`; never the administrator or the reason |
 | `mention` | none | `actor_username`, `community_name`, `post_title`, `excerpt`, and `post_id` for a comment |
+| `modmail_message` | `thread_id`, `sender` (`user`, `moderators`) | `community_name`, `thread_subject`, `excerpt`, `from_username` on a user's message; never the moderator |
 
 "Required" is enforced by the `NotificationEntry` type; at runtime the
 allowlist validates whichever allowed keys are present.

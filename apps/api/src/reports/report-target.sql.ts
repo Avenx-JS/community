@@ -10,4 +10,6 @@ export const REPORT_TARGET_JOINS_SQL = `LEFT JOIN users target_user
        LEFT JOIN comments target_comment
          ON ur.target_type = 'comment' AND target_comment.id = ur.target_id
        LEFT JOIN communities target_community
-         ON ur.target_type = 'community' AND target_community.id = ur.target_id`;
+         ON ur.target_type = 'community' AND target_community.id = ur.target_id
+       LEFT JOIN modmail_messages target_modmail
+         ON ur.target_type = 'modmail_message' AND target_modmail.id = ur.target_id`;

@@ -340,7 +340,7 @@ CREATE TABLE user_reports (
     reviewed_by VARCHAR(36) NULL,
     reviewed_at TIMESTAMP NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    target_type ENUM('user', 'post', 'comment', 'community') NOT NULL DEFAULT 'user',
+    target_type ENUM('user', 'post', 'comment', 'community', 'modmail_message') NOT NULL DEFAULT 'user',
     target_id VARCHAR(36) NOT NULL,
     target_author_id VARCHAR(36) NULL,
     withdrawn_at TIMESTAMP NULL DEFAULT NULL,
@@ -459,10 +459,11 @@ CREATE TABLE notifications (
         'community_ownership_assigned',
         'community_ownership_revoked',
         'community_moderator_assigned',
-        'mention'
+        'mention',
+        'modmail_message'
     ) NOT NULL,
     actor_id VARCHAR(36) NULL,
-    subject_type ENUM('post', 'comment', 'report', 'restriction', 'community') NOT NULL,
+    subject_type ENUM('post', 'comment', 'report', 'restriction', 'community', 'modmail_message') NOT NULL,
     subject_id VARCHAR(36) NOT NULL,
     community_id VARCHAR(36) NULL,
     metadata JSON NULL,
@@ -1023,6 +1024,40 @@ ALTER TABLE user_preferences
   ADD COLUMN notify_mentions BOOLEAN NOT NULL DEFAULT TRUE;
 CREATE INDEX idx_users_display_name ON users (display_name);
 
+-- Modmail (046_create_modmail).
+-- Its enum members are in CREATE TABLE notifications and user_reports above.
+CREATE TABLE modmail_threads (
+    id VARCHAR(36) PRIMARY KEY,
+    community_id VARCHAR(36) NOT NULL,
+    user_id VARCHAR(36) NOT NULL,
+    subject VARCHAR(200) NOT NULL,
+    status ENUM('open', 'archived') NOT NULL DEFAULT 'open',
+    started_by ENUM('user', 'moderators') NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_message_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_modmail_threads_community (community_id, status, last_message_at, id),
+    INDEX idx_modmail_threads_user (user_id, last_message_at, id),
+    INDEX idx_modmail_threads_started (user_id, community_id, started_by, created_at),
+    CONSTRAINT fk_modmail_threads_community
+        FOREIGN KEY (community_id) REFERENCES communities(id) ON DELETE CASCADE,
+    CONSTRAINT fk_modmail_threads_user
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE TABLE modmail_messages (
+    id VARCHAR(36) PRIMARY KEY,
+    thread_id VARCHAR(36) NOT NULL,
+    author_id VARCHAR(36) NULL,
+    body TEXT NOT NULL,
+    is_moderator BOOLEAN NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_modmail_messages_thread (thread_id, created_at, id),
+    INDEX idx_modmail_messages_author (author_id),
+    CONSTRAINT fk_modmail_messages_thread
+        FOREIGN KEY (thread_id) REFERENCES modmail_threads(id) ON DELETE CASCADE,
+    CONSTRAINT fk_modmail_messages_author
+        FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
 CREATE TABLE schema_migrations (
     version VARCHAR(64) PRIMARY KEY,
     applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -1074,4 +1109,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('042_add_community_ownership_transfer'),
     ('043_add_moderator_step_down'),
     ('044_add_admin_community_ownership'),
-    ('045_add_mentions');
+    ('045_add_mentions'),
+    ('046_create_modmail');

@@ -169,6 +169,21 @@ const entries = {
       excerpt: '@maintainer can you confirm?',
     },
   },
+  modmail_message: {
+    recipientId: 'appellant',
+    type: 'modmail_message',
+    actorId: null,
+    subjectType: 'modmail_message',
+    subjectId: 'message-1',
+    communityId: 'community-1',
+    metadata: {
+      community_name: 'garden',
+      thread_id: 'thread-1',
+      thread_subject: 'About my ban',
+      excerpt: 'We have reviewed your appeal.',
+      sender: 'moderators',
+    },
+  },
 } satisfies Record<NotificationEntry['type'], NotificationEntry>;
 
 const memberPost = (recipientId: string): typeof entries.community_post => ({

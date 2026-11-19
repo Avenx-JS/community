@@ -33,6 +33,8 @@ export const REPORT_TARGET_TYPES = [
   'post',
   'comment',
   'community',
+  // Migration 046: a message in a modmail thread, by a party to it.
+  'modmail_message',
 ] as const;
 export type ReportTargetType = (typeof REPORT_TARGET_TYPES)[number];
 

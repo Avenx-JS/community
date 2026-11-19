@@ -28,6 +28,17 @@ export const NOTIFICATION_TYPE_ADDITIONS: EnumAdditions = [
     ],
   ],
   ['045', ['mention']],
+  ['046', ['modmail_message']],
+];
+
+// notifications.subject_type, as migration 010 created it plus these.
+export const NOTIFICATION_SUBJECT_TYPE_ADDITIONS: EnumAdditions = [
+  ['046', ['modmail_message']],
+];
+
+// user_reports.target_type, as migration 016 created it plus these.
+export const REPORT_TARGET_TYPE_ADDITIONS: EnumAdditions = [
+  ['046', ['modmail_message']],
 ];
 
 export const ADMIN_ACTION_ADDITIONS: EnumAdditions = [
@@ -69,7 +80,7 @@ export function appendedBy(
 // The migrations whose enum members data/community.sql folds into its
 // CREATE TABLE statements, under one appended block that ends at its first
 // blank line: only the header for 042-044, the header and its other
-// statements for 045.
+// statements for 045 and 046 (whose statements contain no blank line).
 const FOLDED_MIGRATIONS: ReadonlyArray<
   readonly [version: string, name: string, header: string]
 > = [
@@ -85,6 +96,7 @@ const FOLDED_MIGRATIONS: ReadonlyArray<
     'Admin community ownership and moderators',
   ],
   ['045', '045_add_mentions', 'Mentions'],
+  ['046', '046_create_modmail', 'Modmail'],
 ];
 
 // The snapshot as it stood before migration `version`: for it and every
@@ -92,7 +104,9 @@ const FOLDED_MIGRATIONS: ReadonlyArray<
 // the enum members it appended are taken out, so the migration runner can
 // apply them again over a database built from the result. Works on LF and
 // restores CRLF if the snapshot has it. Names and members are [a-z0-9_]
-// only, so they need no escaping in the patterns.
+// only, so they need no escaping in the patterns. A member is removed from
+// every enum that lists it, multi-line or single-line: each member name
+// here is used by the migration that appended it only.
 export function snapshotBefore(snapshot: string, version: string): string {
   const crlf = snapshot.includes('\r\n');
   let result = snapshot.replace(/\r\n/g, '\n');
@@ -105,13 +119,17 @@ export function snapshotBefore(snapshot: string, version: string): string {
       result = result.slice(0, start) + result.slice(end + 2);
     }
     result = result.replace(new RegExp(String.raw`,\n\s*\('${name}'\)`), '');
-    const members = [
-      COMMUNITY_MODERATION_ACTION_ADDITIONS,
-      NOTIFICATION_TYPE_ADDITIONS,
-      ADMIN_ACTION_ADDITIONS,
-    ].flatMap((additions) => appendedBy(additions, added));
+    const members = new Set(
+      [
+        COMMUNITY_MODERATION_ACTION_ADDITIONS,
+        NOTIFICATION_TYPE_ADDITIONS,
+        NOTIFICATION_SUBJECT_TYPE_ADDITIONS,
+        REPORT_TARGET_TYPE_ADDITIONS,
+        ADMIN_ACTION_ADDITIONS,
+      ].flatMap((additions) => appendedBy(additions, added)),
+    );
     for (const member of members) {
-      result = result.replace(new RegExp(String.raw`,\n\s*'${member}'`), '');
+      result = result.replace(new RegExp(String.raw`,\s*'${member}'`, 'g'), '');
     }
   }
   return crlf ? result.replace(/\n/g, '\r\n') : result;

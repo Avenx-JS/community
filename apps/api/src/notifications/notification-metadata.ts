@@ -18,6 +18,8 @@ export const NOTIFICATION_TYPES = [
   'community_moderator_assigned',
   // Migration 045: someone wrote @username in a post or comment.
   'mention',
+  // Migration 046: a modmail message, to the user or to the moderator team.
+  'modmail_message',
 ] as const;
 
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
@@ -28,6 +30,8 @@ export const NOTIFICATION_SUBJECT_TYPES = [
   'report',
   'restriction',
   'community',
+  // Migration 046.
+  'modmail_message',
 ] as const;
 
 export type NotificationSubjectType =
@@ -43,6 +47,8 @@ export const MODERATION_NOTIFICATION_TYPES: readonly NotificationType[] = [
   'community_ownership_assigned',
   'community_ownership_revoked',
   'community_moderator_assigned',
+  // The team's replies never name the moderator who wrote them.
+  'modmail_message',
 ];
 
 // Optional snapshot of the actor and community, kept so a row stays readable
@@ -133,6 +139,28 @@ export type NotificationEntry =
     }
   // Not a moderation type: the former owner is named, since the new owner
   // has to know whom they took the community over from.
+  // A message in a modmail thread (migration 046). Never an actor: a team
+  // reply must not name its moderator, and the user's own messages name the
+  // user in from_username instead, so a block (which filters by actor) never
+  // hides modmail: a user cannot block the moderation team, nor the team a
+  // user.
+  | {
+      recipientId: string;
+      type: 'modmail_message';
+      actorId: null;
+      subjectType: 'modmail_message';
+      subjectId: string;
+      communityId: string;
+      metadata: {
+        community_name?: string;
+        thread_id: string;
+        thread_subject?: string;
+        excerpt?: string;
+        sender: 'user' | 'moderators';
+        // The user, on a message to the team; absent on a team reply.
+        from_username?: string;
+      };
+    }
   // The author is named: a mention is someone addressing the recipient.
   | {
       recipientId: string;
@@ -250,13 +278,22 @@ const entryShapes: Record<
     hasActor: true,
     hasCommunity: true,
   },
+  modmail_message: {
+    subjectTypes: ['modmail_message'],
+    hasActor: false,
+    hasCommunity: true,
+  },
 };
 
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9_-]{1,36}$/;
 
 // Names are bounded by their source columns (users.username,
 // communities.name); a longer value is a producer bug and is rejected.
-const nameLimits = { actor_username: 50, community_name: 50 } as const;
+const nameLimits = {
+  actor_username: 50,
+  community_name: 50,
+  from_username: 50,
+} as const;
 
 // Content snapshots are truncated to this many code points, ellipsis
 // included. post_title matches the posts.title column; excerpt is taken from
@@ -264,6 +301,8 @@ const nameLimits = { actor_username: 50, community_name: 50 } as const;
 export const NOTIFICATION_SNAPSHOT_LIMITS = {
   post_title: 300,
   excerpt: 200,
+  // modmail_threads.subject is VARCHAR(200).
+  thread_subject: 200,
 } as const;
 
 function isIdentifier(value: unknown): value is string {
@@ -444,6 +483,17 @@ export function buildNotificationMetadata(
         ['community_name', nameValue(metadata, 'community_name')],
         ['post_title', snapshotValue(metadata, 'post_title')],
         ['excerpt', snapshotValue(metadata, 'excerpt')],
+      );
+      break;
+    case 'modmail_message':
+      // Never the moderator who wrote a reply.
+      fields.push(
+        ['community_name', nameValue(metadata, 'community_name')],
+        ['thread_id', identifierValue(metadata, 'thread_id')],
+        ['thread_subject', snapshotValue(metadata, 'thread_subject')],
+        ['excerpt', snapshotValue(metadata, 'excerpt')],
+        ['sender', enumValue(metadata, 'sender', ['user', 'moderators'])],
+        ['from_username', nameValue(metadata, 'from_username')],
       );
       break;
     case 'mention':

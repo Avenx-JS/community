@@ -177,7 +177,18 @@ const REPORT_TARGET_LABEL_SQL = `CASE ur.target_type
            WHEN 'post' THEN target_post.title
            WHEN 'comment' THEN LEFT(target_comment.content, 100)
            WHEN 'community' THEN target_community.name
+           WHEN 'modmail_message' THEN LEFT(target_modmail.body, 100)
          END AS target_label`;
+
+// The full content a reviewer judges, for the targets that have one. A
+// modmail message is never removed: the thread is a private record.
+const TARGET_CONTENT_SQL: Partial<Record<ReportTargetType, string>> = {
+  post: 'SELECT title, content, removed_at FROM posts WHERE id = ? LIMIT 1',
+  comment:
+    'SELECT NULL AS title, content, removed_at FROM comments WHERE id = ? LIMIT 1',
+  modmail_message:
+    'SELECT NULL AS title, body AS content, NULL AS removed_at FROM modmail_messages WHERE id = ? LIMIT 1',
+};
 
 // The platform roles AdminGuard admits on AdminReportsController, which sets
 // no @RequiresRole and so gets AdminGuard's default. An assignee must be able
@@ -885,15 +896,13 @@ export class AdminReportsService {
     targetType: ReportTargetType,
     targetId: string,
   ): Promise<AdminReportDetail['target_content']> {
-    if (targetType !== 'post' && targetType !== 'comment') {
+    const sql = TARGET_CONTENT_SQL[targetType];
+    if (!sql) {
       return null;
     }
-    const [rows] = await this.pool.execute<ReportTargetContentRow[]>(
-      targetType === 'post'
-        ? 'SELECT title, content, removed_at FROM posts WHERE id = ? LIMIT 1'
-        : 'SELECT NULL AS title, content, removed_at FROM comments WHERE id = ? LIMIT 1',
-      [targetId],
-    );
+    const [rows] = await this.pool.execute<ReportTargetContentRow[]>(sql, [
+      targetId,
+    ]);
     const row = rows[0];
     return row
       ? {
