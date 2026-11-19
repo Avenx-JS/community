@@ -5,6 +5,7 @@ import { CommunitiesService } from './communities.service';
 import { CommunityStatsService } from './community-stats.service';
 import { CommunityDiscoveryService } from './community-discovery.service';
 import { NotificationPreferencesService } from './notification-preferences.service';
+import { NameAvailabilityService } from '../common/name-availability.service';
 
 describe('CommunitiesController', () => {
   let controller: CommunitiesController;
@@ -18,6 +19,7 @@ describe('CommunitiesController', () => {
         { provide: CommunityStatsService, useValue: {} },
         { provide: CommunityDiscoveryService, useValue: {} },
         { provide: AuthService, useValue: {} },
+        { provide: NameAvailabilityService, useValue: {} },
       ],
     }).compile();
 

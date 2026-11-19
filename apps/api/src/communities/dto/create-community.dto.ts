@@ -7,6 +7,7 @@ import {
   MaxLength,
   Validate,
 } from 'class-validator';
+import { IsNotReservedCommunityName } from '../../common/reserved-names';
 import { PlainTextConstraint } from '../../common/safe-text.constraint';
 
 export class CreateCommunityDto {
@@ -16,6 +17,7 @@ export class CreateCommunityDto {
   @IsString()
   @Length(1, 50)
   @Matches(/^[A-Za-z0-9_-]+$/)
+  @IsNotReservedCommunityName()
   name!: string;
 
   @IsOptional()

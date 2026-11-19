@@ -24,11 +24,13 @@ import {
   OwnModeratorInvitesController,
   PostFlairController,
 } from './community-settings.controller';
+import { NameAvailabilityService } from '../common/name-availability.service';
 
 @Module({
   imports: [AuthModule, DatabaseModule, NotificationsModule],
   providers: [
     CommunitiesService,
+    NameAvailabilityService,
     CommunityBanPolicyService,
     CommunityBansService,
     CommunityDiscoveryService,

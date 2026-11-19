@@ -8,6 +8,7 @@ import {
   HttpStatus,
   Param,
   Post,
+  Query,
   Req,
   Res,
   UseGuards,
@@ -47,6 +48,11 @@ import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { RefreshDto } from './dto/refresh.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { NameAvailabilityService } from '../common/name-availability.service';
+import {
+  NameAvailabilityResponse,
+  UsernameAvailabilityQueryDto,
+} from '../common/name-availability.dto';
 
 export const PASSWORD_FORGOT_MESSAGE =
   'If that address has an account, a password reset email has been sent.';
@@ -55,9 +61,30 @@ export const PASSWORD_FORGOT_MESSAGE =
 @Controller('auth')
 export class AuthController {
   constructor(
+    private readonly nameAvailability: NameAvailabilityService,
     private readonly authService: AuthService,
     private readonly authRateLimitService: AuthRateLimitService,
   ) {}
+
+  // Public: registration reveals the same, after a whole form. Its own
+  // per-IP bucket (AUTH_USERNAME_AVAILABLE_IP_*) throttles the oracle.
+  @Get('username-available')
+  @ApiOperation({
+    summary: 'Check whether a username is available',
+    description:
+      'For a registration form, while the user types. Always 200 with ' +
+      '{ available, reason? }: reason is taken (compared case-insensitively, ' +
+      'as the unique index does), invalid (by the rules of POST ' +
+      '/auth/register, never a 400) or reserved (a route name). A deleted ' +
+      "account's username is free again: deletion renames the account. " +
+      'Public, and rate-limited per IP (AUTH_USERNAME_AVAILABLE_IP_*, 30 a ' +
+      'minute) apart from the attempts POST /auth/register counts.',
+  })
+  @ApiOkResponse({ type: NameAvailabilityResponse })
+  @ApiErrorResponses({ 400: 'A query parameter other than username.' })
+  usernameAvailable(@Query() query: UsernameAvailabilityQueryDto) {
+    return this.nameAvailability.username(query.username);
+  }
 
   @Post('register')
   @ApiOperation({
@@ -66,7 +93,7 @@ export class AuthController {
   })
   @ApiCreatedResponse({ type: AuthTokensResponse })
   @ApiErrorResponses({
-    400: 'Invalid registration data.',
+    400: 'Invalid registration data, or a reserved username (GET /auth/username-available tells beforehand).',
     409: 'Registration could not be completed.',
   })
   async register(

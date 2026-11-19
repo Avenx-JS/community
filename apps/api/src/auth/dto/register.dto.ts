@@ -1,5 +1,5 @@
 import { IsEmail, IsString, Length, Matches, MaxLength } from 'class-validator';
-import { IsNotReservedUsername } from './reserved-username';
+import { IsNotReservedUsername } from '../../common/reserved-names';
 
 export class RegisterDto {
   @IsString()

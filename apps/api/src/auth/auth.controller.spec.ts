@@ -7,6 +7,7 @@ import type { AuthenticatedRequest } from './auth.guard';
 import { AuthRateLimitService } from './auth-rate-limit.service';
 import { AuthService } from './auth.service';
 import type { AuthResponse } from './auth.service';
+import { NameAvailabilityService } from '../common/name-availability.service';
 
 describe('AuthController', () => {
   let controller: AuthController;
@@ -102,6 +103,7 @@ describe('AuthController', () => {
       providers: [
         { provide: AuthService, useValue: authService },
         { provide: AuthRateLimitService, useValue: rateLimitService },
+        { provide: NameAvailabilityService, useValue: {} },
       ],
     }).compile();
 

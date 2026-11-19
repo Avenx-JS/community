@@ -10,6 +10,7 @@ import { AdminGuard } from './admin.guard';
 import { AccountEmailController } from './account-email.controller';
 import { EmailVerificationService } from './email-verification.service';
 import { SessionEvents } from './session-events';
+import { NameAvailabilityService } from '../common/name-availability.service';
 
 @Module({
   imports: [DatabaseModule, EmailModule, forwardRef(() => UsersModule)],
@@ -19,6 +20,7 @@ import { SessionEvents } from './session-events';
     AdminGuard,
     AuthRateLimitService,
     EmailVerificationService,
+    NameAvailabilityService,
     SessionEvents,
   ],
   controllers: [AuthController, AccountEmailController],

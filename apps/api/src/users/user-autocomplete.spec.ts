@@ -4,7 +4,7 @@ import { validate } from 'class-validator';
 import type { Pool } from 'mysql2/promise';
 import { AuthRateLimitService } from '../auth/auth-rate-limit.service';
 import { RegisterDto } from '../auth/dto/register.dto';
-import { RESERVED_USERNAMES } from '../auth/dto/reserved-username';
+import { RESERVED_USERNAMES } from '../common/reserved-names';
 import type { RateLimiterStore } from '../redis/redis.types';
 import { AutocompleteUsersDto } from './dto/autocomplete-users.dto';
 import {

@@ -1923,6 +1923,45 @@ make, but `notifications.type` is an `ENUM` that needs a migration for a new
 value, and the user cannot read the inbox until signing in again anyway. It is
 deliberately not part of this endpoint.
 
+### Name availability checks
+
+So a form can say "taken" while the user types, without submitting it (which,
+for registration, also counts against the registration limits):
+
+| Route | Who | Rules of | Rate limit |
+| --- | --- | --- | --- |
+| `GET /auth/username-available?username=` | anyone | `RegisterDto.username` | per IP, `AUTH_USERNAME_AVAILABLE_IP_*` (30 a minute) |
+| `GET /communities/name-available?name=` | logged in (`401` otherwise), as creating is | `CreateCommunityDto.name` (trimmed) | per account, `API_COMMUNITY_NAME_AVAILABLE_ACCOUNT_*` (30 a minute) |
+
+Both answer `200` with `{ "available": true }` or
+`{ "available": false, "reason": "taken" | "invalid" | "reserved" }`, one shape
+whatever the input: a missing, malformed or repeated parameter is `invalid`,
+never a `400` (only an unknown query parameter is). The rules are the DTOs'
+own decorators, run on that one property (`NameAvailabilityService`), so the
+checks and the create routes can never disagree; a name that fails only the
+reserved-name rule is `reserved`.
+
+- **Case-insensitive**, as the unique indexes compare under the columns'
+  `utf8mb4_0900_ai_ci` collation: `Alice` is taken once `alice` exists.
+- **A deleted account's username is free again**: account deletion renames the
+  row to `deleted_<id>` ([Deleting your own account](#deleting-your-own-account)),
+  so the old name can be registered at once.
+- **A deleted or suspended community keeps its name**: the row stays, so the
+  name stays taken. Deletion does not release it.
+- **An enumeration oracle**, like registering and creating already are: hence
+  the own rate limits on top of the general ones.
+
+**Reserved names** (`src/common/reserved-names.ts`, shared by
+`RegisterDto`, `CreateCommunityDto` and both checks) are the static path
+segments that a `:username` or `:name` route would otherwise answer: the
+username `autocomplete`, and the community names `name-available`,
+`trending` and `recommended`. **This changes existing validation:** `POST
+/auth/register` and `POST /communities` refuse them (`400`). `trending` and
+`recommended` were hidden at `GET /communities/:name` before this already;
+a community created with one of these names earlier keeps it. A wider list
+(`admin`, `api`, `settings`, the web client's routes) is a follow-up, once
+the web client's routes exist.
+
 ### Authentication rate limits
 
 Login, registration, and refresh requests use atomic fixed-window counters in
@@ -2674,7 +2713,11 @@ and `API_CONTENT_COOLDOWN_WINDOW_SECONDS`; and `API_SEARCH_IP_MAX` and
 minute by default; and `API_AUTOCOMPLETE_ACCOUNT_MAX` and
 `API_AUTOCOMPLETE_ACCOUNT_WINDOW_SECONDS` for
 [`GET /users/autocomplete`](#mentions), 60 per account per minute by default;
-and `API_MEDIA_UPLOAD_IP_MAX`,
+and `AUTH_USERNAME_AVAILABLE_IP_MAX`, `AUTH_USERNAME_AVAILABLE_IP_WINDOW_SECONDS`,
+`API_COMMUNITY_NAME_AVAILABLE_ACCOUNT_MAX` and
+`API_COMMUNITY_NAME_AVAILABLE_ACCOUNT_WINDOW_SECONDS` for the
+[availability checks](#name-availability-checks), 30 per IP and 30 per
+account per minute by default; and `API_MEDIA_UPLOAD_IP_MAX`,
 `API_MEDIA_UPLOAD_IP_WINDOW_SECONDS`, `API_MEDIA_UPLOAD_ACCOUNT_MAX` and
 `API_MEDIA_UPLOAD_ACCOUNT_WINDOW_SECONDS` for [uploads](#media), 30 per IP and
 20 per account per hour by default. Configure the same values and

@@ -48,6 +48,8 @@ interface AuthRateLimitConfig {
   accountDeleteAccount: RateLimitOptions;
   searchIp: RateLimitOptions;
   autocompleteAccount: RateLimitOptions;
+  usernameAvailableIp: RateLimitOptions;
+  communityNameAvailableAccount: RateLimitOptions;
   mediaUploadIp: RateLimitOptions;
   mediaUploadAccount: RateLimitOptions;
   emailVerifyRequestIp: RateLimitOptions;
@@ -114,6 +116,12 @@ function readConfig(): AuthRateLimitConfig {
     accountDeleteAccount: readOptions('API_ACCOUNT_DELETE_ACCOUNT', 5, 86400),
     searchIp: readOptions('API_SEARCH_IP', 30, 60),
     autocompleteAccount: readOptions('API_AUTOCOMPLETE_ACCOUNT', 60, 60),
+    usernameAvailableIp: readOptions('AUTH_USERNAME_AVAILABLE_IP', 30, 60),
+    communityNameAvailableAccount: readOptions(
+      'API_COMMUNITY_NAME_AVAILABLE_ACCOUNT',
+      30,
+      60,
+    ),
     mediaUploadIp: readOptions('API_MEDIA_UPLOAD_IP', 30, 3600),
     mediaUploadAccount: readOptions('API_MEDIA_UPLOAD_ACCOUNT', 20, 3600),
     // Every one sends an email, to an address the caller chose or owns.
@@ -383,6 +391,32 @@ export class AuthRateLimitService {
     // needs no token.
     if (method === 'GET' && path === '/search') {
       signals.push(this.signal('api:search:ip', ip, this.config.searchIp));
+    }
+
+    // Username and community-name checks: enumeration oracles, as
+    // registering and creating are, asked while a form is typed in. The
+    // username one is public, so per IP; the community one needs a token.
+    if (method === 'GET' && path === '/auth/username-available') {
+      signals.push(
+        this.signal(
+          'auth:username-available:ip',
+          ip,
+          this.config.usernameAvailableIp,
+        ),
+      );
+    }
+    if (
+      method === 'GET' &&
+      path === '/communities/name-available' &&
+      accountId
+    ) {
+      signals.push(
+        this.signal(
+          'api:community-name-available:account',
+          accountId,
+          this.config.communityNameAvailableAccount,
+        ),
+      );
     }
 
     // An editor asks on every keystroke, and each answer reveals accounts:

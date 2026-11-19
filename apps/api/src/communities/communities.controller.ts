@@ -62,11 +62,17 @@ import { UpdateNotificationPreferencesDto } from './dto/update-notification-pref
 import { NoQueryParamsGuard } from '../common/no-query-params.guard';
 import { SafeRouteParamPipe } from '../common/safe-route-param.pipe';
 import { COMMUNITY_BANNED_FORBIDDEN_DOC } from './community-ban-policy.service';
+import { NameAvailabilityService } from '../common/name-availability.service';
+import {
+  CommunityNameAvailabilityQueryDto,
+  NameAvailabilityResponse,
+} from '../common/name-availability.dto';
 
 @ApiTags('communities')
 @Controller('communities')
 export class CommunitiesController {
   constructor(
+    private readonly nameAvailability: NameAvailabilityService,
     private readonly communitiesService: CommunitiesService,
     private readonly notificationPreferencesService: NotificationPreferencesService,
     private readonly communityStatsService: CommunityStatsService,
@@ -89,6 +95,28 @@ export class CommunitiesController {
     @Req() request?: OptionallyAuthenticatedRequest,
   ) {
     return this.communitiesService.findAll(query, request?.user?.id);
+  }
+
+  // Before GET :name, as trending and recommended are; all three are
+  // reserved community names (common/reserved-names.ts).
+  @Get('name-available')
+  @UseGuards(AuthGuard)
+  @ApiOperation({
+    summary: 'Check whether a community name is available',
+    description:
+      'For the create-community form, while the user types. Always 200 ' +
+      'with { available, reason? }: reason is taken (compared ' +
+      'case-insensitively), invalid (by the rules of POST /communities, ' +
+      'never a 400) or reserved (name-available, trending, recommended: ' +
+      'route names). A deleted or suspended community keeps its name: it ' +
+      'stays taken. Logged-in users only, as creating is, and rate-limited ' +
+      'per account (API_COMMUNITY_NAME_AVAILABLE_ACCOUNT_*, 30 a minute).',
+  })
+  @ApiAuthenticated()
+  @ApiOkResponse({ type: NameAvailabilityResponse })
+  @ApiErrorResponses({ 400: 'A query parameter other than name.' })
+  nameAvailable(@Query() query: CommunityNameAvailabilityQueryDto) {
+    return this.nameAvailability.communityName(query.name);
   }
 
   // Before GET :name, so that "trending" and "recommended" are routes, not
@@ -145,7 +173,7 @@ export class CommunitiesController {
   @ApiAuthenticated({ forbidden: EMAIL_UNVERIFIED_FORBIDDEN_DOC })
   @ApiCreatedResponse({ type: CommunityResponse })
   @ApiErrorResponses({
-    400: 'Invalid community data.',
+    400: 'Invalid community data, or a reserved name (GET /communities/name-available tells beforehand).',
     409: 'Community name already exists.',
   })
   create(
