@@ -30,12 +30,14 @@ export const NOTIFICATION_TYPE_ADDITIONS: EnumAdditions = [
   ['045', ['mention']],
   ['046', ['modmail_message']],
   ['047', ['new_follower']],
+  ['048', ['appeal_decided']],
 ];
 
 // notifications.subject_type, as migration 010 created it plus these.
 export const NOTIFICATION_SUBJECT_TYPE_ADDITIONS: EnumAdditions = [
   ['046', ['modmail_message']],
   ['047', ['user']],
+  ['048', ['appeal']],
 ];
 
 // user_reports.target_type, as migration 016 created it plus these.
@@ -56,6 +58,12 @@ export const ADMIN_ACTION_ADDITIONS: EnumAdditions = [
       'community_moderator_removed',
     ],
   ],
+  ['048', ['appeal_approved', 'appeal_rejected']],
+];
+
+// admin_actions.target_type, as migration 041 left it plus these.
+export const ADMIN_ACTION_TARGET_ADDITIONS: EnumAdditions = [
+  ['048', ['appeal']],
 ];
 
 // The enum as it stood once migration `version` had run: the current
@@ -82,7 +90,7 @@ export function appendedBy(
 // The migrations whose enum members data/community.sql folds into its
 // CREATE TABLE statements, under one appended block that ends at its first
 // blank line: only the header for 042-044, the header and its other
-// statements for 045 and 046 (whose statements contain no blank line).
+// statements for 045-048 (whose statements contain no blank line).
 const FOLDED_MIGRATIONS: ReadonlyArray<
   readonly [version: string, name: string, header: string]
 > = [
@@ -100,6 +108,7 @@ const FOLDED_MIGRATIONS: ReadonlyArray<
   ['045', '045_add_mentions', 'Mentions'],
   ['046', '046_create_modmail', 'Modmail'],
   ['047', '047_create_user_follows', 'Following users'],
+  ['048', '048_create_appeals', "Appeals of administrators' decisions"],
 ];
 
 // The snapshot as it stood before migration `version`: for it and every
@@ -118,6 +127,7 @@ const ENUM_COLUMNS: ReadonlyArray<readonly [EnumAdditions, string]> = [
   [NOTIFICATION_TYPE_ADDITIONS, 'type'],
   [NOTIFICATION_SUBJECT_TYPE_ADDITIONS, 'subject_type'],
   [REPORT_TARGET_TYPE_ADDITIONS, 'target_type'],
+  [ADMIN_ACTION_TARGET_ADDITIONS, 'target_type'],
 ];
 
 export function snapshotBefore(snapshot: string, version: string): string {

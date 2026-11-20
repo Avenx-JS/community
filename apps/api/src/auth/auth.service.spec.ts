@@ -327,7 +327,9 @@ describe('AuthService', () => {
     });
   });
 
-  it('blocks restricted accounts from logging in with a forbidden response payload', async () => {
+  // So that a restricted account can appeal (POST /appeals); AuthGuard
+  // confines the session to @AllowRestricted() routes.
+  it('signs a restricted account in, saying why its session is limited', async () => {
     const password = 'correct-password';
     const argonHash = await argon2Hash(password, {
       type: argon2id,
@@ -347,21 +349,89 @@ describe('AuthService', () => {
     const expiresAt = new Date(Date.now() + 60_000);
     results.push(
       [[user], []],
-      [[{ type: 'suspension', expires_at: expiresAt }], []],
+      [
+        [{ id: 'restriction-1', type: 'suspension', expires_at: expiresAt }],
+        [],
+      ],
     );
 
-    try {
-      await service.login({ identifier: 'restricted_user', password });
-      throw new Error('expected restriction rejection');
-    } catch (error) {
-      expect(error).toBeInstanceOf(Error);
-      expect(
-        (error as Error & { getResponse?: () => unknown }).getResponse?.(),
-      ).toEqual({
-        type: 'suspension',
-        expires_at: expiresAt.toISOString(),
-      });
-    }
+    const response = await service.login({
+      identifier: 'restricted_user',
+      password,
+    });
+
+    expect(response.user).toEqual({
+      id: 'user-restricted',
+      username: 'restricted_user',
+    });
+    expect(response.restriction).toEqual({
+      id: 'restriction-1',
+      type: 'suspension',
+      expires_at: expiresAt.toISOString(),
+    });
+    expect(
+      calls.some((call) => call.sql.startsWith('INSERT INTO auth_sessions')),
+    ).toBe(true);
+    expect(transactions.commits).toBe(1);
+  });
+
+  it('rotates a banned account’s tokens instead of revoking its sessions', async () => {
+    const expiresAt = new Date(Date.now() + 60_000);
+    results.push(
+      [
+        [
+          {
+            session_id: 'session-1',
+            user_id: 'user-banned',
+            expires_at: expiresAt,
+            used_at: null,
+            revoked_at: null,
+          },
+        ],
+        [],
+      ],
+      [[{ id: 'user-banned', username: 'banned_user' }], []],
+      [[{ id: 'restriction-2', type: 'ban', expires_at: null }], []],
+      [{ affectedRows: 1 }, []],
+      [{ affectedRows: 1 }, []],
+      [{ affectedRows: 1 }, []],
+    );
+
+    const response = await service.refresh('refresh-token');
+
+    expect(response.restriction).toEqual({ id: 'restriction-2', type: 'ban' });
+    expect(
+      calls.some((call) => call.sql.startsWith('DELETE FROM auth_sessions')),
+    ).toBe(false);
+    expect(transactions.commits).toBe(1);
+  });
+
+  it('omits restriction for an unrestricted account', async () => {
+    const password = 'correct-password';
+    const argonHash = await argon2Hash(password, {
+      type: argon2id,
+      version: 0x13,
+      memoryCost: 19 * 1024,
+      timeCost: 2,
+      parallelism: 1,
+      hashLength: 32,
+    });
+    results.push([
+      [
+        {
+          id: 'user-free',
+          username: 'free_user',
+          email: 'free@example.com',
+          password_hash: argonHash,
+          created_at: new Date(),
+        },
+      ],
+      [],
+    ]);
+
+    const response = await service.login({ identifier: 'free_user', password });
+
+    expect(response).not.toHaveProperty('restriction');
   });
 
   it('maps unique username or email conflicts to 409', async () => {

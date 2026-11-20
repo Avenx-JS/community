@@ -53,5 +53,13 @@ import { AuditLogService } from './audit-log.service';
     AdminRestrictionsService,
     AuditLogService,
   ],
+  // For AppealsModule: an approved appeal reverses the decision through
+  // these, inside its own transaction.
+  exports: [
+    AdminCommunitiesService,
+    AdminContentService,
+    AdminRestrictionsService,
+    AuditLogService,
+  ],
 })
 export class AdminModule {}

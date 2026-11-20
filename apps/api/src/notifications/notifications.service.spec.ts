@@ -193,6 +193,19 @@ const entries = {
     communityId: null,
     metadata: { actor_username: 'fan_1' },
   },
+  appeal_decided: {
+    recipientId: 'maintainer',
+    type: 'appeal_decided',
+    actorId: null,
+    subjectType: 'appeal',
+    subjectId: 'appeal-1',
+    communityId: null,
+    metadata: {
+      status: 'approved',
+      appeal_target_type: 'restriction',
+      decision_note: 'The suspension was a mistake.',
+    },
+  },
 } satisfies Record<NotificationEntry['type'], NotificationEntry>;
 
 const memberPost = (recipientId: string): typeof entries.community_post => ({

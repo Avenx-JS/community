@@ -73,7 +73,7 @@ export interface AdminRestrictionList {
 
 // The predicate's columns are unqualified; they exist only on
 // user_restrictions, so they stay unambiguous next to the users joins.
-const RESTRICTION_SELECT = `SELECT r.id, r.type, r.reason,
+export const RESTRICTION_SELECT = `SELECT r.id, r.type, r.reason,
      creator.username AS created_by_username, r.created_at, r.expires_at,
      r.lifted_at, lifter.username AS lifted_by_username, r.lift_reason,
      r.report_id, (${ACTIVE_USER_RESTRICTION_PREDICATE}) AS active
@@ -275,54 +275,13 @@ export class AdminRestrictionsService {
     try {
       await connection.beginTransaction();
       transactionStarted = true;
-
-      // An expired suspension may still be lifted: it changes nothing for
-      // enforcement but records that an administrator closed the case.
-      const [result] = await connection.execute<ResultSetHeader>(
-        `UPDATE user_restrictions
-         SET lifted_at = UTC_TIMESTAMP(), lifted_by = ?, lift_reason = ?
-         WHERE id = ? AND user_id = ? AND lifted_at IS NULL`,
-        [actorId, input.lift_reason, restrictionId, userId],
-      );
-
-      if (result.affectedRows !== 1) {
-        const [rows] = await connection.execute<RestrictionStateRow[]>(
-          'SELECT id, user_id, lifted_at FROM user_restrictions WHERE id = ? LIMIT 1',
-          [restrictionId],
-        );
-        const current = rows[0];
-        if (!current || current.user_id !== userId) {
-          throw new NotFoundException('Restriction not found');
-        }
-        throw new ConflictException('Restriction has already been lifted');
-      }
-
-      const restriction = await this.loadRestriction(
+      const restriction = await this.liftWithin(
         connection,
         userId,
         restrictionId,
-      );
-      await this.auditLogService.record(connection, {
+        input.lift_reason,
         actorId,
-        action: 'restriction_lifted',
-        targetType: 'restriction',
-        targetId: restrictionId,
-        metadata: {
-          restriction_id: restrictionId,
-          restriction_type: restriction.type,
-        },
-      });
-      // The type only; lift_reason and the lifting administrator are
-      // admin-only.
-      await this.notificationsService.record(connection, {
-        recipientId: userId,
-        type: 'restriction_lifted',
-        actorId: null,
-        subjectType: 'restriction',
-        subjectId: restrictionId,
-        communityId: null,
-        metadata: { restriction_type: restriction.type },
-      });
+      );
       await connection.commit();
       transactionStarted = false;
       return restriction;
@@ -334,6 +293,66 @@ export class AdminRestrictionsService {
     } finally {
       connection.release();
     }
+  }
+
+  // The lift inside the caller's transaction: also an approved appeal's
+  // reversal (AppealsService). The audit entry and the notification are
+  // written on the same connection, so they commit or roll back with it.
+  async liftWithin(
+    connection: PoolConnection,
+    userId: string,
+    restrictionId: string,
+    liftReason: string,
+    actorId: string,
+  ): Promise<AdminRestriction> {
+    // An expired suspension may still be lifted: it changes nothing for
+    // enforcement but records that an administrator closed the case.
+    const [result] = await connection.execute<ResultSetHeader>(
+      `UPDATE user_restrictions
+       SET lifted_at = UTC_TIMESTAMP(), lifted_by = ?, lift_reason = ?
+       WHERE id = ? AND user_id = ? AND lifted_at IS NULL`,
+      [actorId, liftReason, restrictionId, userId],
+    );
+
+    if (result.affectedRows !== 1) {
+      const [rows] = await connection.execute<RestrictionStateRow[]>(
+        'SELECT id, user_id, lifted_at FROM user_restrictions WHERE id = ? LIMIT 1',
+        [restrictionId],
+      );
+      const current = rows[0];
+      if (!current || current.user_id !== userId) {
+        throw new NotFoundException('Restriction not found');
+      }
+      throw new ConflictException('Restriction has already been lifted');
+    }
+
+    const restriction = await this.loadRestriction(
+      connection,
+      userId,
+      restrictionId,
+    );
+    await this.auditLogService.record(connection, {
+      actorId,
+      action: 'restriction_lifted',
+      targetType: 'restriction',
+      targetId: restrictionId,
+      metadata: {
+        restriction_id: restrictionId,
+        restriction_type: restriction.type,
+      },
+    });
+    // The type only; lift_reason and the lifting administrator are
+    // admin-only.
+    await this.notificationsService.record(connection, {
+      recipientId: userId,
+      type: 'restriction_lifted',
+      actorId: null,
+      subjectType: 'restriction',
+      subjectId: restrictionId,
+      communityId: null,
+      metadata: { restriction_type: restriction.type },
+    });
+    return restriction;
   }
 
   async findAll(

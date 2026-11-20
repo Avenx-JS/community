@@ -51,7 +51,8 @@ export class NotificationResponse implements NotificationDto {
     nullable: true,
     description:
       'Per-type snapshot: post_id, parent_comment_id, post_title, excerpt, ' +
-      'status, restriction_type, expires_at.',
+      'status, restriction_type, expires_at, thread_id, thread_subject, ' +
+      'sender, from_username, appeal_target_type, decision_note.',
   })
   metadata!: Record<string, string> | null;
 

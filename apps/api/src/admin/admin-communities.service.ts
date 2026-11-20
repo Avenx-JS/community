@@ -385,32 +385,43 @@ export class AdminCommunitiesService {
     actorId: string,
   ): Promise<AdminCommunityDetail> {
     return this.inTransaction(async (connection) => {
-      const [result] = await connection.execute<ResultSetHeader>(
-        `UPDATE communities
-         SET suspended_at = NULL, suspended_by = NULL, suspension_reason = NULL
-         WHERE id = ? AND suspended_at IS NOT NULL`,
-        [id],
-      );
-      const [rows] = await connection.execute<
-        (RowDataPacket & { name: string })[]
-      >('SELECT name FROM communities WHERE id = ? LIMIT 1', [id]);
-      if (!rows[0]) {
-        throw new NotFoundException('Community not found');
-      }
-      if (result.affectedRows !== 1) {
-        throw new ConflictException('Community is not suspended');
-      }
-      await this.auditLogService.record(connection, {
-        actorId,
-        action: 'community_restored',
-        targetType: 'community',
-        targetId: id,
-        metadata: {
-          community_name: rows[0].name,
-          restore_reason: input.restore_reason,
-        },
-      });
+      await this.restoreWithin(connection, id, input.restore_reason, actorId);
       return this.findOne(id, connection);
+    });
+  }
+
+  // The restoration inside the caller's transaction: also an approved
+  // appeal's reversal (AppealsService), with the same audit entry.
+  async restoreWithin(
+    connection: PoolConnection,
+    id: string,
+    restoreReason: string,
+    actorId: string,
+  ): Promise<void> {
+    const [result] = await connection.execute<ResultSetHeader>(
+      `UPDATE communities
+       SET suspended_at = NULL, suspended_by = NULL, suspension_reason = NULL
+       WHERE id = ? AND suspended_at IS NOT NULL`,
+      [id],
+    );
+    const [rows] = await connection.execute<
+      (RowDataPacket & { name: string })[]
+    >('SELECT name FROM communities WHERE id = ? LIMIT 1', [id]);
+    if (!rows[0]) {
+      throw new NotFoundException('Community not found');
+    }
+    if (result.affectedRows !== 1) {
+      throw new ConflictException('Community is not suspended');
+    }
+    await this.auditLogService.record(connection, {
+      actorId,
+      action: 'community_restored',
+      targetType: 'community',
+      targetId: id,
+      metadata: {
+        community_name: rows[0].name,
+        restore_reason: restoreReason,
+      },
     });
   }
 

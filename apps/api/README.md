@@ -91,9 +91,10 @@ leaves the same exposure: surviving access tokens work for up to their 15-minute
 lifetime, and surviving refresh tokens keep working until they expire (30 days) or
 are revoked by `POST /auth/logout-all`.
 
-**A restricted account may reset, and still cannot log in.** `AuthGuard` is not
-involved, and login checks for an active restriction independently. Blocking the
-reset would not improve anything and would reveal the account's state.
+**A restricted account may reset, and signs in restricted.** `AuthGuard` is not
+involved in the reset. Blocking it would not improve anything and would reveal
+the account's state. Login then signs a restricted account in with a limited
+session (see [Account restrictions](#account-restrictions-suspensions-and-bans)).
 
 **Not included.** Expired tokens are not cleaned up: `auth_sessions`,
 `auth_refresh_tokens` and `auth_rate_limits` all accumulate rows with no reaper, so
@@ -413,6 +414,16 @@ Only the following metadata keys may be recorded:
 | `comment_restored`      | `comment`     | `community_name`, `previous_state`, `reason` |
 | `community_owner_changed` | `community` | `community_name`, `username`, `previous_owner_username`, `reason` |
 | `community_moderator_added`, `community_moderator_removed` | `community` | `community_name`, `username`, `reason` |
+| `appeal_approved`       | `appeal`      | `appeal_target_type`, `appeal_target_id`, `decision_note`, `reversed` |
+| `appeal_rejected`       | `appeal`      | `appeal_target_type`, `appeal_target_id`, `decision_note` |
+
+`appeal_approved`, `appeal_rejected` and the `appeal` target were appended by
+migration `048_create_appeals` and are written by
+[`PATCH /admin/appeals/:id`](#appeals). `decision_note` is the administrator's
+note, also shown to the user. `reversed` is `true` when the approval reversed
+the decision, which then writes its own entry as well (`restriction_lifted`,
+`post_restored`, `comment_restored` or `community_restored`), and `false`
+when it had already been reversed or replaced.
 
 The three `community_*` actions and the `community` target were added by
 migration `025_add_community_suspension`, so the community-administration
@@ -1711,11 +1722,23 @@ audit failure rolls back the restriction.
 tolerated.** After the transaction commits, the service calls
 `AuthService.logoutAll(userId)`, which deletes the account's sessions and
 revokes its refresh tokens. That call is a latency optimisation, not the
-enforcement mechanism. `AuthGuard`, login, and refresh check the restriction
-row on every request. So if revocation fails, the restriction stays in place
-and the request still succeeds: the next request with an old access token is
-refused as restricted, and refresh is refused too. Moving revocation into the
-transaction would make it a single point of failure for the whole feature.
+enforcement mechanism. `AuthGuard` checks the restriction row on every
+request. So if revocation fails, the restriction stays in place and the request
+still succeeds: the next request with an old access token is refused as
+restricted. Moving revocation into the transaction would make it a single point
+of failure for the whole feature.
+
+**A restricted account still signs in, to a limited session.** `POST
+/auth/login` and `POST /auth/refresh` issue tokens to a suspended or banned
+account, so that it can [appeal](#appeals) its restriction; the response then
+carries `restriction: { id, type, expires_at? }` (absent otherwise), where
+`id` is the restriction to appeal. `AuthGuard` confines such a session to
+the routes marked `@AllowRestricted()`: appeals, `GET /users/me`, reading
+notifications, its own modmail threads, logout and sessions, password change,
+email verification and the data export. Every other route answers `403` with
+`{ type, expires_at? }`. Applying a restriction still revokes the account's
+existing sessions, and a ban no longer revokes them again at refresh: the
+guard, not the absence of a session, is what keeps a restricted account out.
 
 Lift body: `{ "lift_reason": "Appeal accepted" }`, with the same text rules as
 `reason`. Lifting is `POST .../lift` rather than `DELETE`: the row is kept and
@@ -1731,7 +1754,10 @@ enforcement, but it records that an administrator closed the case, and
 moderators do not have to compare clock times before acting.
 
 **Lifting does not restore sessions.** Tokens revoked when the restriction
-was applied are gone for good. After a lift, the user signs in again.
+was applied are gone for good. After a lift, the user signs in again. An
+approved [appeal](#appeals) lifts through the same code
+(`AdminRestrictionsService.liftWithin`) inside the appeal's transaction, with
+the decision note as `lift_reason`.
 
 Restriction response, used by apply, lift, and history items:
 
@@ -2534,7 +2560,8 @@ saved posts, the usernames it blocked, the reports it filed (as
 `GET /reports` shows them), the notifications it received, its media, its
 sessions (with network prefixes), its join requests, moderator
 invitations, user flairs and muted communities, its hidden posts and
-saved comments, and its push subscriptions (never their endpoints). **It never holds** a password hash, a token,
+saved comments, its push subscriptions (never their endpoints), and its
+[appeals](#appeals) with the decision notes it was shown. **It never holds** a password hash, a token,
 another person's private data, or what others said about the account (reports
 about it, moderators' removal reasons): every section is one statement bound to
 the account id alone (`EXPORT_SECTIONS`). Both export routes are available to
@@ -2720,7 +2747,8 @@ minute by default; and `API_AUTOCOMPLETE_ACCOUNT_MAX` and
 [`GET /users/autocomplete`](#mentions), 60 per account per minute by default;
 and `API_FOLLOW_ACCOUNT_MAX` and `API_FOLLOW_ACCOUNT_WINDOW_SECONDS` for
 [`POST /users/:username/follow`](#following-users), 60 per account per hour
-by default;
+by default; and `API_APPEAL_ACCOUNT_MAX` and `API_APPEAL_ACCOUNT_WINDOW_SECONDS`
+for [`POST /appeals`](#appeals), 5 per account per day by default;
 and `AUTH_USERNAME_AVAILABLE_IP_MAX`, `AUTH_USERNAME_AVAILABLE_IP_WINDOW_SECONDS`,
 `API_COMMUNITY_NAME_AVAILABLE_ACCOUNT_MAX` and
 `API_COMMUNITY_NAME_AVAILABLE_ACCOUNT_WINDOW_SECONDS` for the
@@ -7066,6 +7094,91 @@ the user.
 decision); the user shows as `null`. The data export includes the account's
 threads, message by message, with `from_moderators` instead of who wrote.
 
+## Appeals
+
+Migration `048_create_appeals`. The user a platform administrator's decision
+affects may appeal it once; another administrator decides. Approving reverses
+the decision. A community moderator's decision (a community ban, a moderator's
+removal) is the community's: it is appealed to its moderators through
+[modmail](#modmail), never to platform administrators, who would otherwise
+override the community's own moderation.
+
+| Route | Who | Does |
+| --- | --- | --- |
+| `POST /appeals` | the affected user, restricted or not | `{ "target_type", "target_id", "reason" }` (`201`, the appeal) |
+| `GET /users/me/appeals` | the user, restricted or not | their appeals, newest first, with status and decision note |
+| `GET /admin/appeals?status=&target_type=` | administrators | the queue: `status` `open` (default, oldest first), `approved`, `rejected` or `any` (newest first) |
+| `GET /admin/appeals/:id` | administrators | the appeal, the original decision, the affected restriction, post, comment or community (as the admin routes show it) and the user's other appeals |
+| `PATCH /admin/appeals/:id` | administrators | `{ "status": "approved" or "rejected", "decision_note" }` |
+
+**What can be appealed.**
+
+| `target_type` | `target_id` | The affected user | Decision date |
+| --- | --- | --- | --- |
+| `restriction` | the restriction (in the login response while it is in force) | the restricted account | `created_at` |
+| `post_removal`, `comment_removal` | the post or comment, removed with `removed_by_admin` | its author | `removed_at` |
+| `community_suspension` | the community | its creator | `suspended_at` |
+
+**Filing.** `reason` is trimmed plain text, 10–2,000 characters. The target
+row is locked (`FOR UPDATE`) first, then:
+
+- not the caller's decision, or no such decision: `404`, so nobody learns of
+  another account's moderation record;
+- no longer in force (the restriction is lifted or expired, the content
+  restored, the community restored or deleted): `409`;
+- a community moderator's removal (`removed_by_admin = FALSE`): `409` with
+  `{ "reason": "community_moderation", "community_name" }`, the pointer to
+  `POST /communities/:name/modmail`;
+- older than `APPEAL_WINDOW_DAYS` (30): `409`;
+- already appealed: `409`. **One appeal per decision**, decided or not
+  (`uq_appeals_decision` on the target and the decision date), and one open
+  appeal per target (`uq_appeals_open_target` over a generated column that is
+  the target while open and `NULL` once decided). A later decision on the same
+  target, after the first was reversed, can be appealed in turn. Two
+  decisions on one target within the same second share a decision date, so
+  the second cannot be appealed.
+
+`POST /appeals` counts against `API_APPEAL_ACCOUNT_MAX` per
+`API_APPEAL_ACCOUNT_WINDOW_SECONDS`, 5 per account per day by default.
+
+**The decision is snapshotted.** `original_actor_id`, `original_reason` and
+`original_decided_at` are copied from the locked row in SQL when the appeal is
+filed, because reversing a removal or a suspension clears its columns. The
+administrators see them in every item (`original_decision`); the user never
+sees the original reason or who made or decided the decision, as in every
+moderation notification. `target.in_force` tells whether the appealed decision
+still stands: not reversed, not expired, and not replaced by a later decision.
+
+**Deciding.** Only an open appeal (`409` otherwise); `decision_note` (1–2,000
+characters) is required either way and is shown to the user. The transaction
+locks the target row, then the appeal row (the order filing takes), and updates
+the appeal conditionally (`WHERE status = 'open'`, checking `affectedRows`).
+Approving reverses the decision in the same transaction through the services
+the admin routes use: `AdminRestrictionsService.liftWithin`,
+`AdminContentService.restorePostWithin` / `restoreCommentWithin` and
+`AdminCommunitiesService.restoreWithin`, each writing its own audit entry (and
+for a restriction its `restriction_lifted` notification). A decision reversed
+or replaced meanwhile is left alone and the approval still succeeds
+(`reversed: false` in the audit entry). A comment whose post is removed
+cannot be restored (`409`, as on the admin route): restore the post first.
+Both outcomes write `appeal_approved` or `appeal_rejected` and notify the user
+(`appeal_decided`), unless the account was deleted.
+
+**Impartiality is enforced, not warned about.** The administrator who made the
+original decision, or who filed the appeal, gets `403` while any other
+administrator exists: an appeal is a second pair of eyes. A sole administrator
+may decide, or the appeal could never be.
+
+**Accounts.** `user_id` cascades, `decided_by` and `original_actor_id` are
+`SET NULL`; `chk_appeals_decision` ties `decided_at` and `decision_note` to the
+status (MySQL refuses a `CHECK` on a column a foreign key action writes, so
+not `decided_by`). An account deletion keeps its appeals, as it keeps reports
+and restrictions: they are the administrators' record of overturned decisions.
+
+**Not included.** Reopening a decided appeal, escalating a community
+moderator's decision to administrators when it is reported as abuse of the
+platform rules, and appeals of community bans.
+
 ## Notifications
 
 Notifications are stored in the `notifications` table (migration
@@ -7095,6 +7208,7 @@ the triggering `subject_type`/`subject_id`, an optional `community_id`, a
 | `mention` | someone writes @the_recipient in a post or comment (`MentionService`, migration 045; see [Mentions](#mentions)) | the post or comment |
 | `modmail_message` | a message in a [modmail](#modmail) thread: to the user from the team, to the team from the user (migration 046) | the message (`subject_type: modmail_message`) |
 | `new_follower` | someone [follows](#following-users) the recipient for the first time, unless `notify_new_followers` is off (`UserFollowsService.follow`, migration 047) | the follower's account (`subject_type: user`) |
+| `appeal_decided` | an administrator approves or rejects the recipient's [appeal](#appeals) (`AdminAppealsService.decide`, migration 048); metadata `status`, `appeal_target_type`, `decision_note`, never the administrator | the appeal (`subject_type: appeal`) |
 
 Adding a type requires a migration, as for the other enums.
 

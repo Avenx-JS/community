@@ -1,4 +1,13 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { RestrictedAccountResponse } from '../common/openapi';
+
+export class AuthRestrictionResponse extends RestrictedAccountResponse {
+  @ApiProperty({
+    description:
+      'The restriction: target_id of POST /appeals with target_type restriction.',
+  })
+  id!: string;
+}
 import type { AuthResponse } from './auth.service';
 
 export class PasswordForgotResponse {
@@ -36,6 +45,16 @@ export class AuthTokensResponse implements AuthResponse {
 
   @ApiProperty({ type: AuthUserResponse })
   user!: AuthUserResponse;
+
+  @ApiPropertyOptional({
+    type: AuthRestrictionResponse,
+    description:
+      'Present only for a suspended or banned account. Its session reaches ' +
+      'only the routes available to restricted accounts (appeals, reading ' +
+      'notifications and modmail, sessions, password change); every other ' +
+      'route answers 403 with this same body.',
+  })
+  restriction?: AuthRestrictionResponse;
 }
 
 export class SessionResponse {

@@ -550,6 +550,9 @@ const NOT_VISIBILITY_CHECKS = [
   // Ownership, not visibility: a suspended community still exists, so its
   // creator still owns it.
   'users/account-deletion.service.ts',
+  // The suspension as the decision appealed, not visibility: whether it is
+  // still in force (migration 048).
+  'appeals/appeal-targets.ts',
 ];
 
 describe('the shared community visibility predicate', () => {

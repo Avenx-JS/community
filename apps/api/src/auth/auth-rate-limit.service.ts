@@ -50,6 +50,7 @@ interface AuthRateLimitConfig {
   autocompleteAccount: RateLimitOptions;
   usernameAvailableIp: RateLimitOptions;
   followAccount: RateLimitOptions;
+  appealAccount: RateLimitOptions;
   communityNameAvailableAccount: RateLimitOptions;
   mediaUploadIp: RateLimitOptions;
   mediaUploadAccount: RateLimitOptions;
@@ -119,6 +120,7 @@ function readConfig(): AuthRateLimitConfig {
     autocompleteAccount: readOptions('API_AUTOCOMPLETE_ACCOUNT', 60, 60),
     usernameAvailableIp: readOptions('AUTH_USERNAME_AVAILABLE_IP', 30, 60),
     followAccount: readOptions('API_FOLLOW_ACCOUNT', 60, 3600),
+    appealAccount: readOptions('API_APPEAL_ACCOUNT', 5, 86400),
     communityNameAvailableAccount: readOptions(
       'API_COMMUNITY_NAME_AVAILABLE_ACCOUNT',
       30,
@@ -404,6 +406,16 @@ export class AuthRateLimitService {
     ) {
       signals.push(
         this.signal('api:follow:account', accountId, this.config.followAccount),
+      );
+    }
+
+    // Appeals: each lands in the administrators' queue, and a restricted
+    // account can reach no other write. One appeal per decision already
+    // bounds them; this bounds the refusals and the probing. Per account, a
+    // day.
+    if (method === 'POST' && path === '/appeals' && accountId) {
+      signals.push(
+        this.signal('api:appeal:account', accountId, this.config.appealAccount),
       );
     }
 

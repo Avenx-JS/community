@@ -429,9 +429,11 @@ CREATE TABLE admin_actions (
         'comment_restored',
         'community_owner_changed',
         'community_moderator_added',
-        'community_moderator_removed'
+        'community_moderator_removed',
+        'appeal_approved',
+        'appeal_rejected'
     ) NOT NULL,
-    target_type ENUM('user', 'report', 'restriction', 'community', 'post', 'comment') NOT NULL,
+    target_type ENUM('user', 'report', 'restriction', 'community', 'post', 'comment', 'appeal') NOT NULL,
     target_id VARCHAR(36) NOT NULL,
     metadata JSON NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -461,10 +463,11 @@ CREATE TABLE notifications (
         'community_moderator_assigned',
         'mention',
         'modmail_message',
-        'new_follower'
+        'new_follower',
+        'appeal_decided'
     ) NOT NULL,
     actor_id VARCHAR(36) NULL,
-    subject_type ENUM('post', 'comment', 'report', 'restriction', 'community', 'modmail_message', 'user') NOT NULL,
+    subject_type ENUM('post', 'comment', 'report', 'restriction', 'community', 'modmail_message', 'user', 'appeal') NOT NULL,
     subject_id VARCHAR(36) NOT NULL,
     community_id VARCHAR(36) NULL,
     metadata JSON NULL,
@@ -1075,6 +1078,38 @@ CREATE TABLE user_follows (
 ALTER TABLE user_preferences
   ADD COLUMN notify_new_followers BOOLEAN NOT NULL DEFAULT TRUE;
 
+-- Appeals of administrators' decisions (048_create_appeals).
+-- Its enum members are in CREATE TABLE admin_actions and notifications above.
+CREATE TABLE appeals (
+    id VARCHAR(36) PRIMARY KEY,
+    user_id VARCHAR(36) NOT NULL,
+    target_type ENUM('restriction', 'post_removal', 'comment_removal', 'community_suspension') NOT NULL,
+    target_id VARCHAR(36) NOT NULL,
+    reason TEXT NOT NULL,
+    original_actor_id VARCHAR(36) NULL,
+    original_reason TEXT NULL,
+    original_decided_at TIMESTAMP NOT NULL,
+    status ENUM('open', 'approved', 'rejected') NOT NULL DEFAULT 'open',
+    decision_note TEXT NULL,
+    decided_by VARCHAR(36) NULL,
+    decided_at TIMESTAMP NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    open_target_id VARCHAR(36) GENERATED ALWAYS AS (CASE WHEN status = 'open' THEN target_id END) STORED,
+    UNIQUE KEY uq_appeals_decision (target_type, target_id, original_decided_at),
+    UNIQUE KEY uq_appeals_open_target (target_type, open_target_id),
+    INDEX idx_appeals_queue (status, created_at, id),
+    INDEX idx_appeals_user (user_id, created_at, id),
+    INDEX idx_appeals_original_actor (original_actor_id),
+    INDEX idx_appeals_decided_by (decided_by),
+    CONSTRAINT chk_appeals_decision CHECK ((status = 'open') = (decided_at IS NULL) AND (status = 'open') = (decision_note IS NULL)),
+    CONSTRAINT fk_appeals_user
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_appeals_original_actor
+        FOREIGN KEY (original_actor_id) REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT fk_appeals_decided_by
+        FOREIGN KEY (decided_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
 CREATE TABLE schema_migrations (
     version VARCHAR(64) PRIMARY KEY,
     applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -1128,4 +1163,5 @@ INSERT INTO schema_migrations (version) VALUES
     ('044_add_admin_community_ownership'),
     ('045_add_mentions'),
     ('046_create_modmail'),
-    ('047_create_user_follows');
+    ('047_create_user_follows'),
+    ('048_create_appeals');

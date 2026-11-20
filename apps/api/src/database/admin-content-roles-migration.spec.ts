@@ -7,6 +7,7 @@ import {
 } from '../admin/audit-log.service';
 import {
   ADMIN_ACTION_ADDITIONS,
+  ADMIN_ACTION_TARGET_ADDITIONS,
   appendedBy,
   enumThrough,
 } from './enum-history';
@@ -47,13 +48,18 @@ describe('migration 041 (admin content and roles)', () => {
   it('appends the content actions and targets, in the order of the constants', () => {
     // The actions as 041 left them; later migrations append (enum-history.ts).
     const actions = enumThrough(ADMIN_ACTIONS, ADMIN_ACTION_ADDITIONS, '041');
+    const targets = enumThrough(
+      ADMIN_ACTION_TARGETS,
+      ADMIN_ACTION_TARGET_ADDITIONS,
+      '041',
+    );
     expect(actions.slice(-4)).toEqual(
       appendedBy(ADMIN_ACTION_ADDITIONS, '041'),
     );
-    expect(ADMIN_ACTION_TARGETS.slice(-2)).toEqual(['post', 'comment']);
+    expect(targets.slice(-2)).toEqual(['post', 'comment']);
     expect(enums).toBe(
       `MODIFY COLUMN action ENUM( ${enumList(actions)} ) NOT NULL, ` +
-        `MODIFY COLUMN target_type ENUM(${enumList(ADMIN_ACTION_TARGETS)}) NOT NULL;`,
+        `MODIFY COLUMN target_type ENUM(${enumList(targets)}) NOT NULL;`,
     );
   });
 

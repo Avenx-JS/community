@@ -304,11 +304,17 @@ describe('Auth endpoints (e2e)', () => {
           [],
         ]);
       }
-      if (sql.startsWith('SELECT type, expires_at')) {
+      if (sql.startsWith('SELECT id, type, expires_at')) {
         const [userId] = values as [string];
         return Promise.resolve([
           restrictedUserIds.has(userId)
-            ? [{ type: 'suspension', expires_at: null }]
+            ? [
+                {
+                  id: `restriction-${userId}`,
+                  type: 'suspension',
+                  expires_at: null,
+                },
+              ]
             : [],
           [],
         ]);
@@ -438,7 +444,7 @@ describe('Auth endpoints (e2e)', () => {
       if (sql.startsWith('SELECT token_hash FROM auth_refresh_tokens')) {
         return Promise.resolve([[], []]);
       }
-      if (sql.startsWith('SELECT type, expires_at')) {
+      if (sql.startsWith('SELECT id, type, expires_at')) {
         return Promise.resolve([[], []]);
       }
       // Password change, through the real AuthService.
@@ -1644,14 +1650,22 @@ describe('Auth endpoints (e2e)', () => {
         );
       });
 
-      it('lets a restricted account reset, and still refuses it at login', async () => {
+      // Login signs a restricted account in (to appeal), saying so.
+      it('lets a restricted account reset, and signs it in restricted', async () => {
         await register();
         restrictedUserIds.add(users[0].id);
         await reset(await requestToken()).expect(204);
         await expect(argon2Verify(users[0].password_hash, NEXT)).resolves.toBe(
           true,
         );
-        await login(NEXT).expect(403);
+        await login(NEXT)
+          .expect(200)
+          .expect(({ body }) => {
+            expect((body as { restriction: unknown }).restriction).toEqual({
+              id: `restriction-${users[0].id}`,
+              type: 'suspension',
+            });
+          });
       });
 
       it('refuses a link issued before the account was deleted', async () => {

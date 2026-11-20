@@ -492,8 +492,7 @@ export class AdminContentService {
     actorId: string,
   ): Promise<AdminPostDetail> {
     return inTransaction(this.pool, async (connection) => {
-      const post = await this.lock(connection, LOCK_POST_SQL, id, 'Post');
-      await this.restore(connection, 'post', post, input.reason, actorId);
+      await this.restorePostWithin(connection, id, input.reason, actorId);
       return this.findPost(id, connection);
     });
   }
@@ -506,20 +505,41 @@ export class AdminContentService {
     actorId: string,
   ): Promise<AdminCommentDetail> {
     return inTransaction(this.pool, async (connection) => {
-      const comment = await this.lock(
-        connection,
-        LOCK_COMMENT_SQL,
-        id,
-        'Comment',
-      );
-      if (comment.removed_at !== null && comment.post_removed_at) {
-        throw new ConflictException(
-          'The post of this comment is removed; restore the post first',
-        );
-      }
-      await this.restore(connection, 'comment', comment, input.reason, actorId);
+      await this.restoreCommentWithin(connection, id, input.reason, actorId);
       return this.findComment(id, connection);
     });
+  }
+
+  // The restorations inside the caller's transaction: also an approved
+  // appeal's reversal (AppealsService), with the same checks and audit entry.
+  async restorePostWithin(
+    connection: PoolConnection,
+    id: string,
+    reason: string,
+    actorId: string,
+  ): Promise<void> {
+    const post = await this.lock(connection, LOCK_POST_SQL, id, 'Post');
+    await this.restore(connection, 'post', post, reason, actorId);
+  }
+
+  async restoreCommentWithin(
+    connection: PoolConnection,
+    id: string,
+    reason: string,
+    actorId: string,
+  ): Promise<void> {
+    const comment = await this.lock(
+      connection,
+      LOCK_COMMENT_SQL,
+      id,
+      'Comment',
+    );
+    if (comment.removed_at !== null && comment.post_removed_at) {
+      throw new ConflictException(
+        'The post of this comment is removed; restore the post first',
+      );
+    }
+    await this.restore(connection, 'comment', comment, reason, actorId);
   }
 
   private async lock(

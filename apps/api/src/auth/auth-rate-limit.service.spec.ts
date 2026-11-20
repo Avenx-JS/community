@@ -560,6 +560,41 @@ describe('AuthRateLimitService', () => {
     },
   );
 
+  // Appeals land in the administrators' queue (migration 048): a bucket per
+  // account for POST /appeals only.
+  it.each([
+    ['POST', '/appeals', true],
+    ['GET', '/users/me/appeals', false],
+    ['PATCH', '/admin/appeals/a-1', false],
+    ['POST', '/appeals/extra', false],
+  ])(
+    'counts %s %s against the appeal bucket: %s',
+    async (method, path, counted) => {
+      const hmac = (scope: string, value: string) =>
+        createHmac(
+          'sha256',
+          process.env.RATE_LIMIT_HASH_SECRET ??
+            process.env.MYSQL_PASSWORD ??
+            'community-local-rate-limit-secret',
+        )
+          .update(scope)
+          .update(' ')
+          .update(value)
+          .digest('hex');
+
+      await service.enforceApiRequest('192.0.2.10', method, path, 'account-1');
+
+      const keys = calls
+        .filter((call) => call.sql.startsWith('INSERT INTO auth_rate_limits'))
+        .map((call) => call.values[0]);
+      if (counted) {
+        expect(keys).toContain(hmac('api:appeal:account', 'account-1'));
+      } else {
+        expect(keys).not.toContain(hmac('api:appeal:account', 'account-1'));
+      }
+    },
+  );
+
   it.each([
     ['GET', '/media'],
     ['GET', '/media/some-id/file'],

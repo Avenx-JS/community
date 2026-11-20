@@ -17,6 +17,11 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 import { MYSQL_POOL } from '../src/auth/auth.service';
+import {
+  existingAppealSql,
+  insertAppealSql,
+  lockAppealTargetSql,
+} from '../src/appeals/appeal-targets';
 import { AuthRateLimitService } from '../src/auth/auth-rate-limit.service';
 import { SafeApiExceptionFilter } from '../src/common/safe-api-exception.filter';
 import { createRulesStore } from './fakes/community-rules-store';
@@ -82,6 +87,8 @@ describe('Admin restrictions API (e2e)', () => {
   let failRevocation: boolean;
   let notificationRows: Array<Record<string, unknown>>;
   let failNotificationInsert: boolean;
+  // Appeals (migration 048), as far as filing and listing one's own go.
+  let appeals: Array<Record<string, unknown>>;
 
   beforeAll(async () => {
     passwordHash = await hash(PASSWORD, {
@@ -124,6 +131,7 @@ describe('Admin restrictions API (e2e)', () => {
     failRevocation = false;
     notificationRows = [];
     failNotificationInsert = false;
+    appeals = [];
 
     const activeRestriction = (userId: unknown) =>
       restrictions.find((row) => row.user_id === userId && isActive(row));
@@ -202,7 +210,7 @@ describe('Admin restrictions API (e2e)', () => {
       if (sql.startsWith('UPDATE users SET password_hash')) {
         return result({ affectedRows: 1 });
       }
-      if (sql.startsWith('SELECT type, expires_at')) {
+      if (sql.startsWith('SELECT id, type, expires_at')) {
         const restriction = activeRestriction(values[0]);
         return result(restriction ? [restriction] : []);
       }
@@ -395,6 +403,62 @@ describe('Admin restrictions API (e2e)', () => {
       // The global notification default on joining (migration 037).
       if (sql.startsWith('INSERT INTO community_notification_preferences')) {
         return Promise.resolve([{ affectedRows: 0 }, []]);
+      }
+      // Appeals: the restriction as the locked target, and the rows filed.
+      if (sql === lockAppealTargetSql('restriction')) {
+        const row = restrictions.find((entry) => entry.id === values[1]);
+        return result(
+          row
+            ? [
+                {
+                  owner_id: row.user_id,
+                  in_force: isActive(row) ? 1 : 0,
+                  by_admin: 1,
+                  in_window: 1,
+                  community_name: null,
+                },
+              ]
+            : [],
+        );
+      }
+      if (sql === existingAppealSql('restriction')) {
+        return result(
+          appeals.filter(
+            (appeal) =>
+              appeal.target_type === values[0] &&
+              appeal.target_id === values[1],
+          ),
+        );
+      }
+      if (sql === insertAppealSql('restriction')) {
+        const [id, userId, targetType, reason, targetId] = values as string[];
+        appeals.push({
+          id,
+          user_id: userId,
+          target_type: targetType,
+          target_id: targetId,
+          reason,
+          status: 'open',
+          decision_note: null,
+          created_at: new Date('2026-11-20T10:00:00Z'),
+          decided_at: null,
+        });
+        return result({ affectedRows: 1 });
+      }
+      if (sql.startsWith('SELECT id, target_type, target_id, reason, status')) {
+        return result(
+          appeals.filter(
+            (appeal) => appeal.id === values[0] || appeal.user_id === values[0],
+          ),
+        );
+      }
+      if (sql.startsWith('SELECT COUNT(*) AS total FROM appeals')) {
+        return result([
+          {
+            total: appeals.filter((appeal) => appeal.user_id === values[0])
+              .length,
+          },
+        ]);
       }
       return Promise.reject(new Error(`Unexpected SQL query: ${sql}`));
     };
@@ -594,25 +658,90 @@ describe('Admin restrictions API (e2e)', () => {
     expect(revokedUsers).toHaveLength(0);
   });
 
-  it('applies, then denies the restricted account on its existing token and at login', async () => {
+  // Login signs a restricted account in, so that it can appeal (POST
+  // /appeals); the new session is still refused everywhere else.
+  it('applies, revokes the existing token, and confines a new sign-in', async () => {
     const target = as('target-token');
     await target.post('/communities/general/subscribe').expect(204);
 
-    await admin
+    const applied = await admin
       .post(applyPath)
       .send({ type: 'ban', reason: 'Abuse' })
       .expect(201);
     expect(revokedUsers).toEqual(['target-id']);
 
     await target.post('/communities/general/subscribe').expect(401);
-    await request(app.getHttpServer())
+    const login = await request(app.getHttpServer())
       .post('/auth/login')
       .send({ identifier: 'target', password: PASSWORD })
+      .expect(200);
+    const { accessToken, restriction } = login.body as {
+      accessToken: string;
+      restriction: unknown;
+    };
+    expect(restriction).toEqual({
+      id: (applied.body as RestrictionResponse).id,
+      type: 'ban',
+    });
+    expect(JSON.stringify(login.body)).not.toContain('Abuse');
+    await as(accessToken)
+      .post('/communities/general/subscribe')
       .expect(403)
       .expect(({ body }) => {
-        expect(JSON.stringify(body)).toContain('ban');
-        expect(JSON.stringify(body)).not.toContain('Abuse');
+        expect(body).toEqual({ type: 'ban' });
       });
+  });
+
+  // The reason restricted accounts sign in at all (migration 048).
+  it('lets a banned account appeal its ban once and see the appeal', async () => {
+    const applied = await admin
+      .post(applyPath)
+      .send({ type: 'ban', reason: 'Abuse' })
+      .expect(201);
+    const { id } = applied.body as RestrictionResponse;
+    const login = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ identifier: 'target', password: PASSWORD })
+      .expect(200);
+    const banned = as((login.body as { accessToken: string }).accessToken);
+    const body = {
+      target_type: 'restriction',
+      target_id: id,
+      reason: 'I was banned by mistake.',
+    };
+
+    await banned
+      .post('/appeals')
+      .send({ ...body, reason: 'too short' })
+      .expect(400);
+    await banned
+      .post('/appeals')
+      .send(body)
+      .expect(201)
+      .expect(({ body: appeal }) => {
+        expect(appeal).toMatchObject({
+          target_type: 'restriction',
+          target_id: id,
+          reason: 'I was banned by mistake.',
+          status: 'open',
+          decision_note: null,
+        });
+        // Never the original reason.
+        expect(JSON.stringify(appeal)).not.toContain('Abuse');
+      });
+    await banned.post('/appeals').send(body).expect(409);
+    // Someone else's restriction is not theirs to appeal, nor to learn of.
+    await as('user-token').post('/appeals').send(body).expect(404);
+
+    await banned
+      .get('/users/me/appeals')
+      .expect(200)
+      .expect(({ body: list }) => {
+        expect(list).toMatchObject({ total: 1, page: 1, limit: 20 });
+        expect((list as { items: unknown[] }).items).toHaveLength(1);
+      });
+    // The admin queue is still the administrators' alone.
+    await banned.get('/admin/appeals').expect(403);
   });
 
   it('keeps the restriction and still denies old tokens when revocation fails', async () => {

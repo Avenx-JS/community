@@ -8,6 +8,7 @@ import { PostsModule } from './posts/posts.module';
 import { CommentsModule } from './comments/comments.module';
 import { VotesModule } from './votes/votes.module';
 import { AdminModule } from './admin/admin.module';
+import { AppealsModule } from './appeals/appeals.module';
 import { ReportsModule } from './reports/reports.module';
 import { SearchModule } from './search/search.module';
 import { MediaModule } from './media/media.module';
@@ -28,6 +29,7 @@ import { QueuesModule } from './queues/queues.module';
     CommentsModule,
     VotesModule,
     AdminModule,
+    AppealsModule,
     ReportsModule,
     SearchModule,
     MediaModule,

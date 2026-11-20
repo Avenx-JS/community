@@ -150,6 +150,13 @@ export const EXPORT_SECTIONS: Array<[string, string]> = [
     'modmail_messages',
     'SELECT c.name AS community, t.subject, t.status, m.is_moderator AS from_moderators, m.body, m.created_at FROM modmail_threads t JOIN communities c ON c.id = t.community_id JOIN modmail_messages m ON m.thread_id = t.id WHERE t.user_id = ? ORDER BY t.created_at, t.id, m.created_at, m.id',
   ],
+  // Appeals (migration 048): the account's own appeals and the decision
+  // notes it was shown. Never the original decision's reason or who made or
+  // decided it: those are the administrators'.
+  [
+    'appeals',
+    'SELECT target_type, target_id, reason, status, decision_note, created_at, decided_at FROM appeals WHERE user_id = ? ORDER BY created_at, id',
+  ],
   [
     'sessions',
     'SELECT created_at, last_used_at, ip_prefix, user_agent FROM auth_sessions WHERE user_id = ? ORDER BY created_at',

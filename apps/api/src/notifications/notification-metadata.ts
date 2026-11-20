@@ -22,6 +22,8 @@ export const NOTIFICATION_TYPES = [
   'modmail_message',
   // Migration 047: someone followed the recipient.
   'new_follower',
+  // Migration 048: an administrator decided the recipient's appeal.
+  'appeal_decided',
 ] as const;
 
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
@@ -36,6 +38,8 @@ export const NOTIFICATION_SUBJECT_TYPES = [
   'modmail_message',
   // Migration 047: an account, the follower of new_follower.
   'user',
+  // Migration 048: an appeal, of appeal_decided.
+  'appeal',
 ] as const;
 
 export type NotificationSubjectType =
@@ -53,6 +57,7 @@ export const MODERATION_NOTIFICATION_TYPES: readonly NotificationType[] = [
   'community_moderator_assigned',
   // The team's replies never name the moderator who wrote them.
   'modmail_message',
+  'appeal_decided',
 ];
 
 // Optional snapshot of the actor and community, kept so a row stays readable
@@ -176,6 +181,26 @@ export type NotificationEntry =
       subjectId: string;
       communityId: null;
       metadata: { actor_username?: string };
+    }
+  // An administrator's decision on the recipient's appeal (migration 048).
+  // The note is the administrator's message to the user and is shown; the
+  // administrator is never named.
+  | {
+      recipientId: string;
+      type: 'appeal_decided';
+      actorId: null;
+      subjectType: 'appeal';
+      subjectId: string;
+      communityId: null;
+      metadata: {
+        status: 'approved' | 'rejected';
+        appeal_target_type:
+          | 'restriction'
+          | 'post_removal'
+          | 'comment_removal'
+          | 'community_suspension';
+        decision_note?: string;
+      };
     }
   // The author is named: a mention is someone addressing the recipient.
   | {
@@ -304,6 +329,11 @@ const entryShapes: Record<
     hasActor: true,
     hasCommunity: false,
   },
+  appeal_decided: {
+    subjectTypes: ['appeal'],
+    hasActor: false,
+    hasCommunity: false,
+  },
 };
 
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9_-]{1,36}$/;
@@ -324,6 +354,8 @@ export const NOTIFICATION_SNAPSHOT_LIMITS = {
   excerpt: 200,
   // modmail_threads.subject is VARCHAR(200).
   thread_subject: 200,
+  // The appeal decision note, bounded at 2000 by the route.
+  decision_note: 2000,
 } as const;
 
 function isIdentifier(value: unknown): value is string {
@@ -508,6 +540,22 @@ export function buildNotificationMetadata(
       break;
     case 'new_follower':
       fields.push(['actor_username', nameValue(metadata, 'actor_username')]);
+      break;
+    case 'appeal_decided':
+      // Never the administrator who decided.
+      fields.push(
+        ['status', enumValue(metadata, 'status', ['approved', 'rejected'])],
+        [
+          'appeal_target_type',
+          enumValue(metadata, 'appeal_target_type', [
+            'restriction',
+            'post_removal',
+            'comment_removal',
+            'community_suspension',
+          ]),
+        ],
+        ['decision_note', snapshotValue(metadata, 'decision_note')],
+      );
       break;
     case 'modmail_message':
       // Never the moderator who wrote a reply.

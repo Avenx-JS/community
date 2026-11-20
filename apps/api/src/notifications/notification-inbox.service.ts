@@ -68,6 +68,9 @@ const RETURNED_METADATA_KEYS = [
   'thread_subject',
   'sender',
   'from_username',
+  // appeal_decided (migration 048); status is shared with report_resolved.
+  'appeal_target_type',
+  'decision_note',
 ] as const;
 
 function parseMetadata(value: unknown): Record<string, unknown> {

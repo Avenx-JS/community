@@ -15,7 +15,6 @@ import {
 } from '@nestjs/common';
 import {
   ApiCreatedResponse,
-  ApiForbiddenResponse,
   ApiNoContentResponse,
   ApiOkResponse,
   ApiOperation,
@@ -27,7 +26,6 @@ import {
   ApiAuthenticated,
   ApiErrorResponses,
   ErrorResponse,
-  RestrictedAccountResponse,
 } from '../common/openapi';
 import {
   AuthTokensResponse,
@@ -118,17 +116,16 @@ export class AuthController {
     summary: 'Log in',
     description:
       'Accepts a username or email as identifier. Rate limited per client ' +
-      'IP and identifier.',
+      'IP and identifier. A suspended or banned account signs in too, so ' +
+      'that it can appeal (POST /appeals): the response then carries ' +
+      'restriction, and the session reaches only the routes available to ' +
+      'restricted accounts.',
   })
   @ApiOkResponse({ type: AuthTokensResponse })
   @ApiErrorResponses({ 400: 'Invalid login data.' })
   @ApiUnauthorizedResponse({
     type: ErrorResponse,
     description: 'Invalid credentials.',
-  })
-  @ApiForbiddenResponse({
-    type: RestrictedAccountResponse,
-    description: 'The account is suspended or banned.',
   })
   async login(
     @Body() body: LoginDto,
@@ -151,17 +148,14 @@ export class AuthController {
     summary: 'Rotate tokens',
     description:
       'Exchanges a refresh token for a new token pair. Each refresh token ' +
-      'is single-use; presenting a used one revokes the whole session.',
+      'is single-use; presenting a used one revokes the whole session. ' +
+      'restriction is present while the account is suspended or banned.',
   })
   @ApiOkResponse({ type: AuthTokensResponse })
   @ApiErrorResponses({ 400: 'Invalid refresh token format.' })
   @ApiUnauthorizedResponse({
     type: ErrorResponse,
     description: 'Invalid, expired, or reused refresh token.',
-  })
-  @ApiForbiddenResponse({
-    type: RestrictedAccountResponse,
-    description: 'The account is suspended or banned.',
   })
   async refresh(
     @Body() body: RefreshDto,

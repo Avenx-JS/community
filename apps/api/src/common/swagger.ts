@@ -75,6 +75,10 @@ export function createOpenApiDocument(app: INestApplication): OpenAPIObject {
       'modmail',
       'Conversations between a user and a community moderator team. Private messages between users are out of scope.',
     )
+    .addTag(
+      'appeals',
+      "Appealing a platform administrator's decision that affects you. A community moderator's decision is appealed through modmail.",
+    )
     .addTag('admin: users', 'Account directory for administrators.')
     .addTag(
       'admin: communities',
@@ -82,6 +86,7 @@ export function createOpenApiDocument(app: INestApplication): OpenAPIObject {
     )
     .addTag('admin: reports', 'Report review queue.')
     .addTag('admin: restrictions', 'Suspensions and bans.')
+    .addTag('admin: appeals', "Users' appeals of administrators' decisions.")
     .addTag('admin: audit log', 'Append-only record of administrative actions.')
     .addTag(
       'community-moderation',

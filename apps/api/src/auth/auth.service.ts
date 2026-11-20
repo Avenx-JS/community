@@ -2,7 +2,6 @@ import { SessionEvents } from './session-events';
 import {
   BadRequestException,
   ConflictException,
-  ForbiddenException,
   Inject,
   Injectable,
   Logger,
@@ -163,6 +162,7 @@ interface SessionUserRow extends RowDataPacket {
 }
 
 interface ActiveRestrictionRow extends RowDataPacket {
+  id: string;
   type: 'suspension' | 'ban';
   expires_at: Date | string | null;
 }
@@ -200,6 +200,8 @@ export interface LoginInput {
 export interface ActiveRestriction {
   type: 'suspension' | 'ban';
   expires_at: string | null;
+  // Read at login and refresh only, for AuthResponse.restriction.
+  id?: string;
 }
 
 export type AccessTokenValidationResult =
@@ -219,6 +221,16 @@ export interface AuthResponse {
     id: string;
     username: string;
   };
+  // Present only for a suspended or banned account: its session reaches the
+  // @AllowRestricted() routes only (appeals, reading notifications and
+  // modmail, sessions, password), and every other route answers 403 with
+  // this body. id is the restriction, the target_id of POST /appeals.
+  restriction?: RestrictionPayload & { id: string };
+}
+
+export interface RestrictionPayload {
+  type: 'suspension' | 'ban';
+  expires_at?: string;
 }
 
 @Injectable()
@@ -319,12 +331,11 @@ export class AuthService {
       user.password_hash = passwordHash;
     }
 
+    // A restricted account signs in, so it can appeal its restriction
+    // (POST /appeals): AuthGuard confines the session to @AllowRestricted()
+    // routes, and the response says why.
     const restriction = await this.getActiveRestriction(user.id);
-    if (restriction) {
-      throw new ForbiddenException(this.restrictionErrorPayload(restriction));
-    }
-
-    return this.createSession(user, origin);
+    return this.createSession(user, origin, restriction);
   }
 
   async validateAccessToken(token: string): Promise<string | null> {
@@ -842,7 +853,7 @@ export class AuthService {
     executor: Pool | PoolConnection = this.pool,
   ): Promise<ActiveRestriction | null> {
     const [rows] = await executor.execute<ActiveRestrictionRow[]>(
-      `SELECT type, expires_at
+      `SELECT id, type, expires_at
        FROM user_restrictions
        WHERE user_id = ? AND ${ACTIVE_USER_RESTRICTION_PREDICATE}
        LIMIT 1`,
@@ -853,6 +864,7 @@ export class AuthService {
       return null;
     }
     return {
+      id: restriction.id,
       type: restriction.type,
       expires_at:
         restriction.expires_at === null
@@ -861,10 +873,9 @@ export class AuthService {
     };
   }
 
-  private restrictionErrorPayload(restriction: ActiveRestriction): {
-    type: 'suspension' | 'ban';
-    expires_at?: string;
-  } {
+  private restrictionErrorPayload(
+    restriction: ActiveRestriction,
+  ): RestrictionPayload {
     return restriction.type === 'suspension'
       ? {
           type: restriction.type,
@@ -917,32 +928,12 @@ export class AuthService {
           throw new UnauthorizedException('Invalid or expired refresh token');
         }
 
+        // Rotated as for any account, as login signs a restricted one in;
+        // AuthGuard confines the session to @AllowRestricted() routes.
         const restriction = await this.getActiveRestriction(
           user.id,
           connection,
         );
-        if (restriction) {
-          if (restriction.type === 'ban') {
-            await connection.execute<ResultSetHeader>(
-              'DELETE FROM auth_sessions WHERE user_id = ?',
-              [user.id],
-            );
-            await connection.execute<ResultSetHeader>(
-              'UPDATE auth_refresh_tokens SET revoked_at = UTC_TIMESTAMP() WHERE user_id = ? AND revoked_at IS NULL',
-              [user.id],
-            );
-            transactionStarted = false;
-            await connection.commit();
-            throw new ForbiddenException(
-              this.restrictionErrorPayload(restriction),
-            );
-          }
-          transactionStarted = false;
-          await connection.commit();
-          throw new ForbiddenException(
-            this.restrictionErrorPayload(restriction),
-          );
-        }
 
         const accessToken = randomBytes(32).toString('base64url');
         const nextRefreshToken = randomBytes(32).toString('base64url');
@@ -992,6 +983,7 @@ export class AuthService {
             accessExpiresAt,
             nextRefreshToken,
             refreshExpiresAt,
+            restriction,
           );
         }
       }
@@ -1022,6 +1014,7 @@ export class AuthService {
   private async createSession(
     user: UserRow,
     origin: ClientOrigin,
+    restriction: ActiveRestriction | null = null,
   ): Promise<AuthResponse> {
     const accessToken = randomBytes(32).toString('base64url');
     const refreshToken = randomBytes(32).toString('base64url');
@@ -1065,6 +1058,7 @@ export class AuthService {
       accessExpiresAt,
       refreshToken,
       refreshExpiresAt,
+      restriction,
     );
   }
 
@@ -1074,6 +1068,7 @@ export class AuthService {
     accessExpiresAt: Date,
     refreshToken: string,
     refreshExpiresAt: Date,
+    restriction: ActiveRestriction | null = null,
   ): AuthResponse {
     return {
       accessToken,
@@ -1085,6 +1080,14 @@ export class AuthService {
         id: user.id,
         username: user.username,
       },
+      ...(restriction?.id
+        ? {
+            restriction: {
+              id: restriction.id,
+              ...this.restrictionErrorPayload(restriction),
+            },
+          }
+        : {}),
     };
   }
 

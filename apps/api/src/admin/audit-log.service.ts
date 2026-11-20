@@ -32,6 +32,9 @@ export const ADMIN_ACTIONS = [
   'community_owner_changed',
   'community_moderator_added',
   'community_moderator_removed',
+  // 048_create_appeals.
+  'appeal_approved',
+  'appeal_rejected',
 ] as const;
 
 export type AdminAction = (typeof ADMIN_ACTIONS)[number];
@@ -44,6 +47,8 @@ export const ADMIN_ACTION_TARGETS = [
   // 041_add_admin_content_and_roles.
   'post',
   'comment',
+  // 048_create_appeals.
+  'appeal',
 ] as const;
 
 export type AdminActionTarget = (typeof ADMIN_ACTION_TARGETS)[number];
@@ -181,7 +186,37 @@ export type AuditEntry =
       targetType: 'comment';
       targetId: string;
       metadata?: ContentActionMetadata;
+    }
+  // An administrator deciding a user's appeal (PATCH /admin/appeals/:id).
+  // An approval also writes the reversal's own entry (restriction_lifted,
+  // post_restored, comment_restored or community_restored), unless the
+  // decision had already been reversed.
+  | {
+      actorId: string;
+      action: 'appeal_approved' | 'appeal_rejected';
+      targetType: 'appeal';
+      targetId: string;
+      metadata?: AppealDecisionMetadata;
     };
+
+export const APPEAL_TARGET_TYPES = [
+  'restriction',
+  'post_removal',
+  'comment_removal',
+  'community_suspension',
+] as const;
+export type AppealTargetType = (typeof APPEAL_TARGET_TYPES)[number];
+
+// appeal_target_id is the restriction, post, comment or community appealed;
+// decision_note the administrator's note, which the user is shown too.
+// reversed: 'true' when the approval reversed the decision, 'false' when it
+// had already been reversed; absent on a rejection.
+export interface AppealDecisionMetadata {
+  appeal_target_type?: AppealTargetType;
+  appeal_target_id?: string;
+  decision_note?: string;
+  reversed?: 'true' | 'false';
+}
 
 // An administrator changing a community's owner or moderators
 // (/admin/communities/:id/owner and /moderators). username is the new owner
@@ -491,6 +526,25 @@ export function buildAuditMetadata(
       if (communityName !== undefined) result.community_name = communityName;
       if (previousState !== undefined) result.previous_state = previousState;
       if (reason !== undefined) result.reason = reason;
+      break;
+    }
+    case 'appeal_approved':
+    case 'appeal_rejected': {
+      const targetType = enumValue(
+        metadata,
+        'appeal_target_type',
+        APPEAL_TARGET_TYPES,
+      );
+      const targetId = identifierValue(metadata, 'appeal_target_id');
+      const note = reasonValue(metadata, 'decision_note');
+      const reversed =
+        entry.action === 'appeal_approved'
+          ? enumValue(metadata, 'reversed', ['true', 'false'])
+          : undefined;
+      if (targetType !== undefined) result.appeal_target_type = targetType;
+      if (targetId !== undefined) result.appeal_target_id = targetId;
+      if (note !== undefined) result.decision_note = note;
+      if (reversed !== undefined) result.reversed = reversed;
       break;
     }
   }
