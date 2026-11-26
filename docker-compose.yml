@@ -16,7 +16,7 @@ services:
       - db_data:/var/lib/mysql
 
   redis:
-    image: redis:7.2-alpine
+    image: redis:8.0-alpine
     container_name: redis_cache
     restart: always
     command: >
