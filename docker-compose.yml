@@ -41,7 +41,7 @@ services:
   # unbuffered (Server-Sent Events) and keeps it open; the API's heartbeat
   # keeps it from timing out. Set TRUST_PROXY_HOPS=1 for the API behind it.
   proxy:
-    image: nginx:1.27-alpine
+    image: nginx:1.29-alpine
     container_name: community_proxy
     profiles: ["proxy"]
     restart: always
