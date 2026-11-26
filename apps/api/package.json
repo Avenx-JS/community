@@ -24,7 +24,7 @@
   "dependencies": {
     "@nestjs/common": "^11.0.1",
     "@nestjs/core": "^11.0.1",
-    "@nestjs/platform-express": "^11.0.1",
+    "@nestjs/platform-express": "^12.6.0",
     "@nestjs/swagger": "^11.4.6",
     "argon2": "^0.45.1",
     "bullmq": "^6.7.7",
