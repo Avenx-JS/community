@@ -1,0 +1,38 @@
+# Dependabot: keeps the API's and the web client's dependencies up to date.
+# Runs once a month (first of the month, UTC). Unlike a published library,
+# this is a deployed application, so runtime dependencies are included: their
+# security fixes matter most.
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directories:
+      # NestJS, mysql2, bullmq, ...
+      - "/apps/api"
+      # Angular
+      - "/apps/web"
+    schedule:
+      interval: monthly
+    # Bump the range in package.json, not just the lockfile.
+    versioning-strategy: increase
+    # One PR per month for all minor/patch bumps; majors get their own PR so
+    # breaking changes (a new NestJS or Angular major) are reviewed on their
+    # own.
+    groups:
+      dependencies:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: chore
+      include: scope
+
+  # The MySQL and Redis images of the local development setup.
+  - package-ecosystem: docker-compose
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: chore
+      include: scope
